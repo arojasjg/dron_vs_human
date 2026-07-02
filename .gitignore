@@ -3,3 +3,5 @@ dist/
 scripts/shot-*.png
 *.log
 .DS_Store
+
+.claude/
