@@ -8,10 +8,18 @@ export class Net {
   onState?: (open: boolean) => void;
   private ws: WebSocket | null = null;
 
-  /** Connects to `ws://host:port?room=CODE`. Resolves the relay URL from ?net= or localhost. */
+  /** Connects to the relay for `room`. URL resolution: explicit ?net= wins; on localhost the relay is a
+   *  separate `npm run relay` on :8787; in production it's served SAME-ORIGIN by server/relay.mjs, so we
+   *  use wss://<this host> (works on Render/any HTTPS host without extra config). */
   connect(room: string): void {
     const params = new URLSearchParams(location.search);
-    const base = params.get("net") || `ws://${location.hostname || "localhost"}:8787`;
+    let base = params.get("net");
+    if (!base) {
+      const local = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+      base = local
+        ? `ws://${location.hostname}:8787`
+        : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
+    }
     const url = `${base}${base.includes("?") ? "&" : "?"}room=${encodeURIComponent(room)}`;
     try {
       this.ws = new WebSocket(url);

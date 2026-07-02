@@ -1,37 +1,55 @@
-# Particles — Constructor & Destrucción física
+# Dron vs Human
 
-Sandbox web donde construyes casas, muros, torres, vehículos u objetos con vóxeles
-de distintos materiales y los destruyes con física realista: abres **hoyos exactamente
-donde impactas**, todo se rompe en **muchísimas partes** que caen, chocan y son
-arrastradas por el **viento**, con **luz**, **sombras** y **reflejos** PBR.
+Juego web **multijugador** de **drones contra humanos** en una ciudad de vóxeles totalmente
+destructible: explosiones, disparos, escombros físicos y edificios que se derrumban, **sincronizado
+entre jugadores** desde distintas computadoras. Incluye además un sandbox de construcción/destrucción.
 
-Construido con **Three.js** (render) + **Rapier3D** (física, Rust→WASM) + **Vite** + **TypeScript**.
+Construido con **Three.js** (render) + **Rapier3D** (física, Rust→WASM) + **WebGL2/GPGPU** (partículas)
++ un **relay WebSocket** + **Vite** + **TypeScript**.
 
-## Cómo correr
+## Jugar
+
+- **Clic** en la pantalla captura el ratón · **Esc** lo suelta.
+- **WASD** moverse · **Espacio/Ctrl** subir/bajar · **Shift** turbo (dron).
+- **Clic izq** disparar · **1..4** cambiar de arma.
+- **Modos:** Libre (sandbox), VS (PvP), **Drones vs Humanos** (equipos + bases).
+  - Dron: vuela con **batería** limitada (se recarga en su base) · metralleta · granada · kamikaze.
+  - Humano: camina · metralleta · escopeta · lanzagranadas · red.
+  - Munición limitada recargable en la base; HUD con arma+balas, vida, batería, K/D/A y vida del equipo.
+- **Salas:** comparte el código de sala de la pantalla de inicio para jugar juntos.
+
+## Desarrollo local
 
 ```bash
 npm install
-npm run dev      # abre http://localhost:5173
+npm run dev      # cliente en http://localhost:5173
+npm run relay    # en OTRA terminal: relay WebSocket en :8787 (multijugador local)
+npm test         # suite de pruebas (vitest)
+npm run build    # build de producción → dist/
 ```
 
-Otros comandos:
+En dev el cliente se conecta al relay en `ws://localhost:8787`; fuerza otro con `?net=ws://host:puerto`.
 
-```bash
-npm run build    # type-check + bundle de producción
-npm run test     # tests (lógica de vóxeles, integridad, materiales, destrucción)
-npm run smoke    # smoke test headless en Edge (renderiza y detona la escena)
-```
+## Deploy a Render.com
 
-## Controles
+Un solo servicio Node **buildea el cliente y sirve `dist/` + el relay WebSocket en el mismo origen**,
+así el navegador llega al relay en `wss://<tu-host>` sin configuración extra (ver `server/relay.mjs`).
 
-- **Clic** en la pantalla captura el ratón · **Esc** lo suelta.
-- **WASD** moverse · **Espacio/Ctrl** subir/bajar · **Shift** turbo.
-- **Clic izq** usar herramienta · **Clic der** disparo rápido (perfora).
-- **Rueda** tamaño de brocha al construir.
-- **1** Disparar · **2** Granada · **3** Bola de cañón · **4** Construir · **5** Borrar.
-- **Q/E** cambiar material (madera, concreto, ladrillo, vidrio, metal).
-- **G** casa · **B** muro · **T** torre · **V** auto · **R** escena inicial · **C** vaciar.
-- **P** guardar · **L** cargar · **F** lanzar caja · **H** ocultar ayuda.
+1. Sube este repo a GitHub.
+2. En [render.com](https://render.com) → **New +** → **Blueprint** → elige este repositorio.
+   Render lee `render.yaml`: buildea con `npm install --include=dev && npm run build` y arranca con
+   `node server/relay.mjs`.
+3. Abre la URL de Render y comparte el código de sala.
+
+> El plan **free** de Render suspende el servicio tras ~15 min inactivo; la primera carga luego puede
+> tardar ~30 s (cold start).
+
+## Controles del sandbox (modo Libre)
+
+- **Clic izq** usar herramienta · **Clic der** disparo rápido (perfora) · **Rueda** brocha.
+- **1** Disparar · **2** Granada · **3** Bola de cañón · **4** Construir · **5** Borrar · **6** Misil.
+- **Q/E** material · **G** casa · **B** muro · **T** torre · **V** auto · **R** escena · **C** vaciar.
+- **P** guardar · **L** cargar · **F** lanzar caja · **K** calidad · **H** ocultar ayuda.
 
 ## Cómo funciona
 

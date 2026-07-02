@@ -1,0 +1,15 @@
+# Render Blueprint — one Node web service that builds the Vite client and serves it together with the
+# WebSocket relay on the same origin (so the browser reaches the relay at wss://<host> with no extra
+# config). Deploy: push this repo to GitHub, then on render.com → "New +" → "Blueprint" → pick the repo.
+services:
+  - type: web
+    name: dron-vs-human
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: node server/relay.mjs
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "20"

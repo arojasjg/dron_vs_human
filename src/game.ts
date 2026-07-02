@@ -6,6 +6,7 @@ import { Walker } from "./engine/walker";
 import { Input } from "./engine/input";
 import { PerfGovernor } from "./engine/perfGovernor";
 import { autoQuality, qualityConfig, QUALITY_ORDER, type Quality } from "./engine/quality";
+import { humanFallDamage, droneImpactDamage } from "./engine/falldamage";
 import { Physics, GROUP_GROUND } from "./engine/physics";
 import { Renderer } from "./engine/renderer";
 import { DebrisSystem } from "./destruction/debris";
@@ -24,6 +25,7 @@ import { Hud, type Mode, type Tool } from "./ui/hud";
 import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleMaxHp, roleWeapon, type Role } from "./net/roles";
+import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -91,6 +93,20 @@ export class Game {
   // weapon reload: a tool can't fire again until game time passes its readyAt
   private grenadeReadyAt = 0;
   private missileReadyAt = 0;
+  // --- team combat (vs/dvh): per-team weapon loadout, ammo, drone battery ---
+  private weapon: Weapon = "mg";
+  private readonly ammo: Record<Weapon, Ammo> = {
+    mg: fullAmmo(WEAPONS.mg), grenade: fullAmmo(WEAPONS.grenade), kamikaze: fullAmmo(WEAPONS.kamikaze),
+    shotgun: fullAmmo(WEAPONS.shotgun), glauncher: fullAmmo(WEAPONS.glauncher), net: fullAmmo(WEAPONS.net),
+  };
+  private weaponReadyAt = 0;      // shared per-shot cooldown gate
+  private battery = BATTERY_MAX;  // drone battery (drains with movement; 0 → fall & die)
+  private combatHudT = 0;         // throttle for the combat HUD panels
+  // personal scoreboard (K/D/A). Kills/assists are attributed by the victim's `died` broadcast.
+  private myKills = 0;
+  private myAssists = 0;
+  private myDeaths = 0;
+  private readonly damagers = new Map<number, number>(); // peer id → game time they last damaged me
   private rebuildAllColliders = false;
   private readonly dirtyChunks = new Set<number>();      // chunks whose MESH needs rebuilding (prompt)
   private readonly dirtyCol = new Map<number, number>(); // chunk → last-touched time; collider rebuilt once quiet
@@ -129,6 +145,7 @@ export class Game {
   private hp = MAX_HP;
   private netT = 0;          // throttle for state broadcasts
   private netSent = 0;       // diagnostic: count of state messages sent
+  private lastState: NetMsg | null = null; // last state sent — re-emitted by the background heartbeat
   private respawnAt = 0;     // when dead, time to respawn
   private spawnIndex = 0;    // which of the 4 spawn points this player uses (by network id)
 
@@ -241,7 +258,7 @@ export class Game {
     } else if (m.t === "weapon") {
       this.fireRemoteWeapon(m);
     } else if (m.t === "explode") {
-      this.explodeAt(m.x as number, m.y as number, m.z as number, m.r as number, m.p as number, false);
+      this.explodeAt(m.x as number, m.y as number, m.z as number, m.r as number, m.p as number, false, m.id as number);
     } else if (m.t === "hit") {
       this.applyBulletHit(
         m.vx as number, m.vy as number, m.vz as number, m.dx as number, m.dy as number, m.dz as number,
@@ -249,6 +266,8 @@ export class Game {
       );
     } else if (m.t === "died") {
       this.addKill(m.role as Role); // a peer died → the enemy team scores
+      if ((m.by as number) === this.net.id) { this.myKills++; this.hud.flash("¡Derribo!"); }
+      else if (Array.isArray(m.assist) && (m.assist as number[]).includes(this.net.id)) this.myAssists++;
     } else if (m.t === "leave") {
       this.remotes.remove(m.id as number);
     }
@@ -264,6 +283,8 @@ export class Game {
       this.player = wantWalker ? new Walker(this.physics) : new Player(this.physics);
     }
     this.hp = this.myMaxHp(); // humans spawn tankier than drones
+    this.weapon = roleLoadout(this.role)[0]; // start on the team's primary weapon
+    this.resupply();
     this.hud.setHealth(this.hp, this.myMaxHp(), true);
   }
 
@@ -318,10 +339,12 @@ export class Game {
   /** Per-frame networking: broadcast our drone state, drop stale peers, handle respawn. */
   private netUpdate(dt: number): void {
     this.remotes.prune();
+    this.remotes.update(dt); // ease remote peers between network samples → smooth, not stuttery
     // respawn works in every mode, even offline (blasts/debris can kill you in the sandbox too)
     if (this.hp <= 0 && this.time >= this.respawnAt) {
       this.hp = this.myMaxHp();
       this.spawnPlayerInBuilding();
+      this.resupply(); // full ammo + battery on respawn
       this.hud.setHealth(this.hp, this.myMaxHp(), true);
     }
     if (!this.net.connected) return;
@@ -330,13 +353,14 @@ export class Game {
     this.netT = 0.05; // ~20 Hz
     this.netSent++;
     const p = this.player.camera.position, q = this.player.camera.quaternion;
-    this.net.send({
+    this.lastState = {
       t: "state",
       x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2),
       qx: +q.x.toFixed(3), qy: +q.y.toFixed(3), qz: +q.z.toFixed(3), qw: +q.w.toFixed(3),
       hp: this.hp, mhp: this.myMaxHp(), role: this.role, // role → avatar; mhp → correct health bar
       dk: this.droneKills, hk: this.humanKills, // scoreboard → max-merged by peers (self-healing)
-    });
+    };
+    this.net.send(this.lastState);
   }
 
   /** Applies damage to our own drone (blasts + fast debris, in every mode) — computed locally on
@@ -348,12 +372,23 @@ export class Game {
     if (this.hp <= 0) {
       this.respawnAt = this.time + 3;
       this.hud.flash("Derribado — reapareces en 3s");
-      if (this.mode === "dvh") {
-        this.net.send({ t: "died", role: this.role }); // tell peers so the enemy team scores
-        this.addKill(this.role);                       // count it locally too (relay doesn't echo)
+      this.myDeaths++;
+      if (this.mode !== "free") {
+        // Attribute the kill: the most-recent damager (last ~6 s) is the killer; earlier ones assist.
+        let killer = 0, killerT = -1; const assist: number[] = [];
+        for (const [id, t] of this.damagers) {
+          if (this.time - t > 6) continue;
+          if (t > killerT) { if (killer) assist.push(killer); killer = id; killerT = t; } else assist.push(id);
+        }
+        this.damagers.clear();
+        this.net.send({ t: "died", role: this.role, by: killer, assist }); // peers score + credit the killer
+        if (this.mode === "dvh") this.addKill(this.role);                   // team score (relay doesn't echo)
       }
     }
   }
+
+  /** Records a peer as having just damaged us, for kill/assist attribution when we die. */
+  private recordDamager(by: number): void { if (by) this.damagers.set(by, this.time); }
 
   /**
    * Picks a safe GPU-particle buffer size. A detonation chain can light up almost the
@@ -389,8 +424,39 @@ export class Game {
     this.hud.flash(`Calidad: ${this.quality.toUpperCase()}${this.quality === "bajo" ? " · recargá para quitar el suavizado" : ""}`);
   }
 
+  /** True when the tab is hidden/blurred (its rAF loop is paused by the browser). */
+  private hidden(): boolean { return typeof document !== "undefined" && document.hidden; }
+
+  /** A hidden tab's rAF, timers AND worker messages get suspended by the browser to save power. A tab
+   *  running a live AudioContext is kept far more awake, which lets the Web Worker loop keep ticking
+   *  while hidden. Autoplay policy requires resuming the context from a user gesture, so we do it on
+   *  the first click/keypress (the same gestures that lock the pointer). */
+  private keepAwakeAudio(): void {
+    try {
+      const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AC) return;
+      const ac = new AC();
+      const osc = ac.createOscillator(), gain = ac.createGain();
+      gain.gain.value = 0; osc.connect(gain); gain.connect(ac.destination); osc.start(); // silent
+      const resume = () => { ac.resume().catch(() => {}); };
+      window.addEventListener("pointerdown", resume);
+      window.addEventListener("keydown", resume);
+    } catch { /* no audio → the tab still pauses when fully hidden */ }
+  }
+
   start(): void {
-    this.renderer.renderer.setAnimationLoop(() => this.frame());
+    this.keepAwakeAudio();
+    // rAF drives the loop at display rate while the tab is VISIBLE (smooth, vsync'd).
+    this.renderer.renderer.setAnimationLoop(() => { if (!this.hidden()) this.frame(); });
+    // rAF is PAUSED by the browser on a hidden/blurred tab, which would FREEZE the whole game (physics,
+    // networking, everything). A Web Worker timer is NOT visibility-throttled, so it keeps driving the
+    // loop while hidden — the game keeps running (and syncing) even when the window loses focus.
+    try {
+      const tick = new Worker(URL.createObjectURL(new Blob(["setInterval(()=>postMessage(0),16)"], { type: "text/javascript" })));
+      tick.onmessage = () => { if (this.hidden()) this.frame(); };
+    } catch { /* no Worker → the game pauses when hidden, as a plain rAF app would */ }
+    // Heartbeat fallback: re-emit the last state ~1 Hz so peers keep us even if the worker is unavailable.
+    setInterval(() => { if (this.net.connected && this.lastState) this.net.send(this.lastState); }, 1000);
   }
 
   /** Headless/debug helpers — used by the smoke test (no pointer-lock available there). */
@@ -689,7 +755,7 @@ export class Game {
     }
   }
 
-  private explodeAt(x: number, y: number, z: number, radius: number, power: number, broadcast = false): void {
+  private explodeAt(x: number, y: number, z: number, radius: number, power: number, broadcast = false, by = 0): void {
     // A player-initiated blast is authoritative: broadcast its exact position so EVERY client carves
     // identically. Cascades (gas chains, collapse) are deterministic on the synced grid, so they run
     // locally on each client and are NOT broadcast (broadcast stays false for those calls).
@@ -709,7 +775,7 @@ export class Game {
       const p = this.player.camera.position;
       const dr = radius * 1.5;
       const dist = Math.hypot(p.x - x, p.y - y, p.z - z);
-      if (dist < dr) this.damageDrone(Math.round((1 - dist / dr) * 55));
+      if (dist < dr) { this.recordDamager(by); this.damageDrone(Math.round((1 - dist / dr) * 55)); }
     }
   }
 
@@ -842,11 +908,8 @@ export class Game {
     const origin = this.player.camera.position;
     const dir = this.player.forward(this.tmpDir).clone();
 
-    // VS is weapons-only (no construction / cannon) — force a weapon if a build tool is active
-    if (this.mode === "vs" && (this.tool === "build" || this.tool === "erase" || this.tool === "cannon")) {
-      this.tool = "shoot";
-      this.hud.setTool("shoot");
-    }
+    // Combat modes (vs/dvh) use the per-team weapon loadout + ammo, not the sandbox tools.
+    if (this.mode !== "free") { this.fireWeapon(origin, dir); return; }
 
     if (button === 2 && this.tool !== "build" && this.tool !== "erase") {
       this.shoot(origin, dir);
@@ -909,6 +972,96 @@ export class Game {
       ox: +o.x.toFixed(2), oy: +o.y.toFixed(2), oz: +o.z.toFixed(2),
       dx: +d.x.toFixed(3), dy: +d.y.toFixed(3), dz: +d.z.toFixed(3),
     });
+  }
+
+  /** Fire the active team weapon (vs/dvh): cooldown + ammo gates, then dispatch by fire kind. */
+  private fireWeapon(origin: THREE.Vector3, dir: THREE.Vector3): void {
+    const spec = WEAPONS[this.weapon];
+    if (this.time < this.weaponReadyAt) return;
+    const res = tryFire(this.ammo[this.weapon], spec.magSize);
+    if (!res.fired) { this.hud.flash("Sin munición — recarga en tu base"); return; }
+    this.ammo[this.weapon] = res.ammo;
+    this.weaponReadyAt = this.time + spec.cooldown;
+    const w = roleWeapon(this.role);
+    switch (spec.fire) {
+      case "bullet":    this.shoot(origin, dir); break;
+      case "shotgun":   this.fireShotgun(origin, dir, spec.pellets ?? 8); break;
+      case "grenade":   this.projectiles.launchGrenade(origin.clone(), dir, 22, false, w.powerMul); this.broadcastWeapon("grenade", origin, dir); break;
+      case "explosive": this.projectiles.launchRocket(origin.clone(), dir, 52, false, w.powerMul); this.broadcastWeapon("missile", origin, dir); break;
+      case "net":       this.fireNet(origin, dir); break;
+      case "kamikaze":  this.kamikaze(origin); break;
+    }
+    this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon]);
+  }
+
+  /** Shotgun: a tight bullet spread. Each pellet's grid hit is broadcast, so peers stay in sync. */
+  private fireShotgun(origin: THREE.Vector3, dir: THREE.Vector3, pellets: number): void {
+    for (let i = 0; i < pellets; i++) {
+      const d = new THREE.Vector3(
+        dir.x + (Math.random() - 0.5) * 0.09,
+        dir.y + (Math.random() - 0.5) * 0.09,
+        dir.z + (Math.random() - 0.5) * 0.09,
+      ).normalize();
+      this.projectiles.launchBullet(origin, d);
+    }
+    this.broadcastWeapon("bullet", origin, dir);
+  }
+
+  /** Net launcher: a slow, weak ensnaring projectile (functional stand-in for a drone-catching net). */
+  private fireNet(origin: THREE.Vector3, dir: THREE.Vector3): void {
+    this.projectiles.launchGrenade(origin.clone(), dir, 26, false, 0.3);
+    this.broadcastWeapon("grenade", origin, dir);
+  }
+
+  /** Kamikaze: the drone self-detonates in a big blast (and dies with it). */
+  private kamikaze(origin: THREE.Vector3): void {
+    this.explodeAt(origin.x, origin.y, origin.z, 4.5, 900, true);
+    this.damageDrone(9999);
+  }
+
+  private selectWeapon(w: Weapon): void {
+    this.weapon = w;
+    this.hud.setWeapon(this.role, w, this.ammo[w]);
+    this.hud.flash(`${WEAPONS[w].icon} ${WEAPONS[w].name}`);
+  }
+
+  /** True when within recharge range of our own team's base (OBJECTIVE_SITES: drone=0, human=1). */
+  private nearOwnBase(): boolean {
+    const site = OBJECTIVE_SITES[this.role === "drone" ? 0 : 1];
+    if (!site) return false;
+    const cx = (site.x0 + site.x1) * 0.5 * VOXEL, cy = (site.y0 + site.y1) * 0.5 * VOXEL, cz = (site.z0 + site.z1) * 0.5 * VOXEL;
+    const p = this.player.camera.position;
+    return Math.hypot(p.x - cx, p.y - cy, p.z - cz) < 8;
+  }
+
+  /** Refill all weapons + battery (on respawn, and whenever standing in the base). */
+  private resupply(): void {
+    for (const w of roleLoadout(this.role)) this.ammo[w] = fullAmmo(WEAPONS[w]);
+    this.battery = BATTERY_MAX;
+  }
+
+  /** Per-frame combat upkeep: base recharge, drone battery drain + power-out death, HUD panels. */
+  private combatFrame(dt: number): void {
+    if (this.mode === "free") return;
+    const nearBase = this.nearOwnBase();
+    if (nearBase) this.resupply();
+    // Battery is a dvh mechanic — it needs the base to recharge, and dvh is where the bases exist.
+    if (this.mode === "dvh" && this.player instanceof Player) {
+      if (!nearBase) this.battery = Math.max(0, this.battery - batteryDrain(this.player.speed(), dt));
+      if (this.battery <= 0 && this.hp > 0) { this.damageDrone(9999); this.hud.flash("¡Batería agotada — el dron cae!"); }
+      this.hud.setBattery(this.battery / BATTERY_MAX);
+    } else {
+      this.hud.setBattery(-1); // humans / vs: no battery gauge
+    }
+    // Throttle the innerHTML panels (~7 Hz). selectWeapon/fireWeapon push the weapon panel immediately,
+    // so this is just the continuous refresh of ammo/K-D-A/teammate health.
+    this.combatHudT -= dt;
+    if (this.combatHudT <= 0) {
+      this.combatHudT = 0.15;
+      this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon]);
+      this.hud.setKDA(this.myKills, this.myAssists, this.myDeaths);
+      this.hud.setTeam(this.remotes.peers(), this.role);
+    }
   }
 
   /** Our own bullet reached a voxel: broadcast the hit so every client applies the same grid change,
@@ -1038,15 +1191,13 @@ export class Game {
 
   private onKey(code: string): void {
     if (code === "keyk") { this.cycleQuality(); return; } // graphics quality (all modes)
-    if (this.mode === "vs") {
-      // VS = weapons only: no construction, cannon, prefab spawns, save/load
-      switch (code) {
-        case "digit1": this.setTool("shoot"); return;
-        case "digit2": this.setTool("grenade"); return;
-        case "digit6": this.setTool("missile"); return;
-        case "keyh": this.hud.toggleHelp(); return;
-        default: return;
-      }
+    if (this.mode !== "free") {
+      // Combat (vs/dvh): digit keys pick from the team weapon loadout (drone: 1-3, human: 1-4).
+      const lo = roleLoadout(this.role);
+      const idx = ["digit1", "digit2", "digit3", "digit4", "digit5", "digit6"].indexOf(code);
+      if (idx >= 0 && idx < lo.length) { this.selectWeapon(lo[idx]); return; }
+      if (code === "keyh") { this.hud.toggleHelp(); return; }
+      return;
     }
     switch (code) {
       case "digit1": this.setTool("shoot"); return;
@@ -1142,6 +1293,16 @@ export class Game {
     if (this.acc > FIXED_DT) this.acc = 0;
 
     this.player.update(dt, this.input);
+    // fall damage (human, >1 storey) always — a human only exists in the combat modes anyway. Drone
+    // ram-impact (fast into a wall) only in combat, so the sandbox doesn't punish flying/building.
+    if (this.player instanceof Walker) {
+      const dmg = humanFallDamage(this.player.takeFall());
+      if (dmg > 0) { this.damageDrone(dmg); this.hud.flash(`Daño de caída: ${dmg}`); }
+    } else if (this.mode !== "free") {
+      const imp = this.player.takeImpact();
+      const dmg = droneImpactDamage(imp.speed, imp.blocked);
+      if (dmg > 0) { this.damageDrone(dmg); this.hud.flash(`Impacto: ${dmg}`); }
+    }
     this.netUpdate(dt);
     if (this.mode === "dvh") this.checkMatchWin(); // detect an objective destroyed this frame
     this.streamColliders(); // keep building colliders only near the player (collision LOD)
@@ -1167,12 +1328,15 @@ export class Game {
     const _rd = performance.now() - _tr;
     this.prof.rebuildTotal += _rd; if (_rd > this.prof.rebuildMax) this.prof.rebuildMax = _rd;
 
+    this.combatFrame(dt); // team weapons: base recharge, drone battery, HUD panels
     this.hud.update(dt);
     this.hud.setStats(this.fps, this.debris.count, Math.hypot(this.physics.wind.x, this.physics.wind.z));
     const _trn = performance.now();
     const cp = this.player.camera.position;
-    this.renderer.followSun(cp.x, cp.y, cp.z); // keep the tight shadow frustum on the player
-    this.renderer.render(this.player.camera);
+    if (!this.hidden()) { // the sim runs while hidden (Web Worker), but there's no point rendering a hidden tab
+      this.renderer.followSun(cp.x, cp.y, cp.z); // keep the tight shadow frustum on the player
+      this.renderer.render(this.player.camera);
+    }
     const _rn = performance.now() - _trn;
     this.prof.renderTotal += _rn; if (_rn > this.prof.renderMax) this.prof.renderMax = _rn;
   }

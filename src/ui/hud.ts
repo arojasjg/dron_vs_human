@@ -1,5 +1,6 @@
 import { MATERIALS, type MaterialId } from "../world/materials";
 import type { Role } from "../net/roles";
+import { WEAPONS, roleLoadout, type Weapon, type Ammo } from "../net/weapons";
 
 export type Tool = "shoot" | "grenade" | "cannon" | "missile" | "build" | "erase";
 export type Mode = "free" | "vs" | "dvh";
@@ -38,6 +39,11 @@ export class Hud {
   private readonly healthText: HTMLElement;
   private readonly win: HTMLElement;
   private readonly score: HTMLElement;
+  private readonly weaponEl: HTMLElement;
+  private readonly battery: HTMLElement;
+  private readonly batteryFill: HTMLElement;
+  private readonly kda: HTMLElement;
+  private readonly team: HTMLElement;
   private toastTimer = 0;
 
   constructor() {
@@ -53,6 +59,11 @@ export class Hud {
     this.healthText = document.getElementById("hud-health-text")!;
     this.win = document.getElementById("hud-win")!;
     this.score = document.getElementById("hud-score")!;
+    this.weaponEl = document.getElementById("hud-weapon")!;
+    this.battery = document.getElementById("hud-battery")!;
+    this.batteryFill = document.getElementById("hud-battery-fill")!;
+    this.kda = document.getElementById("hud-kda")!;
+    this.team = document.getElementById("hud-team")!;
     this.help.innerHTML = HELP;
   }
 
@@ -87,6 +98,45 @@ export class Hud {
     this.healthFill.style.width = `${f * 100}%`;
     this.healthFill.style.background = f > 0.5 ? "#35dd45" : f > 0.25 ? "#ddc233" : "#dd3a30";
     this.healthText.textContent = `${Math.ceil(hp)} HP`;
+  }
+
+  /** Weapon bar: every loadout weapon as a numbered icon (active one lit) + the active ammo (mag/reserve). */
+  setWeapon(role: Role, active: Weapon, ammo: Ammo): void {
+    const slots = roleLoadout(role).map((w, i) =>
+      `<span class="wslot${w === active ? " on" : ""}">${WEAPONS[w].icon}<i>${i + 1}</i></span>`).join("");
+    const spec = WEAPONS[active];
+    const low = ammo.mag === 0 && ammo.reserve === 0;
+    this.weaponEl.innerHTML = `<div class="wbar">${slots}</div>` +
+      `<div class="wammo${low ? " empty" : ""}">${spec.icon} ${spec.name} · <b>${ammo.mag}</b><span>/${ammo.reserve}</span></div>`;
+    this.weaponEl.style.display = "block";
+  }
+
+  /** Drone battery gauge. Pass frac < 0 to hide it (humans). */
+  setBattery(frac: number): void {
+    if (frac < 0) { this.battery.style.display = "none"; return; }
+    this.battery.style.display = "block";
+    const f = Math.max(0, Math.min(1, frac));
+    this.batteryFill.style.width = `${f * 100}%`;
+    this.batteryFill.style.background = f > 0.5 ? "#38d0ff" : f > 0.2 ? "#ddc233" : "#dd3a30";
+  }
+
+  /** Personal scoreboard: kills / assists / deaths. */
+  setKDA(kills: number, assists: number, deaths: number): void {
+    this.kda.innerHTML = `<span class="tag">K</span><b>${kills}</b> <span class="tag">A</span><b>${assists}</b> <span class="tag">D</span><b>${deaths}</b>`;
+    this.kda.style.display = "block";
+  }
+
+  /** Teammates' health (same team as `myRole`), as a small list of name + a mini health bar. */
+  setTeam(peers: { id: number; hp: number; maxHp: number; isHuman: boolean }[], myRole: Role): void {
+    const mine = peers.filter((p) => p.isHuman === (myRole === "human"));
+    if (mine.length === 0) { this.team.style.display = "none"; return; }
+    const icon = myRole === "human" ? "🧍" : "🤖";
+    this.team.innerHTML = `<div class="thead">Equipo ${icon}</div>` + mine.map((p) => {
+      const f = Math.max(0, Math.min(1, p.hp / p.maxHp));
+      const col = f > 0.5 ? "#35dd45" : f > 0.25 ? "#ddc233" : "#dd3a30";
+      return `<div class="trow">${icon} P${p.id}<div class="tbar"><div style="width:${f * 100}%;background:${col}"></div></div></div>`;
+    }).join("");
+    this.team.style.display = "block";
   }
 
   /** Start overlay: pick Libre or VS and a room, then begin. */
@@ -161,6 +211,25 @@ function inject(): void {
     #hud-health-bar { height: 12px; border-radius: 6px; background: rgba(255,255,255,.12); overflow: hidden; }
     #hud-health-fill { height: 100%; width: 100%; background: #35dd45; transition: width .12s, background .12s; }
     #hud-health-text { font-size: 11px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+    #hud-weapon { bottom: 108px; left: 50%; transform: translateX(-50%); display: none; text-align: center; padding: 6px 10px; }
+    #hud-weapon .wbar { display: flex; gap: 6px; justify-content: center; margin-bottom: 4px; }
+    #hud-weapon .wslot { position: relative; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+      font-size: 18px; border-radius: 8px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); opacity: .5; }
+    #hud-weapon .wslot.on { opacity: 1; background: rgba(90,150,255,.28); border-color: rgba(120,180,255,.75); box-shadow: 0 0 10px rgba(90,150,255,.45); }
+    #hud-weapon .wslot i { position: absolute; bottom: -3px; right: 1px; font-size: 9px; font-style: normal; color: #9fb3c8; }
+    #hud-weapon .wammo { font-size: 13px; font-variant-numeric: tabular-nums; }
+    #hud-weapon .wammo b { font-size: 16px; } #hud-weapon .wammo span { color: #9fb3c8; } #hud-weapon .wammo.empty { color: #dd3a30; }
+    #hud-battery { bottom: 16px; left: 14px; width: 150px; }
+    #hud-battery .cap { font-size: 10px; color: #9fb3c8; display: block; margin-bottom: 3px; }
+    #hud-battery-bar { height: 10px; border-radius: 5px; background: rgba(255,255,255,.12); overflow: hidden; }
+    #hud-battery-fill { height: 100%; width: 100%; background: #38d0ff; transition: width .2s, background .2s; }
+    #hud-kda { top: 48px; right: 14px; display: none; font-variant-numeric: tabular-nums; }
+    #hud-kda .tag { color: #9fb3c8; font-size: 10px; margin: 0 3px 0 9px; } #hud-kda .tag:first-child { margin-left: 0; }
+    #hud-team { top: 92px; right: 14px; display: none; min-width: 132px; }
+    #hud-team .thead { font-size: 10px; color: #9fb3c8; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .5px; }
+    #hud-team .trow { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-top: 3px; }
+    #hud-team .tbar { flex: 1; height: 7px; border-radius: 4px; background: rgba(255,255,255,.12); overflow: hidden; }
+    #hud-team .tbar div { height: 100%; }
     #hud-menu { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
       pointer-events: auto; background: rgba(6,9,14,.72); backdrop-filter: blur(3px); }
     #hud-menu .card { background: rgba(16,22,30,.96); border: 1px solid rgba(255,255,255,.1);
@@ -201,6 +270,10 @@ function inject(): void {
       <div id="hud-health-bar"><div id="hud-health-fill"></div></div>
       <div id="hud-health-text">100 HP</div>
     </div>
+    <div id="hud-weapon" class="panel"></div>
+    <div id="hud-battery" class="panel"><span class="cap">🔋 Batería</span><div id="hud-battery-bar"><div id="hud-battery-fill"></div></div></div>
+    <div id="hud-kda" class="panel"></div>
+    <div id="hud-team" class="panel"></div>
     <div id="hud-toast" class="panel"></div>
     <div id="crosshair"></div>
     <div id="hud-menu">

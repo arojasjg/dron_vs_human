@@ -10,6 +10,7 @@ const EYE = 0.6;                 // camera above the capsule centre (roughly eye
 const WALK = 4.5, RUN = 7.5;     // m/s
 const JUMP = 4.6;                // m/s launch → ~1 m hop
 const STEP = 0.35;               // max autostep height (climbs the 0.25 m voxel stairs)
+const CAM_SMOOTH = 0.30;         // camera-height easing → smooth stair descent (body stays on the steps)
 
 const _add = new THREE.Vector3();
 
@@ -27,6 +28,9 @@ export class Walker {
   private vy = 0;            // vertical velocity (gravity/jump)
   private grounded = false;
   private jumpWasDown = false; // for rising-edge jump (no bunny-hop while the key is held)
+  private fallPeakY = 0;    // highest y reached since leaving the ground (for fall damage)
+  private lastFall = 0;     // drop distance of the most recent landing (consumed by the game)
+  private smoothCamY = 0;   // eased camera height (decouples the view from the stepped body)
 
   private readonly world: RAPIER.World;
   private readonly body: RAPIER.RigidBody;
@@ -71,10 +75,14 @@ export class Walker {
     this.body.setTranslation({ x, y, z }, true);
     this.body.setNextKinematicTranslation({ x, y, z });
     this.vy = 0;
+    this.fallPeakY = y; this.smoothCamY = y; this.lastFall = 0;
     this.yaw = yaw;
     this.camera.position.set(x, y + EYE, z);
     this.lookFromAngles();
   }
+
+  /** Distance of the most recent landing's fall (metres), consumed once by the game for fall damage. */
+  takeFall(): number { const f = this.lastFall; this.lastFall = 0; return f; }
 
   forward(out: THREE.Vector3): THREE.Vector3 { return this.camera.getWorldDirection(out); }
   get position(): { x: number; y: number; z: number } { return this.body.translation(); }
@@ -98,8 +106,18 @@ export class Walker {
     this.controller.computeColliderMovement(this.collider, desired);
     const m = this.controller.computedMovement();
     this.grounded = this.controller.computedGrounded();
-    if (this.grounded && this.vy < 0) this.vy = 0; // landed → stop falling
+    if (this.grounded && this.vy < 0) this.vy = 0;     // landed → stop falling
     const t = this.body.translation();
+    // fall tracking: hold the peak height while airborne; on landing, record the drop for fall damage.
+    // A stair descent stays GROUNDED (the body hugs each step), so the peak resets every frame and the
+    // recorded drop is only ~one step — never a false fall. A real fall accumulates the whole height.
+    if (this.grounded) {
+      const fell = this.fallPeakY - t.y;
+      if (fell > 0.02) this.lastFall = fell;
+      this.fallPeakY = t.y;
+    } else {
+      this.fallPeakY = Math.max(this.fallPeakY, t.y);
+    }
     this.body.setNextKinematicTranslation({ x: t.x + m.x, y: t.y + m.y, z: t.z + m.z });
   }
 
@@ -126,7 +144,11 @@ export class Walker {
     this.move(dt, vx, vz, input.isDown("space"));
 
     const p = this.body.translation();
-    this.camera.position.set(p.x, p.y + EYE, p.z);
+    // ease the camera's HEIGHT toward the body so descending the stepped stairs glides instead of
+    // lurching one step at a time; snap it for big deltas (jumps/falls/teleports) to avoid lag.
+    this.smoothCamY += (p.y - this.smoothCamY) * CAM_SMOOTH;
+    if (Math.abs(p.y - this.smoothCamY) > 1.2) this.smoothCamY = p.y;
+    this.camera.position.set(p.x, this.smoothCamY + EYE, p.z);
     this.lookFromAngles();
   }
 

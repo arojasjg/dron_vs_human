@@ -24,6 +24,8 @@ export class Player {
   private yaw = 0;
   private pitch = 0;
   private readonly vel = new THREE.Vector3();
+  private lastBlocked = 0;   // fraction of the last move blocked by a wall (1 = fully stopped)
+  private lastSpeedH = 0;    // horizontal speed on the last frame (m/s)
 
   private readonly world: RAPIER.World;
   private readonly body: RAPIER.RigidBody;
@@ -33,7 +35,8 @@ export class Player {
 
   constructor(physics: Physics) {
     this.world = physics.world;
-    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 250);
+    const aspect = typeof window !== "undefined" ? window.innerWidth / window.innerHeight : 1.5;
+    this.camera = new THREE.PerspectiveCamera(75, aspect, 0.05, 250);
 
     this.body = physics.world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 5, 0),
@@ -53,12 +56,12 @@ export class Player {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
     };
-    window.addEventListener("resize", this.onResize);
+    if (typeof window !== "undefined") window.addEventListener("resize", this.onResize);
   }
 
   /** Removes this controller's physics bodies + resize listener (used when swapping drone↔human). */
   dispose(): void {
-    window.removeEventListener("resize", this.onResize);
+    if (typeof window !== "undefined") window.removeEventListener("resize", this.onResize);
     this.world.removeCharacterController(this.controller);
     this.world.removeRigidBody(this.body); // also removes its attached collider
   }
@@ -76,6 +79,16 @@ export class Player {
   forward(out: THREE.Vector3): THREE.Vector3 {
     return this.camera.getWorldDirection(out);
   }
+
+  /** The last frame's horizontal speed + how hard it was wall-blocked, consumed once for impact damage. */
+  takeImpact(): { speed: number; blocked: number } {
+    const r = { speed: this.lastSpeedH, blocked: this.lastBlocked };
+    this.lastSpeedH = 0; this.lastBlocked = 0;
+    return r;
+  }
+
+  /** Current 3D speed (m/s) — drives the drone's battery drain (faster = more). */
+  speed(): number { return Math.hypot(this.vel.x, this.vel.y, this.vel.z); }
 
   update(dt: number, input: Input): void {
     if (input.locked) {
@@ -114,6 +127,13 @@ export class Player {
     const desired = { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt };
     this.controller.computeColliderMovement(this.collider, desired);
     const corr = this.controller.computedMovement();
+    // hard-impact: how much of the intended horizontal move was blocked by a wall, and how fast.
+    const dH = Math.hypot(desired.x, desired.z), aH = Math.hypot(corr.x, corr.z);
+    this.lastBlocked = dH > 1e-4 ? 1 - aH / dH : 0;
+    this.lastSpeedH = Math.hypot(this.vel.x, this.vel.z);
+    // crash → bleed off speed so a wall-pinned drone isn't hit every frame. INVARIANT: this 12 must
+    // stay BELOW falldamage's IMPACT_MIN (14) — the re-eased speed then never re-crosses 14 → one hit.
+    if (this.lastBlocked > 0.6 && this.lastSpeedH > 12) this.vel.multiplyScalar(0.15);
     const t = this.body.translation();
     const np = { x: t.x + corr.x, y: t.y + corr.y, z: t.z + corr.z };
     this.body.setNextKinematicTranslation(np);

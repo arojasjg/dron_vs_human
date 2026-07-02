@@ -111,6 +111,9 @@ const STRIDE = BIG.H + 1;        // voxels between floor slabs
 const COL = 14;                  // structural column spacing (≈50% fewer columns than before)
 const ROOM_BAYS = 2;             // upper-floor rooms span this many column bays →
 const ROOM = ROOM_BAYS * COL;    // big rooms (~28 voxels) whose walls fall on column lines
+// Door opening height in voxels (from the floor up). The human capsule is ~1.7 m (6.8 voxels) plus a
+// collision skin, so 7 voxels (1.75 m) jammed it — 9 voxels (2.25 m) gives real head clearance.
+export const DOOR_TOP = 9;
 const STAIR_LANE = 3;            // width (x) of ONE stair lane — fits a ~0.6 m capsule with margin
 const STAIR_W = STAIR_LANE * 2;  // shaft holds two side-by-side lanes for the switch-back
 // Stairwell inset from the SW corner. The Z inset is the key: the ground flight's low end (where you
@@ -194,6 +197,9 @@ function buildExternalStairs(grid: VoxelGrid, ox: number, oz: number, spec: Buil
     const lz0 = up > 0 ? z1 : z0 - 3;             // full-width landing, FORWARD of the top step
     fillBox(grid, x0, x1, base + STRIDE, base + STRIDE, lz0, lz0 + 3, "metal");
   }
+  // a low pad off the street: the ground flight's first tread tops out 0.5 m up (the street sits a
+  // voxel below the building floor), which a 0.35 m autostep can't take — this 1-voxel pad bridges it.
+  fillBox(grid, x0, x1, 0, 0, z0 - 2, z0 - 1, "metal");
 }
 
 /** Sparse exterior windows: most are small glass panes, but ~1 in 5 is a big OPEN gap a drone can
@@ -359,7 +365,7 @@ export function buildBuilding(grid: VoxelGrid, ox = 0, oz = 0, spec: BuildSpec =
           fillBox(grid, wx, wx, base + 1, top, zBounds[j], zBounds[j + 1], "brick");
           if (!rail) {
             const c = bayDoorCenter(zBounds[j], zBounds[j + 1], oz + 1);
-            clearBox(grid, wx, wx, base + 1, base + 8, c - 1, c + 1);
+            clearBox(grid, wx, wx, base + 1, base + DOOR_TOP, c - 1, c + 1);
           }
         }
       for (let j = 0; j + 1 < nrows; j++)
@@ -373,7 +379,7 @@ export function buildBuilding(grid: VoxelGrid, ox = 0, oz = 0, spec: BuildSpec =
           fillBox(grid, xBounds[i], xBounds[i + 1], base + 1, top, wz, wz, "brick");
           if (!rail) {
             const c = bayDoorCenter(xBounds[i], xBounds[i + 1], ox + 1);
-            clearBox(grid, c - 1, c + 1, base + 1, base + 8, wz, wz);
+            clearBox(grid, c - 1, c + 1, base + 1, base + DOOR_TOP, wz, wz);
           }
         }
     }
@@ -393,10 +399,10 @@ export function buildBuilding(grid: VoxelGrid, ox = 0, oz = 0, spec: BuildSpec =
     const px = ox + 8 + Math.floor(rand() * Math.max(1, W - 16));      // safe span of the X walls
     const pzFar = oz + (D >> 1) + Math.floor(rand() * Math.max(1, Math.floor(D * 0.35))); // left wall: past the shaft
     const pz = oz + 6 + Math.floor(rand() * Math.max(1, D - 14));
-    if (wall === 0) clearBox(grid, px, px + 3, 1, 7, oz, oz);                 // front
-    else if (wall === 1) clearBox(grid, px, px + 3, 1, 7, oz + D - 1, oz + D - 1); // back
-    else if (wall === 2) clearBox(grid, ox, ox, 1, 7, pzFar, pzFar + 3);      // left (shaft side)
-    else clearBox(grid, ox + W - 1, ox + W - 1, 1, 7, pz, pz + 3);            // right
+    if (wall === 0) clearBox(grid, px, px + 3, 1, DOOR_TOP, oz, oz);                 // front
+    else if (wall === 1) clearBox(grid, px, px + 3, 1, DOOR_TOP, oz + D - 1, oz + D - 1); // back
+    else if (wall === 2) clearBox(grid, ox, ox, 1, DOOR_TOP, pzFar, pzFar + 3);      // left (shaft side)
+    else clearBox(grid, ox + W - 1, ox + W - 1, 1, DOOR_TOP, pz, pz + 3);            // right
   };
   const walls = [0, 1, 2, 3];
   for (let i = walls.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [walls[i], walls[j]] = [walls[j], walls[i]]; }
