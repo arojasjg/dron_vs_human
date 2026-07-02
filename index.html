@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Particles — Constructor & Destrucción física</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23a64b36'/></svg>" />
+    <style>
+      :root { color-scheme: dark; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0d10; }
+      #app { position: fixed; inset: 0; }
+      canvas { display: block; }
+
+      #loading {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        font-family: system-ui, sans-serif; color: #cfd6df; font-size: 18px; letter-spacing: .5px;
+        background: #0b0d10; z-index: 50;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <a id="gpu-link" href="/gpu-demo.html" style="position:fixed;bottom:12px;right:12px;z-index:60;
+      font-family:system-ui,sans-serif;font-size:12px;color:#cfe3ff;text-decoration:none;
+      background:rgba(12,16,22,.7);border:1px solid rgba(255,255,255,.12);border-radius:8px;
+      padding:7px 11px;">⚡ Demo WebGPU (granos GPU)</a>
+    <div id="loading">Cargando motor de física…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

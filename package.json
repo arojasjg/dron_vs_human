@@ -1,0 +1,32 @@
+{
+  "name": "game_particles",
+  "version": "0.1.0",
+  "description": "Sandbox de construcción y destrucción física basada en vóxeles (Three.js + Rapier3D)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "relay": "node server/relay.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "check:wgsl": "node scripts/wgsl-check.mjs",
+    "bench": "node scripts/gpu-bench.mjs",
+    "test:gpu": "node scripts/wgsl-check.mjs && node scripts/gpu-verify.mjs && node scripts/gpu-sim-verify.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.14.0",
+    "@types/ws": "^8.18.1",
+    "@webgpu/types": "^0.1.71",
+    "three": "^0.185.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@kmamal/gpu": "^0.2.1",
+    "@types/three": "^0.185.0",
+    "puppeteer-core": "^23.11.1",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}

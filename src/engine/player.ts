@@ -1,0 +1,130 @@
+import RAPIER from "@dimforge/rapier3d-compat";
+import * as THREE from "three";
+import type { Physics } from "./physics";
+import type { Input } from "./input";
+
+const SENS = 0.0022;
+const CRUISE = 9.0;        // m/s normal flight speed
+const BOOST = 20.0;        // m/s with shift held
+const RESPONSE = 9.0;      // how fast velocity chases the target (drone inertia: lower = floatier)
+const EYE = 0.0;     // camera sits at the drone body centre
+const RADIUS = 0.18; // small spherical drone (Ø0.36m) → fits through 3-voxel (0.75m) windows
+
+const _look = new THREE.Vector3();
+const _add = new THREE.Vector3();
+
+/**
+ * Flying-drone controller: free 6-DOF flight with no gravity. W/S fly along the look direction,
+ * A/D strafe horizontally, Space/Ctrl rise/descend. Velocity eases toward the input target so the
+ * drone has a bit of inertia (accelerates and drifts to a stop). A small kinematic capsule + the
+ * character controller keep it from flying through walls (it slides along them instead).
+ */
+export class Player {
+  readonly camera: THREE.PerspectiveCamera;
+  private yaw = 0;
+  private pitch = 0;
+  private readonly vel = new THREE.Vector3();
+
+  private readonly world: RAPIER.World;
+  private readonly body: RAPIER.RigidBody;
+  private readonly collider: RAPIER.Collider;
+  private readonly controller: RAPIER.KinematicCharacterController;
+  private readonly onResize: () => void;
+
+  constructor(physics: Physics) {
+    this.world = physics.world;
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 250);
+
+    this.body = physics.world.createRigidBody(
+      RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 5, 0),
+    );
+    this.collider = physics.world.createCollider(
+      RAPIER.ColliderDesc.ball(RADIUS).setFriction(0.0),
+      this.body,
+    );
+
+    // a flying controller: collide & slide on walls, but NO snap-to-ground or autostep (it hovers)
+    const c = physics.world.createCharacterController(0.05);
+    c.setUp({ x: 0, y: 1, z: 0 });
+    c.setApplyImpulsesToDynamicBodies(true);
+    this.controller = c;
+
+    this.onResize = () => {
+      this.camera.aspect = window.innerWidth / window.innerHeight;
+      this.camera.updateProjectionMatrix();
+    };
+    window.addEventListener("resize", this.onResize);
+  }
+
+  /** Removes this controller's physics bodies + resize listener (used when swapping drone↔human). */
+  dispose(): void {
+    window.removeEventListener("resize", this.onResize);
+    this.world.removeCharacterController(this.controller);
+    this.world.removeRigidBody(this.body); // also removes its attached collider
+  }
+
+  /** Places the drone at a world position and stops it. */
+  spawn(x: number, y: number, z: number, yaw = 0): void {
+    this.body.setTranslation({ x, y, z }, true);
+    this.body.setNextKinematicTranslation({ x, y, z });
+    this.vel.set(0, 0, 0);
+    this.yaw = yaw;
+    this.camera.position.set(x, y + EYE, z);
+    this.lookFromAngles();
+  }
+
+  forward(out: THREE.Vector3): THREE.Vector3 {
+    return this.camera.getWorldDirection(out);
+  }
+
+  update(dt: number, input: Input): void {
+    if (input.locked) {
+      const d = input.consumeMouseDelta();
+      this.yaw -= d.x * SENS;
+      this.pitch -= d.y * SENS;
+      const lim = Math.PI / 2 - 0.02;
+      this.pitch = Math.max(-lim, Math.min(lim, this.pitch));
+    }
+
+    const cp = Math.cos(this.pitch);
+    _look.set(Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp); // full look dir
+    const rx = -Math.cos(this.yaw), rz = Math.sin(this.yaw);                            // horizontal right
+
+    // build the input direction (fly where you look on W/S, strafe + vertical on the rest)
+    let dx = 0, dy = 0, dz = 0;
+    if (input.isDown("keyw")) { dx += _look.x; dy += _look.y; dz += _look.z; }
+    if (input.isDown("keys")) { dx -= _look.x; dy -= _look.y; dz -= _look.z; }
+    if (input.isDown("keyd")) { dx += rx; dz += rz; }
+    if (input.isDown("keya")) { dx -= rx; dz -= rz; }
+    if (input.isDown("space")) dy += 1;
+    if (input.isDown("controlleft") || input.isDown("controlright")) dy -= 1;
+
+    const len = Math.hypot(dx, dy, dz);
+    const speed = (input.isDown("shiftleft") || input.isDown("shiftright")) ? BOOST : CRUISE;
+    const tx = len > 1e-4 ? (dx / len) * speed : 0;
+    const ty = len > 1e-4 ? (dy / len) * speed : 0;
+    const tz = len > 1e-4 ? (dz / len) * speed : 0;
+
+    // ease velocity toward the target → smooth accelerate / drift to stop (drone inertia)
+    const k = 1 - Math.exp(-RESPONSE * dt);
+    this.vel.x += (tx - this.vel.x) * k;
+    this.vel.y += (ty - this.vel.y) * k;
+    this.vel.z += (tz - this.vel.z) * k;
+
+    const desired = { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt };
+    this.controller.computeColliderMovement(this.collider, desired);
+    const corr = this.controller.computedMovement();
+    const t = this.body.translation();
+    const np = { x: t.x + corr.x, y: t.y + corr.y, z: t.z + corr.z };
+    this.body.setNextKinematicTranslation(np);
+
+    this.camera.position.set(np.x, np.y + EYE, np.z);
+    this.lookFromAngles();
+  }
+
+  private lookFromAngles(): void {
+    const cp = Math.cos(this.pitch);
+    _add.set(Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp);
+    this.camera.lookAt(this.camera.position.clone().add(_add));
+  }
+}
