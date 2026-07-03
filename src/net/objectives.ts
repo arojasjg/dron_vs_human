@@ -1,9 +1,9 @@
 import type { Role } from "./roles";
 
-/** Live state of a Drones-vs-Humans match. Objectives start alive; a team scores kills. */
+/** Live state of a Drones-vs-Humans match. Each team defends 2 bases; a team also scores kills. */
 export interface MatchState {
-  droneObjAlive: boolean;
-  humanObjAlive: boolean;
+  droneObjsAlive: number; // how many of the DRONE team's bases still stand (0..2)
+  humanObjsAlive: number;
   droneKills: number;
   humanKills: number;
 }
@@ -29,8 +29,8 @@ export function applyDeath(s: MatchState, victim: Role): MatchState {
  *  objective, or by reaching the kill limit (deathmatch running in parallel). Pure and
  *  dependency-free → identical verdict on every client, so no one desyncs on who won. */
 export function checkWin(s: MatchState, killLimit: number): Role | null {
-  const droneWins = !s.humanObjAlive || s.droneKills >= killLimit;
-  const humanWins = !s.droneObjAlive || s.humanKills >= killLimit;
+  const droneWins = s.humanObjsAlive === 0 || s.droneKills >= killLimit; // razed BOTH human bases (or kill limit)
+  const humanWins = s.droneObjsAlive === 0 || s.humanKills >= killLimit;
   if (droneWins && !humanWins) return "drone";
   if (humanWins && !droneWins) return "human";
   if (droneWins && humanWins) return s.droneKills >= s.humanKills ? "drone" : "human"; // simultaneous → more kills

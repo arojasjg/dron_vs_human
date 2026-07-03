@@ -60,6 +60,13 @@ export class Projectiles {
     return n;
   }
 
+  /** Live bullets in flight (for tests/diagnostics). */
+  get bulletCount(): number {
+    let n = 0;
+    for (const f of this.list) if (f.kind === "bullet") n++;
+    return n;
+  }
+
   launchCannonball(origin: THREE.Vector3, dir: THREE.Vector3, speed = 60, ghost = false, powerMul = 1): void {
     const m = new THREE.Mesh(this.cannonGeo, this.cannonMat);
     m.castShadow = true;
@@ -120,7 +127,9 @@ export class Projectiles {
     body.setGravityScale(0.05, false);
     body.userData = { area: 0.001, cd: 0.2, kind: "bullet" };
     const collider = this.physics.world.createCollider(
-      RAPIER.ColliderDesc.ball(0.03).setDensity(8000).setFriction(0.2).setRestitution(0),
+      // a SENSOR: the bullet is driven entirely by the swept raycast below, so it never physically
+      // deflects/ricochets off a wall, the ground, or a crate — it can only be CONSUMED on a hit.
+      RAPIER.ColliderDesc.ball(0.03).setDensity(8000).setFriction(0.2).setRestitution(0).setSensor(true),
       body,
     );
     const mesh = new THREE.Mesh(this.bulletGeo, this.bulletMat);
@@ -174,12 +183,22 @@ export class Projectiles {
         const len = seg.length();
         let consumed = false;
         if (len > 1e-4) {
-          const hit = this.grid.raycast(f.prev.x, f.prev.y, f.prev.z, seg.x, seg.y, seg.z, len + 0.06);
-          if (hit) {
-            if (!f.ghost) { const inv = 1 / len; this.onBulletHit(hit, seg.x * inv, seg.y * inv, seg.z * inv); }
+          const inv = 1 / len, dx = seg.x * inv, dy = seg.y * inv, dz = seg.z * inv;
+          // hit the voxel structure (precise, always current)...
+          const gh = this.grid.raycast(f.prev.x, f.prev.y, f.prev.z, seg.x, seg.y, seg.z, len + 0.06);
+          const gd = gh ? Math.hypot(gh.point.x - f.prev.x, gh.point.y - f.prev.y, gh.point.z - f.prev.z) : Infinity;
+          // ...or ANYTHING physical: the ground plane, crates, debris (the grid ray can't see those).
+          // Consuming on the nearer of the two means the bullet stops dead - it can NEVER ricochet.
+          const ray = new RAPIER.Ray({ x: f.prev.x, y: f.prev.y, z: f.prev.z }, { x: dx, y: dy, z: dz });
+          const oh = this.physics.world.castRay(ray, len + 0.06, true, undefined, undefined, undefined, f.body);
+          const od = oh ? oh.timeOfImpact : Infinity;
+          if (gh && gd <= od) {
+            if (!f.ghost) this.onBulletHit(gh, dx, dy, dz);
             consumed = true;
+          } else if (oh) {
+            consumed = true; // stopped by the ground / a crate / debris - no bounce
           } else {
-            f.mesh.quaternion.setFromUnitVectors(BULLET_AXIS, TMP.copy(seg).multiplyScalar(1 / len));
+            f.mesh.quaternion.setFromUnitVectors(BULLET_AXIS, TMP.set(dx, dy, dz));
           }
         }
         f.prev.copy(cur);

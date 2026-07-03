@@ -15,18 +15,47 @@ export interface WeaponSpec {
   magSize: number;     // rounds per magazine
   maxReserve: number;  // spare rounds, refilled at the team base
   pellets?: number;    // shotgun: projectiles per shot
+  playerDmg?: number;  // HP a direct bullet hit deals to a player (bullet/shotgun weapons)
 }
 
 export const WEAPONS: Record<Weapon, WeaponSpec> = {
   // Drone arsenal — light: rapid MG, a FEW grenades, and a one-shot kamikaze self-detonation.
-  mg:        { name: "Metralleta",    icon: "🔫", fire: "bullet",    cooldown: 0.08, magSize: 40, maxReserve: 200 },
+  mg:        { name: "Metralleta",    icon: "🔫", fire: "bullet",    cooldown: 0.08, magSize: 40, maxReserve: 200, playerDmg: 6 },
   grenade:   { name: "Granada",       icon: "💣", fire: "grenade",   cooldown: 1.2,  magSize: 2,  maxReserve: 4 },
   kamikaze:  { name: "Kamikaze",      icon: "☢️", fire: "kamikaze",  cooldown: 0.0,  magSize: 1,  maxReserve: 0 },
   // Human arsenal — MG, spread shotgun, explosive grenade launcher, and a net to catch a drone.
-  shotgun:   { name: "Escopeta",      icon: "🎯", fire: "shotgun",   cooldown: 0.8,  magSize: 6,  maxReserve: 30, pellets: 9 },
+  shotgun:   { name: "Escopeta",      icon: "🎯", fire: "shotgun",   cooldown: 0.8,  magSize: 6,  maxReserve: 30, pellets: 9, playerDmg: 34 },
   glauncher: { name: "Lanzagranadas", icon: "🎆", fire: "explosive", cooldown: 1.0,  magSize: 4,  maxReserve: 12 },
   net:       { name: "Lanzarredes",   icon: "🕸️", fire: "net",       cooldown: 2.5,  magSize: 2,  maxReserve: 4 },
 };
+
+/** Melee reach test: is target (p) within `range` metres of attacker (a) AND inside the swing cone
+ *  (its direction dotted with the aim `d` ≥ minDot)? Point-blank always connects. Pure. */
+export function meleeHit(
+  ax: number, ay: number, az: number, dx: number, dy: number, dz: number,
+  px: number, py: number, pz: number, range: number, minDot: number,
+): boolean {
+  const rx = px - ax, ry = py - ay, rz = pz - az;
+  const dist = Math.hypot(rx, ry, rz);
+  if (dist > range) return false;
+  if (dist < 0.35) return true;
+  const dl = Math.hypot(dx, dy, dz) || 1;
+  return (rx * dx + ry * dy + rz * dz) / (dist * dl) >= minDot;
+}
+
+/** Does the ray from (o) along (d) pass within `radius` of point (p), no farther than `maxDist`
+ *  along the ray? Used to test whether a bullet's line of fire strikes a player. Pure. */
+export function rayHitsSphere(
+  ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
+  px: number, py: number, pz: number, maxDist: number, radius: number,
+): boolean {
+  const len = Math.hypot(dx, dy, dz) || 1;
+  dx /= len; dy /= len; dz /= len;
+  let t = (px - ox) * dx + (py - oy) * dy + (pz - oz) * dz; // project the point onto the ray
+  t = Math.max(0, Math.min(maxDist, t));                    // clamp to the segment [0, maxDist]
+  const cx = ox + dx * t - px, cy = oy + dy * t - py, cz = oz + dz * t - pz;
+  return cx * cx + cy * cy + cz * cz < radius * radius;
+}
 
 const DRONE_LOADOUT: Weapon[] = ["mg", "grenade", "kamikaze"];
 const HUMAN_LOADOUT: Weapon[] = ["mg", "shotgun", "glauncher", "net"];

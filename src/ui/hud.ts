@@ -18,13 +18,13 @@ const HELP = `
 <b>PARTICLES — FPS de destrucción</b>
 <hr>
 <b>Clic</b> en la pantalla para capturar el ratón · <b>Esc</b> suelta
-<b>WASD</b> moverse · <b>Espacio/Ctrl</b> subir/bajar · <b>Shift</b> turbo
+<b>WASD</b> moverse · <b>Espacio</b> subir · <b>C</b> bajar/agacharse · <b>Shift</b> turbo · <b>F</b> linterna
 <b>Clic izq</b> usar arma · <b>Clic der</b> disparo rápido · <b>Rueda</b> brocha (construir)
 <hr>
 <b>1</b> Disparar &nbsp; <b>2</b> Granada &nbsp; <b>3</b> Cañón &nbsp; <b>4</b> Construir &nbsp; <b>5</b> Borrar &nbsp; <b>6</b> Misil
 <b>Q/E</b> material (incluye 🛢 tambo de gas — explota en cadena)
-<b>N</b> edificio &nbsp; <b>G</b> casa &nbsp; <b>B</b> muro &nbsp; <b>T</b> torre &nbsp; <b>V</b> auto &nbsp; <b>R</b> escena &nbsp; <b>C</b> vaciar
-<b>P</b> guardar &nbsp; <b>L</b> cargar &nbsp; <b>F</b> caja &nbsp; <b>K</b> calidad (Bajo/Medio/Alto) &nbsp; <b>H</b> ocultar ayuda
+<b>N</b> edificio &nbsp; <b>G</b> casa &nbsp; <b>U</b> muro &nbsp; <b>T</b> torre &nbsp; <b>V</b> auto &nbsp; <b>R</b> escena &nbsp; <b>X</b> vaciar
+<b>B</b> 💣 MEGA BOMBA (apuntá y explotá) &nbsp; <b>P</b> guardar &nbsp; <b>L</b> cargar &nbsp; <b>J</b> caja &nbsp; <b>K</b> calidad &nbsp; <b>M</b> silencio &nbsp; <b>H</b> ayuda
 `;
 
 export class Hud {
@@ -68,9 +68,12 @@ export class Hud {
   }
 
   /** DvH scoreboard: each team's kills and whether its objective still stands. */
-  setScore(droneKills: number, humanKills: number, droneObjAlive: boolean, humanObjAlive: boolean): void {
-    const obj = (alive: boolean) => (alive ? "🟢" : "💥");
-    this.score.innerHTML = `🤖 Drones <b>${droneKills}</b> obj ${obj(droneObjAlive)} &nbsp;·&nbsp; obj ${obj(humanObjAlive)} <b>${humanKills}</b> Humanos 🧍`;
+  /** DvH scoreboard: each team's kills, its TWO bases (🟢 standing / 💥 razed) + the weakest base's HP%. */
+  setScore(droneKills: number, humanKills: number, droneObjs: number, humanObjs: number, droneHp = 1, humanHp = 1): void {
+    const bases = (n: number) => "🟢".repeat(Math.max(0, n)) + "💥".repeat(Math.max(0, 2 - n));
+    const pct = (h: number) => `${Math.round(h * 100)}%`;
+    this.score.innerHTML = `🤖 Drones <b>${droneKills}</b> ${bases(droneObjs)}<small> ${pct(droneHp)}</small>` +
+      ` &nbsp;·&nbsp; <small>${pct(humanHp)} </small>${bases(humanObjs)} <b>${humanKills}</b> Humanos 🧍`;
     this.score.style.display = "block";
   }
 
@@ -189,7 +192,7 @@ export class Hud {
 function inject(): void {
   const style = document.createElement("style");
   style.textContent = `
-    #hud { position: fixed; inset: 0; pointer-events: none; font-family: system-ui, sans-serif; color: #eef2f6; }
+    #hud { position: fixed; inset: 0; pointer-events: none; font-family: system-ui, sans-serif; color: #eef2f6; z-index: 10; }
     #hud .panel { position: absolute; background: rgba(12,16,22,.62); border: 1px solid rgba(255,255,255,.08);
       border-radius: 10px; padding: 10px 13px; font-size: 13px; line-height: 1.5; backdrop-filter: blur(6px); }
     #hud-help { top: 14px; left: 14px; max-width: 360px; }

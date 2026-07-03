@@ -18,24 +18,25 @@ export class Renderer {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap; // PCFSoft is deprecated (auto-downgrades anyway)
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.16;
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
 
     // sky gradient backdrop + fog for depth
     this.scene.background = makeSky();
-    this.scene.fog = new THREE.Fog(0xaec6da, 60, 240);
+    this.scene.fog = new THREE.Fog(0xb8cee0, 70, 260);
 
     // image-based lighting for believable reflections (esp. on metal/glass)
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     this.scene.environment = this.envTex;
+    this.scene.environmentIntensity = 1.15; // richer reflections/ambient from the IBL
 
     // sun — a TIGHT shadow frustum that Game keeps centred on the player each frame, so only nearby
     // chunks are shadow-casters (distant buildings, faded by fog anyway, cost nothing). This is what
     // lets the city grow without the shadow pass redrawing every building.
-    this.sun = new THREE.DirectionalLight(0xfff2d8, 3.0);
+    this.sun = new THREE.DirectionalLight(0xfff0d4, 3.5);
     this.sun.position.set(28, 44, 20);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
@@ -51,7 +52,11 @@ export class Renderer {
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
 
-    this.scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x55504a, 0.55));
+    this.scene.add(new THREE.HemisphereLight(0xaccbee, 0x4a4640, 0.75)); // richer sky/ground fill
+    // a dim COOL fill from the opposite side of the sun softens the shadow side (no shadow → cheap)
+    const fill = new THREE.DirectionalLight(0x9fc0e8, 0.55);
+    fill.position.set(-24, 22, -18);
+    this.scene.add(fill);
     window.addEventListener("resize", () => this.onResize());
   }
 
@@ -96,9 +101,9 @@ function makeSky(): THREE.Texture {
   c.height = 256;
   const ctx = c.getContext("2d")!;
   const g = ctx.createLinearGradient(0, 0, 0, 256);
-  g.addColorStop(0.0, "#6aa0d8");
-  g.addColorStop(0.55, "#a9c8e6");
-  g.addColorStop(1.0, "#dfeaf2");
+  g.addColorStop(0.0, "#4d86c9");
+  g.addColorStop(0.5, "#8fbadf");
+  g.addColorStop(1.0, "#dce9f0");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 2, 256);
   const tex = new THREE.CanvasTexture(c);

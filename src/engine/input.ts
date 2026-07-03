@@ -14,7 +14,11 @@ export class Input {
       const code = e.code.toLowerCase();
       if (!this.keys.has(code)) this.onKey?.(code);
       this.keys.add(code);
-      if (code === "tab") e.preventDefault();
+      // While playing (pointer locked), swallow the browser default for the game keys — page scroll on
+      // Space/arrows, Firefox quick-find on letters, Tab focus-steal. NEVER touch modifier combos, so
+      // Ctrl+R / Ctrl+T / F5 / F11 etc. still reach the browser (the game itself uses NO Ctrl/Alt/Meta).
+      const gameKey = code === "space" || code === "tab" || code.startsWith("arrow") || code.startsWith("key") || code.startsWith("digit");
+      if (gameKey && (this.locked || code === "tab") && !e.ctrlKey && !e.altKey && !e.metaKey) e.preventDefault();
     });
     window.addEventListener("keyup", (e) => this.keys.delete(e.code.toLowerCase()));
 

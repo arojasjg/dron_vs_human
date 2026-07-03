@@ -55,7 +55,7 @@ export class FlyCamera {
     if (input.isDown("keyd")) move.add(this.right);
     if (input.isDown("keya")) move.addScaledVector(this.right, -1);
     if (input.isDown("space")) move.y += 1;
-    if (input.isDown("controlleft") || input.isDown("controlright")) move.y -= 1;
+    if (input.isDown("keyc")) move.y -= 1;
 
     if (move.lengthSq() > 0) {
       move.normalize().multiplyScalar(speed * dt);

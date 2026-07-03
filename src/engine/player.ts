@@ -2,11 +2,13 @@ import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
 import type { Physics } from "./physics";
 import type { Input } from "./input";
+import { droneBank, hoverSway, speedFov, DRONE_FOV_BASE, DRONE_FOV_BOOST } from "./cameraFeel";
 
 const SENS = 0.0022;
 const CRUISE = 9.0;        // m/s normal flight speed
 const BOOST = 20.0;        // m/s with shift held
-const RESPONSE = 9.0;      // how fast velocity chases the target (drone inertia: lower = floatier)
+const RESPONSE = 6.5;      // how fast velocity chases the target (drone inertia: lower = floatier)
+const VERT_SCALE = 0.65;   // a drone climbs/descends slower than it translates (rotor thrust limit)
 const EYE = 0.0;     // camera sits at the drone body centre
 const RADIUS = 0.18; // small spherical drone (Ø0.36m) → fits through 3-voxel (0.75m) windows
 
@@ -26,6 +28,7 @@ export class Player {
   private readonly vel = new THREE.Vector3();
   private lastBlocked = 0;   // fraction of the last move blocked by a wall (1 = fully stopped)
   private lastSpeedH = 0;    // horizontal speed on the last frame (m/s)
+  private time = 0;          // accumulates dt for the idle hover sway
 
   private readonly world: RAPIER.World;
   private readonly body: RAPIER.RigidBody;
@@ -36,7 +39,7 @@ export class Player {
   constructor(physics: Physics) {
     this.world = physics.world;
     const aspect = typeof window !== "undefined" ? window.innerWidth / window.innerHeight : 1.5;
-    this.camera = new THREE.PerspectiveCamera(75, aspect, 0.05, 250);
+    this.camera = new THREE.PerspectiveCamera(DRONE_FOV_BASE, aspect, 0.05, 250);
 
     this.body = physics.world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 5, 0),
@@ -90,6 +93,11 @@ export class Player {
   /** Current 3D speed (m/s) — drives the drone's battery drain (faster = more). */
   speed(): number { return Math.hypot(this.vel.x, this.vel.y, this.vel.z); }
 
+  // Uniform aim/stance accessors so Game broadcasts the same fields for drone + human (drone: no stance).
+  get lookYaw(): number { return this.yaw; }
+  get lookPitch(): number { return this.pitch; }
+  get stanceVal(): 0 { return 0; }
+
   update(dt: number, input: Input): void {
     if (input.locked) {
       const d = input.consumeMouseDelta();
@@ -110,12 +118,12 @@ export class Player {
     if (input.isDown("keyd")) { dx += rx; dz += rz; }
     if (input.isDown("keya")) { dx -= rx; dz -= rz; }
     if (input.isDown("space")) dy += 1;
-    if (input.isDown("controlleft") || input.isDown("controlright")) dy -= 1;
+    if (input.isDown("keyc")) dy -= 1; // descend (C — Ctrl would trigger browser Ctrl+W/Ctrl+digit)
 
     const len = Math.hypot(dx, dy, dz);
     const speed = (input.isDown("shiftleft") || input.isDown("shiftright")) ? BOOST : CRUISE;
     const tx = len > 1e-4 ? (dx / len) * speed : 0;
-    const ty = len > 1e-4 ? (dy / len) * speed : 0;
+    const ty = len > 1e-4 ? (dy / len) * speed * VERT_SCALE : 0; // drones climb/descend slower
     const tz = len > 1e-4 ? (dz / len) * speed : 0;
 
     // ease velocity toward the target → smooth accelerate / drift to stop (drone inertia)
@@ -138,8 +146,16 @@ export class Player {
     const np = { x: t.x + corr.x, y: t.y + corr.y, z: t.z + corr.z };
     this.body.setNextKinematicTranslation(np);
 
-    this.camera.position.set(np.x, np.y + EYE, np.z);
+    // --- drone camera feel: idle hover sway, bank into lateral motion, FOV that widens with speed ---
+    this.time += dt;
+    const sway = hoverSway(this.time);
+    const rightVel = this.vel.x * rx + this.vel.z * rz;          // lateral speed in the facing frame
+    this.camera.position.set(np.x + sway.dx, np.y + EYE + sway.dy, np.z + sway.dx * 0.6);
     this.lookFromAngles();
+    this.camera.rotateZ(droneBank(rightVel, BOOST) + sway.roll); // roll around forward → aim direction unchanged
+    const fov = speedFov(DRONE_FOV_BASE, DRONE_FOV_BOOST, this.lastSpeedH, BOOST);
+    this.camera.fov += (fov - this.camera.fov) * (1 - Math.exp(-6 * dt));
+    this.camera.updateProjectionMatrix();
   }
 
   private lookFromAngles(): void {

@@ -3,8 +3,10 @@ import { VOXEL } from "../config";
 import { MATERIALS, MATERIAL_ORDER, type MaterialId } from "./materials";
 import { packKey, unpackKey, type VoxelGrid } from "./voxelGrid";
 import { CHUNK, chunkCoord, greedyBoxesFromKeys } from "./voxelCollider";
+import { weatherMul } from "./weathering";
 
 const DUMMY = new THREE.Object3D();
+const _WCOL = new THREE.Color();
 
 /**
  * Renders the static voxel field as one InstancedMesh per (chunk, material). Rebuilding only
@@ -86,8 +88,12 @@ export class VoxelMesher {
         DUMMY.rotation.set(0, 0, 0);
         DUMMY.updateMatrix();
         mesh.setMatrixAt(i, DUMMY.matrix);
+        // weathering: modulate each box's colour by a deterministic grime/wear/stain factor so walls
+        // read as aged, not flat. Per-box (greedy), hashed from the box centre -> stable + client-consistent.
+        mesh.setColorAt(i, _WCOL.setScalar(weatherMul((x0 + x1) >> 1, (y0 + y1) >> 1, (z0 + z1) >> 1)));
       }
       mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
       mesh.computeBoundingSphere();
       this.group.add(mesh);
       map.set(mat, mesh);

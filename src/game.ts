@@ -20,12 +20,16 @@ import { ImpactMarks } from "./fx/impactMarks";
 import { RubbleField } from "./fx/rubble";
 import { HeightField } from "./fx/heightField";
 import { placeVoxel, eraseVoxel, type EditRegion } from "./build/editor";
-import { BIG, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, objectiveAlive, OBJECTIVE_SITES, setWorldSeed } from "./build/prefabs";
+import { BIG, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, objectiveHp, objectiveDestroyed, OBJECTIVE_SITES, placedBuildings, setWorldSeed } from "./build/prefabs";
+import { InteriorLights } from "./engine/interiorLights";
 import { Hud, type Mode, type Tool } from "./ui/hud";
+import { CameraFx } from "./fx/cameraFx";
+import { GameAudio } from "./fx/audio";
+import { Scenery } from "./fx/scenery";
 import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleMaxHp, roleWeapon, type Role } from "./net/roles";
-import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, type Weapon, type Ammo } from "./net/weapons";
+import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -33,10 +37,11 @@ import { chunkCoord, VoxelCollider } from "./world/voxelCollider";
 import { VoxelMesher } from "./world/voxelMesh";
 import { connectedComponents, type Voxel } from "./world/structuralIntegrity";
 
-// Support is solved on the COARSE CELL GRAPH (VoxelGrid.fallenCells). This is how many cells of
-// lateral support a slab/beam may span to reach a column-cell — generous enough that destroying
-// one support redistributes to neighbours (local damage, not a full vertical collapse).
-const CELL_OVERHANG = 6;
+// Support is solved on the COARSE CELL GRAPH (VoxelGrid.fallenCells). This is how many 2 m cells of
+// lateral support a slab/beam may span to reach a load-bearing column-cell before it is considered
+// unsupported and falls. Measured: an intact city stands at 2 (0 false floaters), so 2 (~4 m cantilever
+// budget) makes blasted overhangs fall realistically while intact buildings — and their stairs — hold.
+const CELL_OVERHANG = 2;
 
 /** Deterministic 32-bit hash of the room code → world seed (so all clients build the same world). */
 function hashStr(s: string): number {
@@ -66,6 +71,12 @@ export class Game {
   private player: Player | Walker; // drone (Player) in most modes; swapped to Walker for a human
   private readonly input: Input;
   private readonly hud = new Hud();
+  private readonly camFx = new CameraFx(); // FPV/body-cam overlay skinned by role
+  private readonly audio = new GameAudio(); // procedural SFX (its live context also keeps the tab awake)
+  private interiorLights?: InteriorLights;  // dim/flickering lights inside some buildings
+  private scenery?: Scenery;                // trees + drifting clouds (visual scene dressing)
+  private flashlight?: THREE.SpotLight;     // head-mounted torch for the local player (F to toggle)
+  private flashOn = false;
 
   private readonly grid = new VoxelGrid();
   private readonly mesher: VoxelMesher;
@@ -102,6 +113,8 @@ export class Game {
   private weaponReadyAt = 0;      // shared per-shot cooldown gate
   private battery = BATTERY_MAX;  // drone battery (drains with movement; 0 → fall & die)
   private combatHudT = 0;         // throttle for the combat HUD panels
+  private lowBatBeepAt = 0;       // next time a low-battery beep may play
+  private meleeReadyAt = 0;       // human melee cooldown gate
   // personal scoreboard (K/D/A). Kills/assists are attributed by the victim's `died` broadcast.
   private myKills = 0;
   private myAssists = 0;
@@ -195,6 +208,7 @@ export class Game {
     );
 
     this.buildGround();
+    this.scenery = new Scenery(this.renderer.scene); // trees + clouds
     this.initFlashes();
     buildDefaultScene(this.grid);
     this.mesher.rebuild(this.grid);
@@ -234,6 +248,8 @@ export class Game {
       this.rebuildWorld(hashStr(room), mode === "free");
       this.net.connect(room);
       this.hud.setMode(mode, room);
+      this.camFx.setRole("drone"); // start as a drone (dvh reassigns to human on role assignment)
+      this.audio.ui();
       this.hud.setHealth(this.hp, this.myMaxHp(), true);
     };
     const urlMode = params.get("mode");
@@ -249,7 +265,8 @@ export class Game {
       this.spawnPlayerInBuilding();
     } else if (m.t === "state") {
       this.remotes.upsert(m.id as number, m.x as number, m.y as number, m.z as number,
-        m.qx as number, m.qy as number, m.qz as number, m.qw as number, m.hp as number, (m.role as Role) ?? "drone", (m.mhp as number) || MAX_HP);
+        m.qx as number, m.qy as number, m.qz as number, m.qw as number, m.hp as number, (m.role as Role) ?? "drone", (m.mhp as number) || MAX_HP,
+        (m.ry as number) || 0, (m.rp as number) || 0, ((m.st as number) || 0) as 0 | 1 | 2);
       if (this.mode === "dvh" && typeof m.dk === "number") {
         const merged = reconcileKills({ drone: this.droneKills, human: this.humanKills }, { drone: m.dk as number, human: m.hk as number });
         this.droneKills = merged.drone; this.humanKills = merged.human;
@@ -268,6 +285,12 @@ export class Game {
       this.addKill(m.role as Role); // a peer died → the enemy team scores
       if ((m.by as number) === this.net.id) { this.myKills++; this.hud.flash("¡Derribo!"); }
       else if (Array.isArray(m.assist) && (m.assist as number[]).includes(this.net.id)) this.myAssists++;
+    } else if (m.t === "melee") {
+      this.remotes.meleeAnim(m.id as number); // swing on the attacker's avatar
+      const p = this.player.camera.position;
+      if (this.hp > 0 && meleeHit(m.ox as number, m.oy as number, m.oz as number, m.dx as number, m.dy as number, m.dz as number, p.x, p.y, p.z, m.range as number, 0.5)) {
+        this.recordDamager(m.id as number); this.damageDrone(m.dmg as number); this.audio.meleeHit();
+      }
     } else if (m.t === "leave") {
       this.remotes.remove(m.id as number);
     }
@@ -280,11 +303,12 @@ export class Game {
     const wantWalker = this.role === "human";
     if (wantWalker !== (this.player instanceof Walker)) {
       this.player.dispose();
-      this.player = wantWalker ? new Walker(this.physics) : new Player(this.physics);
+      this.player = wantWalker ? new Walker(this.physics, this.grid) : new Player(this.physics);
     }
     this.hp = this.myMaxHp(); // humans spawn tankier than drones
     this.weapon = roleLoadout(this.role)[0]; // start on the team's primary weapon
     this.resupply();
+    this.camFx.setRole(this.role); // FPV for drones, body-cam for humans
     this.hud.setHealth(this.hp, this.myMaxHp(), true);
   }
 
@@ -300,12 +324,17 @@ export class Game {
   /** DvH win check: destroy the enemy objective or hit the kill limit. Objectives live in the
    *  synced grid, so every client reaches the same verdict. */
   private checkMatchWin(): void {
-    if (this.mode !== "dvh" || this.matchOver || OBJECTIVE_SITES.length < 2) return;
-    const has = (x: number, y: number, z: number) => this.grid.has(x, y, z);
-    const droneObjAlive = objectiveAlive(OBJECTIVE_SITES[0], has);
-    const humanObjAlive = objectiveAlive(OBJECTIVE_SITES[1], has);
-    this.hud.setScore(this.droneKills, this.humanKills, droneObjAlive, humanObjAlive);
-    const state: MatchState = { droneObjAlive, humanObjAlive, droneKills: this.droneKills, humanKills: this.humanKills };
+    if (this.mode !== "dvh" || this.matchOver || OBJECTIVE_SITES.length < 4) return;
+    const mat = (x: number, y: number, z: number) => this.grid.get(x, y, z);
+    // count each team's SURVIVING bases (destroyed = ~75% of its metal razed) + weakest-base HP for the HUD
+    let droneObjsAlive = 0, humanObjsAlive = 0, droneHp = 1, humanHp = 1;
+    for (const s of OBJECTIVE_SITES) {
+      const hp = objectiveHp(s, mat);
+      if (s.team === "drone") { if (!objectiveDestroyed(s, mat)) droneObjsAlive++; droneHp = Math.min(droneHp, hp); }
+      else { if (!objectiveDestroyed(s, mat)) humanObjsAlive++; humanHp = Math.min(humanHp, hp); }
+    }
+    this.hud.setScore(this.droneKills, this.humanKills, droneObjsAlive, humanObjsAlive, droneHp, humanHp);
+    const state: MatchState = { droneObjsAlive, humanObjsAlive, droneKills: this.droneKills, humanKills: this.humanKills };
     const winner = checkWin(state, Game.KILL_LIMIT);
     if (winner) { this.matchOver = true; this.hud.showWin(winner, this.role); }
   }
@@ -315,9 +344,20 @@ export class Game {
   private fireRemoteWeapon(m: NetMsg): void {
     const o = new THREE.Vector3(m.ox as number, m.oy as number, m.oz as number);
     const d = new THREE.Vector3(m.dx as number, m.dy as number, m.dz as number);
-    if (m.k === "bullet") this.projectiles.launchBullet(o, d, 120, true);
-    else if (m.k === "grenade") this.projectiles.launchGrenade(o, d, 22, true);
+    if (m.k === "bullet") {
+      this.projectiles.launchBullet(o, d, 120, true);
+      const dmg = (m.dmg as number) || 0; // a bullet in our line of fire hurts us (any team — "a todos")
+      if (dmg > 0 && this.hp > 0 && this.bulletHitsMe(o, d)) { this.recordDamager(m.id as number); this.damageDrone(dmg); }
+    } else if (m.k === "grenade") this.projectiles.launchGrenade(o, d, 22, true);
     else if (m.k === "missile") this.projectiles.launchRocket(o, d, 52, true);
+  }
+
+  /** Does an incoming shot's line of fire strike our own player, before a wall stops the bullet? */
+  private bulletHitsMe(o: THREE.Vector3, d: THREE.Vector3): boolean {
+    const hit = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 220);
+    const wall = hit ? hit.distance : 220;
+    const p = this.player.camera.position;
+    return rayHitsSphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, wall, 1.0);
   }
 
   /** Connects with an explicit mode/room (used by the automated multiplayer test). */
@@ -345,6 +385,7 @@ export class Game {
       this.hp = this.myMaxHp();
       this.spawnPlayerInBuilding();
       this.resupply(); // full ammo + battery on respawn
+      this.audio.respawn();
       this.hud.setHealth(this.hp, this.myMaxHp(), true);
     }
     if (!this.net.connected) return;
@@ -357,6 +398,7 @@ export class Game {
       t: "state",
       x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2),
       qx: +q.x.toFixed(3), qy: +q.y.toFixed(3), qz: +q.z.toFixed(3), qw: +q.w.toFixed(3),
+      ry: +this.player.lookYaw.toFixed(3), rp: +this.player.lookPitch.toFixed(3), st: this.player.stanceVal,
       hp: this.hp, mhp: this.myMaxHp(), role: this.role, // role → avatar; mhp → correct health bar
       dk: this.droneKills, hk: this.humanKills, // scoreboard → max-merged by peers (self-healing)
     };
@@ -369,6 +411,7 @@ export class Game {
     if (this.hp <= 0) return;
     this.hp = Math.max(0, this.hp - amount);
     this.hud.setHealth(this.hp, this.myMaxHp(), true);
+    if (this.hp > 0) this.audio.hit(); else this.audio.death();
     if (this.hp <= 0) {
       this.respawnAt = this.time + 3;
       this.hud.flash("Derribado — reapareces en 3s");
@@ -421,32 +464,61 @@ export class Game {
     this.quality = QUALITY_ORDER[(QUALITY_ORDER.indexOf(this.quality) + 1) % QUALITY_ORDER.length];
     if (typeof localStorage !== "undefined") localStorage.setItem("quality", this.quality);
     this.renderer.applyQuality(qualityConfig(this.quality, window.devicePixelRatio || 1));
+    this.interiorLights?.build(placedBuildings(), this.interiorLightBudget()); // re-scale interior lights to the preset
     this.hud.flash(`Calidad: ${this.quality.toUpperCase()}${this.quality === "bajo" ? " · recargá para quitar el suavizado" : ""}`);
+  }
+
+  /** Interior-light budget by graphics preset (bajo → none, so weak GPUs aren't taxed by extra lights). */
+  private interiorLightBudget(): number { return this.quality === "bajo" ? 0 : this.quality === "medio" ? 4 : 8; }
+
+  /** Creates the flashlight ONCE at intensity 0 (like the flash pool) so toggling it never changes the
+   *  scene's light count → no one-time material recompile hitch. */
+  private ensureFlashlight(): void {
+    if (this.flashlight) return;
+    const s = new THREE.SpotLight(0xfff2d0, 0, 48, 0.42, 0.35, 1.2); // warm cone, no shadow (perf)
+    s.castShadow = false;
+    this.renderer.scene.add(s, s.target);
+    this.flashlight = s;
+  }
+
+  /** Toggles a head-mounted flashlight (drone or human). */
+  private toggleFlashlight(): void {
+    this.ensureFlashlight();
+    this.flashOn = !this.flashOn;
+    this.flashlight!.intensity = this.flashOn ? 9 : 0;
+    this.audio.ui();
+    this.hud.flash(this.flashOn ? "🔦 Linterna encendida" : "Linterna apagada");
+  }
+
+  /** Keeps the flashlight glued to the camera, pointing where the player looks. */
+  private updateFlashlight(): void {
+    const s = this.flashlight;
+    if (!s || !this.flashOn) return;
+    const cam = this.player.camera, dir = this.player.forward(this.tmpDir);
+    s.position.copy(cam.position);
+    s.target.position.set(cam.position.x + dir.x * 10, cam.position.y + dir.y * 10, cam.position.z + dir.z * 10);
+    s.target.updateMatrixWorld();
+  }
+
+  /** Per-frame audio: the drone's rotor hum tracks its speed; a human plays footstep/jump/land events. */
+  private audioFrame(): void {
+    if (this.player instanceof Player) {
+      this.audio.setRotor(this.mode === "free" || this.hp > 0 ? 1 : 0, this.player.speed());
+    } else {
+      this.audio.setRotor(0, 0);
+      const w = this.player;
+      if (w.audioStep) { this.audio.footstep(w.audioRun); w.audioStep = false; }
+      if (w.audioJump) { this.audio.jump(); w.audioJump = false; }
+      if (w.audioLand) { this.audio.land(); w.audioLand = false; }
+    }
   }
 
   /** True when the tab is hidden/blurred (its rAF loop is paused by the browser). */
   private hidden(): boolean { return typeof document !== "undefined" && document.hidden; }
 
-  /** A hidden tab's rAF, timers AND worker messages get suspended by the browser to save power. A tab
-   *  running a live AudioContext is kept far more awake, which lets the Web Worker loop keep ticking
-   *  while hidden. Autoplay policy requires resuming the context from a user gesture, so we do it on
-   *  the first click/keypress (the same gestures that lock the pointer). */
-  private keepAwakeAudio(): void {
-    try {
-      const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AC) return;
-      const ac = new AC();
-      const osc = ac.createOscillator(), gain = ac.createGain();
-      gain.gain.value = 0; osc.connect(gain); gain.connect(ac.destination); osc.start(); // silent
-      const resume = () => { ac.resume().catch(() => {}); };
-      window.addEventListener("pointerdown", resume);
-      window.addEventListener("keydown", resume);
-    } catch { /* no audio → the tab still pauses when fully hidden */ }
-  }
-
   start(): void {
-    this.keepAwakeAudio();
-    // rAF drives the loop at display rate while the tab is VISIBLE (smooth, vsync'd).
+    // GameAudio's live AudioContext (constructed as a field) keeps the tab awake, resumed on the first
+    // gesture. rAF drives the loop at display rate while the tab is VISIBLE (smooth, vsync'd).
     this.renderer.renderer.setAnimationLoop(() => { if (!this.hidden()) this.frame(); });
     // rAF is PAUSED by the browser on a hidden/blurred tab, which would FREEZE the whole game (physics,
     // networking, everything). A Web Worker timer is NOT visibility-throttled, so it keeps driving the
@@ -656,6 +728,8 @@ export class Game {
       buildObjectives(this.grid); // a destructible core per team
       this.droneKills = 0; this.humanKills = 0; this.matchOver = false; this.hud.hideWin();
     }
+    (this.interiorLights ??= new InteriorLights(this.renderer.scene)).build(placedBuildings(), this.interiorLightBudget());
+    this.ensureFlashlight(); // pre-create at intensity 0 so the first F toggle causes no light-count recompile
     this.mesher.rebuild(this.grid);
     this.heightField.rebuild(this.grid);
     this.gpu?.setHeightField(this.heightField.texture, this.heightField.origin, this.heightField.size);
@@ -762,6 +836,7 @@ export class Game {
     if (broadcast && this.net.connected) {
       this.net.send({ t: "explode", x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), r: radius, p: power });
     }
+    { const pp = this.player.camera.position; this.audio.explosion(power, Math.hypot(pp.x - x, pp.y - y, pp.z - z)); }
     const { removed } = explode(this.physics, this.targets, x, y, z, radius, power, (fx, fy, fz, r) => this.addFlash(fx, fy, fz, r));
     if (removed > 0) {
       this.markSphere(x, y, z, radius);
@@ -944,13 +1019,13 @@ export class Game {
         break;
       case "build":
         if (button === 2) {
-          this.applyEdit(eraseVoxel(this.grid, origin, dir, this.brush));
+          this.applyEdit(eraseVoxel(this.grid, origin, dir, this.brush)); this.audio.erase();
         } else {
-          this.applyEdit(placeVoxel(this.grid, origin, dir, MATERIAL_ORDER[this.matIndex], this.brush));
+          this.applyEdit(placeVoxel(this.grid, origin, dir, MATERIAL_ORDER[this.matIndex], this.brush)); this.audio.place();
         }
         break;
       case "erase":
-        this.applyEdit(eraseVoxel(this.grid, origin, dir, this.brush));
+        this.applyEdit(eraseVoxel(this.grid, origin, dir, this.brush)); this.audio.erase();
         break;
     }
   }
@@ -959,16 +1034,17 @@ export class Game {
     if (region) this.markRegion(region[0], region[1], region[2], region[3], region[4], region[5]);
   }
 
-  private shoot(origin: THREE.Vector3, dir: THREE.Vector3): void {
+  private shoot(origin: THREE.Vector3, dir: THREE.Vector3, dmg = 0): void {
     this.projectiles.launchBullet(origin, dir);
-    this.broadcastWeapon("bullet", origin, dir);
+    this.broadcastWeapon("bullet", origin, dir, dmg);
   }
 
-  /** Tells the other players we fired, so they see the projectile and its blast hits their drones. */
-  private broadcastWeapon(k: string, o: THREE.Vector3, d: THREE.Vector3): void {
+  /** Tells the other players we fired, so they see the projectile; `dmg` lets a bullet hurt whoever's
+   *  in its line of fire (each hit peer self-applies the damage — the same model as blasts). */
+  private broadcastWeapon(k: string, o: THREE.Vector3, d: THREE.Vector3, dmg = 0): void {
     if (!this.net.connected) return;
     this.net.send({
-      t: "weapon", k,
+      t: "weapon", k, dmg,
       ox: +o.x.toFixed(2), oy: +o.y.toFixed(2), oz: +o.z.toFixed(2),
       dx: +d.x.toFixed(3), dy: +d.y.toFixed(3), dz: +d.z.toFixed(3),
     });
@@ -979,23 +1055,24 @@ export class Game {
     const spec = WEAPONS[this.weapon];
     if (this.time < this.weaponReadyAt) return;
     const res = tryFire(this.ammo[this.weapon], spec.magSize);
-    if (!res.fired) { this.hud.flash("Sin munición — recarga en tu base"); return; }
+    if (!res.fired) { this.hud.flash("Sin munición — recarga en tu base"); this.audio.emptyClick(); return; }
     this.ammo[this.weapon] = res.ammo;
     this.weaponReadyAt = this.time + spec.cooldown;
     const w = roleWeapon(this.role);
     switch (spec.fire) {
-      case "bullet":    this.shoot(origin, dir); break;
-      case "shotgun":   this.fireShotgun(origin, dir, spec.pellets ?? 8); break;
+      case "bullet":    this.shoot(origin, dir, spec.playerDmg ?? 0); break;
+      case "shotgun":   this.fireShotgun(origin, dir, spec.pellets ?? 8, spec.playerDmg ?? 0); break;
       case "grenade":   this.projectiles.launchGrenade(origin.clone(), dir, 22, false, w.powerMul); this.broadcastWeapon("grenade", origin, dir); break;
       case "explosive": this.projectiles.launchRocket(origin.clone(), dir, 52, false, w.powerMul); this.broadcastWeapon("missile", origin, dir); break;
       case "net":       this.fireNet(origin, dir); break;
       case "kamikaze":  this.kamikaze(origin); break;
     }
+    this.audio.shot(this.weapon); // muzzle report for the fired weapon
     this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon]);
   }
 
   /** Shotgun: a tight bullet spread. Each pellet's grid hit is broadcast, so peers stay in sync. */
-  private fireShotgun(origin: THREE.Vector3, dir: THREE.Vector3, pellets: number): void {
+  private fireShotgun(origin: THREE.Vector3, dir: THREE.Vector3, pellets: number, dmg: number): void {
     for (let i = 0; i < pellets; i++) {
       const d = new THREE.Vector3(
         dir.x + (Math.random() - 0.5) * 0.09,
@@ -1004,7 +1081,7 @@ export class Game {
       ).normalize();
       this.projectiles.launchBullet(origin, d);
     }
-    this.broadcastWeapon("bullet", origin, dir);
+    this.broadcastWeapon("bullet", origin, dir, dmg); // one hitscan carries the burst's player damage
   }
 
   /** Net launcher: a slow, weak ensnaring projectile (functional stand-in for a drone-catching net). */
@@ -1019,19 +1096,48 @@ export class Game {
     this.damageDrone(9999);
   }
 
+  /** Human-only melee (rifle butt): short cone attack. Broadcasts so peers self-damage if in reach and
+   *  see the swing; the swing whoosh plays locally, the thud on whoever it connects with. */
+  private meleeAttack(): void {
+    if (!(this.player instanceof Walker) || this.hp <= 0 || this.time < this.meleeReadyAt) return;
+    this.meleeReadyAt = this.time + 0.7;
+    this.audio.melee();
+    const o = this.player.camera.position, d = this.player.forward(this.tmpDir).clone();
+    if (this.net.connected) {
+      this.net.send({
+        t: "melee", dmg: 55, range: 2.4,
+        ox: +o.x.toFixed(2), oy: +o.y.toFixed(2), oz: +o.z.toFixed(2),
+        dx: +d.x.toFixed(3), dy: +d.y.toFixed(3), dz: +d.z.toFixed(3),
+      });
+    }
+  }
+
   private selectWeapon(w: Weapon): void {
     this.weapon = w;
+    this.audio.weaponSwitch();
     this.hud.setWeapon(this.role, w, this.ammo[w]);
     this.hud.flash(`${WEAPONS[w].icon} ${WEAPONS[w].name}`);
   }
 
-  /** True when within recharge range of our own team's base (OBJECTIVE_SITES: drone=0, human=1). */
+  /** 💣 Mega bomb (free mode, B): a huge explosion where you're aiming — far bigger than any weapon.
+   *  Broadcast so every client sees the same crater + collapse (the blast lives in the synced grid). */
+  private megaBomb(): void {
+    const o = this.player.camera.position, d = this.player.forward(this.tmpDir).clone();
+    const hit = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 160);
+    const dist = hit ? hit.distance : 42;
+    this.explodeAt(o.x + d.x * dist, o.y + d.y * dist, o.z + d.z * dist, 8, 3000, true);
+    this.hud.flash("💣 ¡MEGA BOMBA!");
+  }
+
+  /** True when within recharge range of EITHER of our team's two bases. */
   private nearOwnBase(): boolean {
-    const site = OBJECTIVE_SITES[this.role === "drone" ? 0 : 1];
-    if (!site) return false;
-    const cx = (site.x0 + site.x1) * 0.5 * VOXEL, cy = (site.y0 + site.y1) * 0.5 * VOXEL, cz = (site.z0 + site.z1) * 0.5 * VOXEL;
     const p = this.player.camera.position;
-    return Math.hypot(p.x - cx, p.y - cy, p.z - cz) < 8;
+    for (const site of OBJECTIVE_SITES) {
+      if (site.team !== this.role) continue;
+      const cx = (site.x0 + site.x1) * 0.5 * VOXEL, cy = (site.y0 + site.y1) * 0.5 * VOXEL, cz = (site.z0 + site.z1) * 0.5 * VOXEL;
+      if (Math.hypot(p.x - cx, p.y - cy, p.z - cz) < 8) return true;
+    }
+    return false;
   }
 
   /** Refill all weapons + battery (on respawn, and whenever standing in the base). */
@@ -1049,6 +1155,7 @@ export class Game {
     if (this.mode === "dvh" && this.player instanceof Player) {
       if (!nearBase) this.battery = Math.max(0, this.battery - batteryDrain(this.player.speed(), dt));
       if (this.battery <= 0 && this.hp > 0) { this.damageDrone(9999); this.hud.flash("¡Batería agotada — el dron cae!"); }
+      if (this.battery < 20 && this.battery > 0 && this.time > this.lowBatBeepAt) { this.audio.lowBattery(); this.lowBatBeepAt = this.time + 1; }
       this.hud.setBattery(this.battery / BATTERY_MAX);
     } else {
       this.hud.setBattery(-1); // humans / vs: no battery gauge
@@ -1086,6 +1193,8 @@ export class Game {
     const mat = this.grid.get(vx, vy, vz);
     if (mat === undefined) return; // already gone on this client
     if (mat === "gastank") { this.detonateTankAt(vx, vy, vz); return; } // deterministic chain (not broadcast)
+    const pp = this.player.camera.position;
+    this.audio.impact(mat, Math.hypot(pp.x - px, pp.y - py, pp.z - pz)); // material-specific hit, attenuated by distance
     const dmg = this.grid.addDamage(vx, vy, vz);
     if (dmg < MATERIALS[mat].hp) {
       this.impactMarks.add(packKey(vx, vy, vz), px, py, pz, nx, ny, nz);
@@ -1191,11 +1300,14 @@ export class Game {
 
   private onKey(code: string): void {
     if (code === "keyk") { this.cycleQuality(); return; } // graphics quality (all modes)
+    if (code === "keym") { this.hud.flash(this.audio.toggleMute() ? "🔇 Silencio" : "🔊 Sonido"); return; } // mute toggle
+    if (code === "keyf") { this.toggleFlashlight(); return; } // flashlight (all modes/roles)
     if (this.mode !== "free") {
       // Combat (vs/dvh): digit keys pick from the team weapon loadout (drone: 1-3, human: 1-4).
       const lo = roleLoadout(this.role);
       const idx = ["digit1", "digit2", "digit3", "digit4", "digit5", "digit6"].indexOf(code);
       if (idx >= 0 && idx < lo.length) { this.selectWeapon(lo[idx]); return; }
+      if (code === "keyv") { this.meleeAttack(); return; } // melee (humans)
       if (code === "keyh") { this.hud.toggleHelp(); return; }
       return;
     }
@@ -1210,12 +1322,13 @@ export class Game {
       case "keye": this.cycleMaterial(1); return;
       case "keyn": { const [x, z] = this.groundTarget(); buildBuilding(this.grid, x, z); this.markAllDirty(); this.hud.flash("Edificio"); return; }
       case "keyg": { const [x, z] = this.groundTarget(); buildHouse(this.grid, x, z); this.markAllDirty(); this.hud.flash("Casa"); return; }
-      case "keyb": { const [x, z] = this.groundTarget(); buildWall(this.grid, x, z); this.markAllDirty(); this.hud.flash("Muro"); return; }
+      case "keyu": { const [x, z] = this.groundTarget(); buildWall(this.grid, x, z); this.markAllDirty(); this.hud.flash("Muro"); return; }
+      case "keyb": this.megaBomb(); return; // 💣 mega bomb (B)
       case "keyt": { const [x, z] = this.groundTarget(); buildTower(this.grid, x, z); this.markAllDirty(); this.hud.flash("Torre"); return; }
       case "keyv": { const [x, z] = this.groundTarget(); buildCar(this.grid, x, z); this.markAllDirty(); this.hud.flash("Auto"); return; }
       case "keyr": buildDefaultScene(this.grid); this.markAllDirty(); this.hud.flash("Escena inicial"); return;
-      case "keyc": this.grid.clear(); this.markAllDirty(); this.hud.flash("Vaciado"); return;
-      case "keyf": this.throwCrate(); return;
+      case "keyx": this.grid.clear(); this.markAllDirty(); this.hud.flash("Vaciado"); return; // (C is now descend/crouch)
+      case "keyj": this.throwCrate(); return; // (F is now the flashlight)
       case "keyp": this.save(); return;
       case "keyl": this.load(); return;
       case "keyh": this.hud.toggleHelp(); return;
@@ -1329,6 +1442,15 @@ export class Game {
     this.prof.rebuildTotal += _rd; if (_rd > this.prof.rebuildMax) this.prof.rebuildMax = _rd;
 
     this.combatFrame(dt); // team weapons: base recharge, drone battery, HUD panels
+    this.audioFrame();
+    this.interiorLights?.update(this.time); // flicker the interior lights
+    this.scenery?.update(dt);               // drift the clouds
+    this.updateFlashlight();
+    this.camFx.update(dt, {
+      speed: this.player instanceof Player ? this.player.speed() : 0,
+      alt: this.player.camera.position.y,
+      battery: this.battery,
+    });
     this.hud.update(dt);
     this.hud.setStats(this.fps, this.debris.count, Math.hypot(this.physics.wind.x, this.physics.wind.z));
     const _trn = performance.now();

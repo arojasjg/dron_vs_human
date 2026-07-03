@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX } from "../src/net/weapons";
+import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere } from "../src/net/weapons";
 
 describe("team weapon loadouts", () => {
   it("drones get FEWER weapons (mg/grenade/kamikaze); humans get mg/shotgun/glauncher/net", () => {
@@ -40,6 +40,21 @@ describe("ammo — limited, auto-reload, base-refilled", () => {
 
   it("a full resupply restores the whole mag + reserve (recharge at base)", () => {
     expect(fullAmmo(WEAPONS.mg)).toEqual({ mag: 40, reserve: 200 });
+  });
+});
+
+describe("bullet-vs-player hit test (rayHitsSphere)", () => {
+  const R = 1.0;
+  it("registers a hit when the line of fire passes through the player", () => {
+    // shooter at origin firing +z; target 5 m down-range, dead centre
+    expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 0, 0, 5, 20, R)).toBe(true);
+    // slightly off-axis but within the body radius
+    expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 0.5, 0, 5, 20, R)).toBe(true);
+  });
+  it("misses when the shot goes wide, points away, or is blocked short by a wall", () => {
+    expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 3, 0, 5, 20, R)).toBe(false);   // 3 m to the side → wide
+    expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 0, 0, -5, 20, R)).toBe(false);  // target behind the shooter
+    expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 0, 0, 5, 3, R)).toBe(false);    // a wall stops the bullet at 3 m
   });
 });
 

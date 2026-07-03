@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { applyDeath, checkWin, reconcileKills, type MatchState } from "../src/net/objectives";
-import { BIG, OBJECTIVE_SITES, buildDefaultScene, buildObjectives, objectiveAlive, setWorldSeed } from "../src/build/prefabs";
+import { BIG, OBJECTIVE_SITES, buildDefaultScene, buildObjectives, objectiveAlive, objectiveHp, objectiveDestroyed, setWorldSeed } from "../src/build/prefabs";
+import type { MaterialId } from "../src/world/materials";
 
 const STRIDE = BIG.H + 1;
 
@@ -16,22 +17,23 @@ class MockGrid {
 }
 
 const base = (o: Partial<MatchState> = {}): MatchState =>
-  ({ droneObjAlive: true, humanObjAlive: true, droneKills: 0, humanKills: 0, ...o });
+  ({ droneObjsAlive: 2, humanObjsAlive: 2, droneKills: 0, humanKills: 0, ...o });
 
-describe("checkWin — destructible objective + deathmatch", () => {
-  it("nobody wins while both objectives stand and kills are below the limit", () => {
+describe("checkWin — destroy BOTH enemy bases (or deathmatch)", () => {
+  it("nobody wins while any enemy base stands and kills are below the limit", () => {
     expect(checkWin(base(), 10)).toBeNull();
+    expect(checkWin(base({ humanObjsAlive: 1 }), 10)).toBeNull(); // one human base still up → drones haven't won
   });
-  it("destroying the enemy objective wins", () => {
-    expect(checkWin(base({ humanObjAlive: false }), 10)).toBe("drone");
-    expect(checkWin(base({ droneObjAlive: false }), 10)).toBe("human");
+  it("destroying BOTH enemy bases wins", () => {
+    expect(checkWin(base({ humanObjsAlive: 0 }), 10)).toBe("drone");
+    expect(checkWin(base({ droneObjsAlive: 0 }), 10)).toBe("human");
   });
   it("reaching the kill limit wins", () => {
     expect(checkWin(base({ droneKills: 10 }), 10)).toBe("drone");
     expect(checkWin(base({ humanKills: 12 }), 10)).toBe("human");
   });
   it("a simultaneous finish goes to the team with more kills (deterministic tiebreak)", () => {
-    expect(checkWin(base({ droneObjAlive: false, humanObjAlive: false, droneKills: 3, humanKills: 5 }), 10)).toBe("human");
+    expect(checkWin(base({ droneObjsAlive: 0, humanObjsAlive: 0, droneKills: 3, humanKills: 5 }), 10)).toBe("human");
   });
 });
 
@@ -44,19 +46,27 @@ describe("objective placement (DvH bases)", () => {
     return g;
   };
 
-  it("sites the human base on the ground (in a building) and the drone base on a rooftop", () => {
+  it("sites TWO bases per team — humans on the ground (in buildings), drones on rooftops", () => {
     const g = built();
-    expect(OBJECTIVE_SITES).toHaveLength(2);
-    const [drone, human] = OBJECTIVE_SITES;
-    expect(drone.team).toBe("drone");
-    expect(human.team).toBe("human");
-    // human base: metal, on the ground floor, with the building's slab under it (i.e. inside a building)
-    expect(human.y0).toBe(1);
-    expect(g.get(human.x0, human.y0, human.z0)).toBe("metal");
-    expect(g.has(human.x0, 0, human.z0)).toBe(true); // floor slab underneath → it is inside a building
-    // drone base: metal, well up on a rooftop (several storeys above the ground)
-    expect(drone.y0).toBeGreaterThan(STRIDE);
-    expect(g.get(drone.x0, drone.y0, drone.z0)).toBe("metal");
+    expect(OBJECTIVE_SITES).toHaveLength(4);
+    const drones = OBJECTIVE_SITES.filter((s) => s.team === "drone");
+    const humans = OBJECTIVE_SITES.filter((s) => s.team === "human");
+    expect(drones).toHaveLength(2);
+    expect(humans).toHaveLength(2);
+    for (const human of humans) {
+      expect(human.y0).toBe(1);
+      expect(g.get(human.x0, human.y0, human.z0)).toBe("metal");
+      expect(g.has(human.x0, 0, human.z0)).toBe(true); // floor slab underneath → inside a building
+      expect(human.initial).toBeGreaterThan(0);        // records its voxel count for HP
+    }
+    for (const drone of drones) {
+      expect(drone.y0).toBeGreaterThan(STRIDE);         // well up on a rooftop
+      expect(g.get(drone.x0, drone.y0, drone.z0)).toBe("metal");
+      expect(drone.initial).toBeGreaterThan(0);
+    }
+    // the two bases of a team sit in DIFFERENT buildings (distinct positions)
+    expect(drones[0].x0 !== drones[1].x0 || drones[0].z0 !== drones[1].z0).toBe(true);
+    expect(humans[0].x0 !== humans[1].x0 || humans[0].z0 !== humans[1].z0).toBe(true);
   });
 
   it("objectiveAlive follows the destruction of each base", () => {
@@ -71,6 +81,21 @@ describe("objective placement (DvH bases)", () => {
     }
   });
 
+  it("objectiveHp drops from 1 to 0 as a base is chewed away; destroyed at ~75% razed", () => {
+    const g = built();
+    const mat = (x: number, y: number, z: number) => g.get(x, y, z) as MaterialId | undefined;
+    const site = OBJECTIVE_SITES[0];
+    expect(objectiveHp(site, mat)).toBeCloseTo(1);       // pristine
+    expect(objectiveDestroyed(site, mat)).toBe(false);
+    // remove ~85% of its voxels
+    let removed = 0; const budget = Math.ceil(site.initial * 0.85);
+    outer: for (let x = site.x0; x <= site.x1; x++)
+      for (let y = site.y0; y <= site.y1; y++)
+        for (let z = site.z0; z <= site.z1; z++) { if (g.has(x, y, z)) { g.remove(x, y, z); if (++removed >= budget) break outer; } }
+    expect(objectiveHp(site, mat)).toBeLessThan(0.25);
+    expect(objectiveDestroyed(site, mat)).toBe(true);    // ≥75% gone → counts as destroyed
+  });
+
   it("is deterministic — same seed sites the bases identically", () => {
     built(7);
     const a = OBJECTIVE_SITES.map((s) => ({ ...s }));
@@ -80,7 +105,7 @@ describe("objective placement (DvH bases)", () => {
 });
 
 describe("applyDeath — team kill scoring", () => {
-  const s: MatchState = { droneObjAlive: true, humanObjAlive: true, droneKills: 0, humanKills: 0 };
+  const s: MatchState = { droneObjsAlive: 2, humanObjsAlive: 2, droneKills: 0, humanKills: 0 };
   it("a human death scores for the drones, a drone death for the humans", () => {
     expect(applyDeath(s, "human").droneKills).toBe(1);
     expect(applyDeath(s, "drone").humanKills).toBe(1);

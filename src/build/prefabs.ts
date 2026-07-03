@@ -415,6 +415,50 @@ export function buildBuilding(grid: VoxelGrid, ox = 0, oz = 0, spec: BuildSpec =
   // the internal stairwell holes every slab it passes (including the roof) and lands flush on top
   buildStairwell(grid, stairX0, stairX1, stairZ0, spec);
   buildExternalStairs(grid, ox, oz, spec); // fire-escape up the east wall to the roof
+  decorateBuilding(grid, ox, oz, spec); // subtle exterior character (parapet, cornices, sign, balconies)
+}
+
+const SIGN_MATS: MaterialId[] = ["glass", "metal", "wall_navy", "wall_clay"];
+
+/** Subtle per-building exterior character, seeded → identical on every client: a roof parapet (3 sides,
+ *  the east edge left clear for the fire-escape landing), thin cornice ledges at each floor line, a
+ *  facade sign, and a few balconies. Every piece is a ≤2-voxel cantilever bonded to a wall, so it stays
+ *  supported at the collapse overhang budget (no false floaters). */
+function decorateBuilding(grid: VoxelGrid, ox: number, oz: number, spec: BuildSpec): void {
+  const { W, D, FLOORS } = spec;
+  const roofY = FLOORS * STRIDE, x1 = ox + W - 1, z1 = oz + D - 1;
+  const trim: MaterialId = "concrete";
+
+  // roof parapet on three sides (skip the EAST wall — the external stairs land on the roof there)
+  fillBox(grid, ox, x1, roofY + 1, roofY + 2, oz, oz, trim);
+  fillBox(grid, ox, x1, roofY + 1, roofY + 2, z1, z1, trim);
+  fillBox(grid, ox, ox, roofY + 1, roofY + 2, oz, z1, trim);
+
+  // thin cornice ledges protruding 1 voxel at each floor line (front + back) → horizontal facade lines
+  for (let s = 1; s < FLOORS; s++) {
+    const y = s * STRIDE;
+    fillBox(grid, ox, x1, y, y, oz - 1, oz - 1, trim);
+    fillBox(grid, ox, x1, y, y, z1 + 1, z1 + 1, trim);
+  }
+
+  // a facade sign above the ground floor (seeded position + colour) — the "rótulo"
+  const sMat = SIGN_MATS[Math.floor(rand() * SIGN_MATS.length)];
+  const sw = 4 + Math.floor(rand() * 4);
+  const sx = ox + 3 + Math.floor(rand() * Math.max(1, W - sw - 6));
+  const sy = STRIDE - 4;
+  fillBox(grid, sx, sx + sw, sy, sy + 2, oz - 1, oz - 1, sMat);
+
+  // balconies on some upper floors (front wall): a 2-voxel ledge + a low railing
+  for (let s = 2; s < FLOORS; s++) {
+    if (rand() < 0.45) continue;
+    const bw = 4 + Math.floor(rand() * 3);
+    const bx = ox + 3 + Math.floor(rand() * Math.max(1, W - bw - 6));
+    const by = s * STRIDE + 1;
+    fillBox(grid, bx, bx + bw, by, by, oz - 2, oz - 1, trim);          // balcony floor (out 2)
+    fillBox(grid, bx, bx + bw, by + 1, by + 2, oz - 2, oz - 2, trim);  // front railing
+    fillBox(grid, bx, bx, by + 1, by + 2, oz - 2, oz - 1, trim);       // side rails
+    fillBox(grid, bx + bw, bx + bw, by + 1, by + 2, oz - 2, oz - 1, trim);
+  }
 }
 
 export interface Placed { ox: number; oz: number; W: number; D: number; FLOORS: number }
@@ -452,36 +496,52 @@ export function buildDefaultScene(grid: VoxelGrid): void {
   buildCar(grid, -16, 8); // parked outside, west of the block
 }
 
-// Drones-vs-Humans bases (destructible objectives). Each carries the voxel bounds of its structure.
-export interface ObjSite { team: "drone" | "human"; x0: number; x1: number; y0: number; y1: number; z0: number; z1: number }
+// Drones-vs-Humans bases (destructible objectives). Each carries the voxel bounds + its built voxel
+// count (for an HP % as it's chewed away). Each team defends TWO bases; a team wins by razing both.
+export interface ObjSite { team: "drone" | "human"; x0: number; x1: number; y0: number; y1: number; z0: number; z1: number; initial: number }
 /** Populated by buildObjectives from the placed buildings → dynamic but deterministic (seeded).
- *  [0] = drone base (rooftop), [1] = human base (inside a building). */
+ *  Four sites: 2 drone rooftops + 2 human bunkers, in four distinct buildings. */
 export let OBJECTIVE_SITES: ObjSite[] = [];
 
-/**
- * Places the two team bases and records their bounds:
- *  - HUMAN base: a metal bunker in the lobby of a random building (drones must fly in to destroy it).
- *  - DRONE base: a metal landing pad + antenna on the roof of a random building (humans climb the
- *    stairs to the rooftop to destroy it).
- */
+// Count only the base's OWN metal — so debris that settles into the bounds after a collapse can't
+// inflate the HP and stall a legitimate win.
+function countMetal(matAt: (x: number, y: number, z: number) => MaterialId | undefined, s: ObjSite): number {
+  let n = 0;
+  for (let x = s.x0; x <= s.x1; x++) for (let y = s.y0; y <= s.y1; y++) for (let z = s.z0; z <= s.z1; z++) if (matAt(x, y, z) === "metal") n++;
+  return n;
+}
+
+/** A metal bunker in a building's lobby (drones must fly in to destroy it). */
+function humanBase(grid: VoxelGrid, bld: Placed): ObjSite {
+  const hx = bld.ox + (bld.W >> 1), hz = bld.oz + (bld.D >> 1);
+  const s: ObjSite = { team: "human", x0: hx - 2, x1: hx + 2, y0: 1, y1: 5, z0: hz - 2, z1: hz + 2, initial: 0 };
+  fillBox(grid, s.x0, s.x1, s.y0, s.y1, s.z0, s.z1, "metal");
+  s.initial = countMetal((x, y, z) => grid.get(x, y, z), s);
+  return s;
+}
+
+/** A metal landing pad + antenna on a rooftop (humans climb the stairs to destroy it). */
+function droneBase(grid: VoxelGrid, bld: Placed): ObjSite {
+  const dx = bld.ox + (bld.W >> 1), dz = bld.oz + (bld.D >> 1), ry = bld.FLOORS * STRIDE;
+  const s: ObjSite = { team: "drone", x0: dx - 3, x1: dx + 3, y0: ry + 1, y1: ry + 4, z0: dz - 3, z1: dz + 3, initial: 0 };
+  fillBox(grid, s.x0, s.x1, ry + 1, ry + 1, s.z0, s.z1, "metal"); // landing pad
+  fillBox(grid, dx, dx, ry + 1, ry + 4, dz, dz, "metal");         // antenna beacon
+  s.initial = countMetal((x, y, z) => grid.get(x, y, z), s);
+  return s;
+}
+
+/** Places TWO bases per team, each in a DISTINCT building (seeded → identical on every client). */
 export function buildObjectives(grid: VoxelGrid): void {
   const b = _placed;
   OBJECTIVE_SITES = [];
-  if (b.length < 2) return;
-  const hi = Math.floor(rand() * b.length);
-  let di = Math.floor(rand() * b.length); if (di === hi) di = (di + 1) % b.length;
-  const hb = b[hi], db = b[di];
-
-  const hx = hb.ox + (hb.W >> 1), hz = hb.oz + (hb.D >> 1);
-  const human: ObjSite = { team: "human", x0: hx - 2, x1: hx + 2, y0: 1, y1: 5, z0: hz - 2, z1: hz + 2 };
-  fillBox(grid, human.x0, human.x1, human.y0, human.y1, human.z0, human.z1, "metal");
-
-  const dx = db.ox + (db.W >> 1), dz = db.oz + (db.D >> 1), ry = db.FLOORS * STRIDE;
-  const drone: ObjSite = { team: "drone", x0: dx - 3, x1: dx + 3, y0: ry + 1, y1: ry + 4, z0: dz - 3, z1: dz + 3 };
-  fillBox(grid, drone.x0, drone.x1, ry + 1, ry + 1, drone.z0, drone.z1, "metal"); // landing pad
-  fillBox(grid, dx, dx, ry + 1, ry + 4, dz, dz, "metal");                         // antenna beacon
-
-  OBJECTIVE_SITES = [drone, human];
+  if (b.length < 4) return;
+  const picks: number[] = [];
+  const used = new Set<number>();
+  while (picks.length < 4) { const i = Math.floor(rand() * b.length); if (!used.has(i)) { used.add(i); picks.push(i); } }
+  OBJECTIVE_SITES = [
+    droneBase(grid, b[picks[0]]), droneBase(grid, b[picks[1]]),
+    humanBase(grid, b[picks[2]]), humanBase(grid, b[picks[3]]),
+  ];
 }
 
 /** An objective is alive while any voxel inside its bounds survives. `has` is grid.has (or a mock). */
@@ -491,4 +551,15 @@ export function objectiveAlive(site: ObjSite, has: (x: number, y: number, z: num
       for (let z = site.z0; z <= site.z1; z++)
         if (has(x, y, z)) return true;
   return false;
+}
+
+/** Fraction of a base's METAL still standing (1 = pristine, 0 = razed) — drives the HUD HP bar.
+ *  `matAt` is grid.get (returns the material, or undefined) — counting metal ignores stray debris. */
+export function objectiveHp(site: ObjSite, matAt: (x: number, y: number, z: number) => MaterialId | undefined): number {
+  return site.initial > 0 ? countMetal(matAt, site) / site.initial : 0;
+}
+
+/** A base counts as DESTROYED for the win once ~75% of its metal is gone (no need to clear every voxel). */
+export function objectiveDestroyed(site: ObjSite, matAt: (x: number, y: number, z: number) => MaterialId | undefined): boolean {
+  return objectiveHp(site, matAt) < 0.25;
 }
