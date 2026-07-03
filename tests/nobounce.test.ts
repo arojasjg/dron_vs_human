@@ -14,6 +14,9 @@ function setup() {
   const grid = new VoxelGrid();
   // a solid brick wall two voxels thick around world x≈2 m (voxel x = 8,9), covering the shot line
   for (let y = 0; y <= 6; y++) for (let z = -4; z <= 4; z++) { grid.set(8, y, z, "brick"); grid.set(9, y, z, "brick"); }
+  // a FIXED physics collider coincident with that wall (as the streamed voxel colliders are in-game):
+  // the bullet's physics ray must NOT let this steal the grid hit and drop the carve (regression #5)
+  physics.world.createCollider(RAPIER.ColliderDesc.cuboid(0.25, 2, 4).setTranslation(2.25, 1, 0));
   let hits = 0, explodes = 0;
   const proj = new Projectiles(physics, scene, grid, () => { explodes++; }, () => { hits++; });
   const step = (n: number) => { for (let i = 0; i < n; i++) { proj.update(1 / 60); physics.world.step(); } };

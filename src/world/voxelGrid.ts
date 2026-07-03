@@ -46,6 +46,9 @@ export class VoxelGrid {
   private readonly damage = new Map<number, number>();
   /** Voxels deposited by settled rubble; they act as anchors so a debris pile is stable. */
   private readonly settled = new Set<number>();
+  /** Non-load-bearing voxels (bolted-on fire-escapes): supported BY the building but never a ground
+   *  ANCHOR themselves, so a thin fire-escape can't float a building whose real structure is gone. */
+  private readonly weakVoxels = new Set<number>();
   /** 3D cell index (coarse cell → voxel keys) for fast regional collection. */
   private readonly byCell = new Map<number, Set<number>>();
 
@@ -70,6 +73,7 @@ export class VoxelGrid {
     const k = packKey(x, y, z);
     this.damage.delete(k);
     this.settled.delete(k);
+    this.weakVoxels.delete(k);
     const ck = cellKey(x, y, z);
     const s = this.byCell.get(ck);
     if (s) { s.delete(k); if (s.size === 0) this.byCell.delete(ck); }
@@ -87,9 +91,13 @@ export class VoxelGrid {
   fallenCells(maxOverhang: number): number[] {
     const DY = CELL_SPAN, DZ = CELL_SPAN * CELL_SPAN;
     const buckets: number[][] = [[]];
-    for (const ck of this.byCell.keys()) {
+    for (const [ck, vox] of this.byCell) {
       const cy = Math.floor(ck / CELL_SPAN) % CELL_SPAN - CELL_BIAS;
-      if (cy === 0) buckets[0].push(ck); // ground-level cell
+      if (cy !== 0) continue;
+      // a bolted-on cell (all voxels weak, e.g. a lone fire-escape) is NOT a ground anchor
+      let structural = false;
+      for (const k of vox) if (!this.weakVoxels.has(k)) { structural = true; break; }
+      if (structural) buckets[0].push(ck); // ground-level structural cell
     }
     const done = new Set<number>();
     for (let o = 0; o <= maxOverhang; o++) {
@@ -157,10 +165,18 @@ export class VoxelGrid {
     return this.cells.size;
   }
 
+  /** Marks every voxel in the box as NON-STRUCTURAL (a bolted-on element, e.g. an external fire-escape):
+   *  it can be held up by the building, but its own cells will not anchor the structure to the ground. */
+  markWeakBox(x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): void {
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++)
+      this.weakVoxels.add(packKey(x, y, z));
+  }
+
   clear(): void {
     this.cells.clear();
     this.damage.clear();
     this.settled.clear();
+    this.weakVoxels.clear();
     this.byCell.clear();
   }
 

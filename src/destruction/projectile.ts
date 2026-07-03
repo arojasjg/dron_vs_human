@@ -190,17 +190,21 @@ export class Projectiles {
           // ...or ANYTHING physical: the ground plane, crates, debris (the grid ray can't see those).
           // Consuming on the nearer of the two means the bullet stops dead - it can NEVER ricochet.
           const ray = new RAPIER.Ray({ x: f.prev.x, y: f.prev.y, z: f.prev.z }, { x: dx, y: dy, z: dz });
-          const oh = this.physics.world.castRay(ray, len + 0.06, true, undefined, undefined, undefined, f.body);
+          // DYNAMIC props only (crates, debris). The voxel STRUCTURE is the grid ray's job — excluding
+          // FIXED bodies stops the building's coincident colliders from stealing the hit and dropping
+          // the carve/damage; the ground plane is handled by the y<=0 check below.
+          const oh = this.physics.world.castRay(ray, len + 0.06, true, RAPIER.QueryFilterFlags.EXCLUDE_FIXED, undefined, undefined, f.body);
           const od = oh ? oh.timeOfImpact : Infinity;
           if (gh && gd <= od) {
             if (!f.ghost) this.onBulletHit(gh, dx, dy, dz);
             consumed = true;
           } else if (oh) {
-            consumed = true; // stopped by the ground / a crate / debris - no bounce
+            consumed = true; // stopped by a crate / debris - no bounce
           } else {
             f.mesh.quaternion.setFromUnitVectors(BULLET_AXIS, TMP.set(dx, dy, dz));
           }
         }
+        if (!consumed && cur.y <= 0.02) consumed = true; // reached the ground plane -> stop (no bounce)
         f.prev.copy(cur);
         if (consumed || f.life <= 0) {
           this.physics.world.removeRigidBody(f.body);

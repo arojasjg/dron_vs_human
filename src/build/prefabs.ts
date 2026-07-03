@@ -200,6 +200,9 @@ function buildExternalStairs(grid: VoxelGrid, ox: number, oz: number, spec: Buil
   // a low pad off the street: the ground flight's first tread tops out 0.5 m up (the street sits a
   // voxel below the building floor), which a 0.35 m autostep can't take — this 1-voxel pad bridges it.
   fillBox(grid, x0, x1, 0, 0, z0 - 2, z0 - 1, "metal");
+  // the whole fire-escape is NON-STRUCTURAL: the building holds it up, but on its own it can't anchor
+  // the building — destroy the real structure and the tower falls instead of hanging off the stairs.
+  grid.markWeakBox(x0, x1, 0, FLOORS * STRIDE, z0 - 3, z1 + 3);
 }
 
 /** Sparse exterior windows: most are small glass panes, but ~1 in 5 is a big OPEN gap a drone can

@@ -11,6 +11,7 @@ class MockGrid {
   has(x: number, y: number, z: number) { return this.m.has(this.k(x, y, z)); }
   get(x: number, y: number, z: number) { return this.m.get(this.k(x, y, z)); }
   markSettled() {}
+  markWeakBox() {}
   clear() { this.m.clear(); }
   cells(): Voxel[] {
     const out: Voxel[] = [];

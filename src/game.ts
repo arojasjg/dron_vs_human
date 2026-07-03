@@ -1119,9 +1119,12 @@ export class Game {
     this.hud.flash(`${WEAPONS[w].icon} ${WEAPONS[w].name}`);
   }
 
+  private megaBombReadyAt = 0; // cooldown: one 9k-voxel blast is a big rebuild, don't let B spam it
   /** 💣 Mega bomb (free mode, B): a huge explosion where you're aiming — far bigger than any weapon.
    *  Broadcast so every client sees the same crater + collapse (the blast lives in the synced grid). */
   private megaBomb(): void {
+    if (this.time < this.megaBombReadyAt) return;
+    this.megaBombReadyAt = this.time + 2.5;
     const o = this.player.camera.position, d = this.player.forward(this.tmpDir).clone();
     const hit = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 160);
     const dist = hit ? hit.distance : 42;
