@@ -20,11 +20,11 @@ export interface WeaponSpec {
 
 export const WEAPONS: Record<Weapon, WeaponSpec> = {
   // Drone arsenal — light: rapid MG, a FEW grenades, and a one-shot kamikaze self-detonation.
-  mg:        { name: "Metralleta",    icon: "🔫", fire: "bullet",    cooldown: 0.08, magSize: 40, maxReserve: 200, playerDmg: 6 },
+  mg:        { name: "Metralleta",    icon: "🔫", fire: "bullet",    cooldown: 0.08, magSize: 40, maxReserve: 200, playerDmg: 11 },
   grenade:   { name: "Granada",       icon: "💣", fire: "grenade",   cooldown: 1.2,  magSize: 2,  maxReserve: 4 },
   kamikaze:  { name: "Kamikaze",      icon: "☢️", fire: "kamikaze",  cooldown: 0.0,  magSize: 1,  maxReserve: 0 },
   // Human arsenal — MG, spread shotgun, explosive grenade launcher, and a net to catch a drone.
-  shotgun:   { name: "Escopeta",      icon: "🎯", fire: "shotgun",   cooldown: 0.8,  magSize: 6,  maxReserve: 30, pellets: 9, playerDmg: 34 },
+  shotgun:   { name: "Escopeta",      icon: "🎯", fire: "shotgun",   cooldown: 0.8,  magSize: 6,  maxReserve: 30, pellets: 9, playerDmg: 50 },
   glauncher: { name: "Lanzagranadas", icon: "🎆", fire: "explosive", cooldown: 1.0,  magSize: 4,  maxReserve: 12 },
   net:       { name: "Lanzarredes",   icon: "🕸️", fire: "net",       cooldown: 2.5,  magSize: 2,  maxReserve: 4 },
 };
@@ -57,6 +57,16 @@ export function rayHitsSphere(
   return cx * cx + cy * cy + cz * cz < radius * radius;
 }
 
+/** Range damage multiplier for a bullet weapon: the SHOTGUN hits hard up close (its niche against a
+ *  strafing drone) and fades with range; the MG is flat at all ranges. An unknown weapon → 1.0, so an
+ *  older client that doesn't tag its shots degrades to the previous behaviour (version-safe). Pure. */
+export function bulletFalloff(weapon: string, dist: number): number {
+  if (weapon !== "shotgun") return 1;
+  if (dist <= 8) return 2.4;                               // point-blank punch → out-DPSes the MG up close
+  if (dist >= 30) return 0.3;                              // ineffective past mid-range
+  return 2.4 + (0.3 - 2.4) * ((dist - 8) / (30 - 8));      // linear taper 2.4 → 0.3
+}
+
 const DRONE_LOADOUT: Weapon[] = ["mg", "grenade", "kamikaze"];
 const HUMAN_LOADOUT: Weapon[] = ["mg", "shotgun", "glauncher", "net"];
 
@@ -86,8 +96,8 @@ export function fullAmmo(spec: WeaponSpec): Ammo {
 
 // ---- Drone battery (pure) ------------------------------------------------------------------------
 export const BATTERY_MAX = 100;
-const BATTERY_IDLE = 0.4;    // %/s just hovering
-const BATTERY_PER_MS = 0.16; // extra %/s per m/s of speed → the faster/more it moves, the more it drains
+const BATTERY_IDLE = 0.2;    // %/s just hovering (halved → bigger effective battery)
+const BATTERY_PER_MS = 0.08; // extra %/s per m/s of speed → the faster/more it moves, the more it drains
 
 /** Battery % consumed over dt at a given speed. Faster movement drains faster; idle still trickles. */
 export function batteryDrain(speed: number, dt: number): number {

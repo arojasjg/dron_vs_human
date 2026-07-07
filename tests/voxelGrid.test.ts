@@ -19,6 +19,40 @@ describe("voxel key packing", () => {
   });
 });
 
+describe("VoxelGrid.chunkVoxelKeys", () => {
+  const CHUNK = 32;
+  // brute-force reference: exactly what the old collider rebuild did (probe every cell in the 32³ chunk)
+  const bruteForce = (g: VoxelGrid, cx: number, cy: number, cz: number): Set<number> => {
+    const out = new Set<number>();
+    for (let x = cx * CHUNK; x < cx * CHUNK + CHUNK; x++)
+      for (let y = cy * CHUNK; y < cy * CHUNK + CHUNK; y++)
+        for (let z = cz * CHUNK; z < cz * CHUNK + CHUNK; z++)
+          if (g.has(x, y, z)) out.add(packKey(x, y, z));
+    return out;
+  };
+
+  it("returns exactly the chunk's voxels (matches a full 32³ scan) and excludes neighbours", () => {
+    const g = new VoxelGrid();
+    // fill scattered voxels across chunk 0 and into neighbouring chunks
+    for (const [x, y, z] of [[0, 0, 0], [31, 31, 31], [5, 10, 20], [31, 0, 0], [0, 31, 0]] as const)
+      g.set(x, y, z, "concrete");
+    g.set(32, 0, 0, "brick");   // chunk (1,0,0) — must be excluded
+    g.set(-1, 0, 0, "brick");   // chunk (-1,0,0) — must be excluded
+    const got = new Set(g.chunkVoxelKeys(0, 0, 0));
+    expect(got).toEqual(bruteForce(g, 0, 0, 0));
+    expect(got.has(packKey(32, 0, 0))).toBe(false);
+    expect(got.has(packKey(-1, 0, 0))).toBe(false);
+    expect(got.size).toBe(5);
+  });
+
+  it("handles a negative chunk and an empty chunk", () => {
+    const g = new VoxelGrid();
+    g.set(-1, -5, -32, "concrete"); // chunk (-1,-1,-1)
+    expect(new Set(g.chunkVoxelKeys(-1, -1, -1))).toEqual(bruteForce(g, -1, -1, -1));
+    expect(g.chunkVoxelKeys(9, 9, 9)).toEqual([]); // empty chunk → no allocation of phantom keys
+  });
+});
+
 describe("VoxelGrid", () => {
   it("set / get / remove", () => {
     const g = new VoxelGrid();

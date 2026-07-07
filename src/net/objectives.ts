@@ -25,6 +25,19 @@ export function applyDeath(s: MatchState, victim: Role): MatchState {
     : { ...s, humanKills: s.humanKills + 1 };
 }
 
+/** Base-under-attack thresholds (HP fraction). Crossing one DOWNWARD fires a one-shot alert. */
+export const BASE_THRESHOLDS = [0.75, 0.5, 0.25, 0] as const;
+
+/** The highest threshold a base's HP fraction crossed DOWNWARD since last frame (0 = destroyed), or null
+ *  if it crossed none. One alert per crossing — a mega-bomb that drops HP straight past several returns the
+ *  LOWEST crossed (the most urgent). Pure → same alerts on every client. */
+export function baseAlert(prevHp: number, hp: number): number | null {
+  if (hp >= prevHp) return null;                     // healing / no change → nothing
+  let crossed: number | null = null;
+  for (const t of BASE_THRESHOLDS) if (prevHp > t && hp <= t) crossed = t; // take the lowest crossed
+  return crossed;
+}
+
 /** Which team just won, or null if the match is still going. A team wins by DESTROYING the enemy
  *  objective, or by reaching the kill limit (deathmatch running in parallel). Pure and
  *  dependency-free → identical verdict on every client, so no one desyncs on who won. */

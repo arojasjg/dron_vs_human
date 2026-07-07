@@ -1,5 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { droneBank, hoverSway, speedFov, headBob, DRONE_MAX_BANK, DRONE_FOV_BASE, DRONE_FOV_BOOST } from "../src/engine/cameraFeel";
+import { droneBank, hoverSway, speedFov, headBob, addTrauma, decayTrauma, shakeOffset, SHAKE_POS, SHAKE_ROLL, DRONE_MAX_BANK, DRONE_FOV_BASE, DRONE_FOV_BOOST } from "../src/engine/cameraFeel";
+
+describe("screen-shake trauma model (aim-safe)", () => {
+  it("accumulates trauma clamped to [0,1] and decays to 0", () => {
+    expect(addTrauma(0, 0.3)).toBeCloseTo(0.3);
+    expect(addTrauma(0.9, 0.5)).toBe(1);            // clamps up
+    expect(addTrauma(0.1, -1)).toBe(0);             // clamps down
+    let t = 1; for (let i = 0; i < 100; i++) t = decayTrauma(t, 0.02); // 2s
+    expect(t).toBe(0);                               // always settles
+  });
+
+  it("scales shake with trauma² and is zero at rest", () => {
+    expect(shakeOffset(0, 5)).toEqual({ dx: 0, dy: 0, dz: 0, roll: 0 });
+    // find the peak |dx| over a time sweep at two trauma levels; ratio ≈ (t1/t2)²
+    const peak = (tr: number) => { let m = 0; for (let t = 0; t < 6; t += 0.001) m = Math.max(m, Math.abs(shakeOffset(tr, t).dx)); return m; };
+    expect(peak(0.5) / peak(1.0)).toBeCloseTo(0.25, 1); // 0.5² / 1² = 0.25
+  });
+
+  it("never exceeds the configured amplitude bounds (aim-safe: only pos + roll returned)", () => {
+    for (let t = 0; t < 3; t += 0.01) {
+      const o = shakeOffset(1, t);
+      expect(Math.abs(o.dx)).toBeLessThanOrEqual(SHAKE_POS + 1e-9);
+      expect(Math.abs(o.roll)).toBeLessThanOrEqual(SHAKE_ROLL + 1e-9);
+      expect(Object.keys(o).sort()).toEqual(["dx", "dy", "dz", "roll"]); // no yaw/pitch → aim never moves
+    }
+  });
+});
 
 describe("drone camera feel", () => {
   it("banks INTO a lateral velocity, level at rest, and is clamped", () => {

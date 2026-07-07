@@ -54,7 +54,7 @@ describe("perf: destruction handles a storm at scale", () => {
     setWorldSeed(2024);
     buildDefaultScene(grid as never);
     let removed = 0;
-    for (const [x, y, z, r] of STORM) removed += carveSphere({ grid, ...STUB } as never, x, y, z, r, 600, 8).removed;
+    for (const [x, y, z, r] of STORM) removed += carveSphere({ grid, ...STUB } as never, x, y, z, r, 600, 8, 1).removed;
     return { grid, removed };
   };
 
@@ -68,7 +68,7 @@ describe("perf: destruction handles a storm at scale", () => {
     const grid = new MockGrid();
     setWorldSeed(7);
     buildBuilding(grid as never, 0, 0, { W: 56, D: 56, FLOORS: 3 }); // a small building keeps the pass fast
-    for (let i = 0; i < 12; i++) carveSphere({ grid, ...STUB } as never, (i * 3) % 12 + 2, (i % 4) * 3 + 2, (i * 5) % 12 + 2, 2.2, 600, 8);
+    for (let i = 0; i < 12; i++) carveSphere({ grid, ...STUB } as never, (i * 3) % 12 + 2, (i % 4) * 3 + 2, (i * 5) % 12 + 2, 2.2, 600, 8, 1);
     let passes = 0;
     for (; passes < 60; passes++) {
       const fall = findUnsupported(grid.cells(), (x, y, z) => grid.has(x, y, z), (_x, y) => y === 0, STRUCTURE_MAX_OVERHANG);

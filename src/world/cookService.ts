@@ -1,0 +1,58 @@
+import { cookColliderBoxes } from "./cook";
+
+/**
+ * Routes chunk cooking to a Web Worker (off the main thread) when one is available, and cooks INLINE
+ * otherwise — the caller can't tell the difference except for latency. This is what keeps heavy
+ * destruction from stalling the main thread: the ~80%-of-a-rebuild greedy cook runs off-thread; the
+ * main thread only turns the returned boxes into Rapier colliders.
+ *
+ * Safe by construction: node/tests and worker-hostile browsers get the synchronous path (== old
+ * behaviour); a per-chunk generation counter drops any result that a newer edit has superseded.
+ */
+export class CookService {
+  private worker: Worker | null = null;
+  private readonly gen = new Map<number, number>();
+  private inflight = 0;
+  private static readonly MAX_INFLIGHT = 4;
+
+  /** Called with a chunk's cooked collider boxes — synchronously in the fallback, else 1–2 frames later. */
+  onColliderCooked?: (ck: number, boxes: Int32Array) => void;
+
+  constructor(forceSync = false) {
+    if (!forceSync && typeof Worker !== "undefined") {
+      try {
+        this.worker = new Worker(new URL("./cookWorker.ts", import.meta.url), { type: "module" });
+        this.worker.onmessage = (e) => this.receive(e.data);
+        this.worker.onerror = () => { this.worker = null; }; // any worker failure → degrade to inline cooking
+      } catch { this.worker = null; }
+    }
+  }
+
+  /** True when cooking actually runs off-thread (a worker is live). */
+  get async(): boolean { return this.worker !== null; }
+
+  /** Bump a chunk's generation so any in-flight cook for its OLD state is dropped when it returns. Call
+   *  whenever the chunk is edited/dirtied. */
+  touch(ck: number): void { this.gen.set(ck, (this.gen.get(ck) ?? 0) + 1); }
+
+  /**
+   * Cook one chunk's colliders from a snapshot of its voxel keys. Off-thread if possible (result via
+   * onColliderCooked later); otherwise inline (onColliderCooked fires synchronously, same frame).
+   * `keys` is transferred to the worker — do not reuse it after calling.
+   */
+  requestCollider(ck: number, keys: Int32Array): void {
+    if (!this.worker || this.inflight >= CookService.MAX_INFLIGHT) {
+      this.onColliderCooked?.(ck, cookColliderBoxes(keys)); // synchronous fallback
+      return;
+    }
+    this.inflight++;
+    const gen = this.gen.get(ck) ?? 0;
+    this.worker.postMessage({ kind: "collider", ck, gen, keys }, [keys.buffer]);
+  }
+
+  private receive(msg: { kind: string; ck: number; gen: number; boxes: Int32Array }): void {
+    this.inflight--;
+    if ((this.gen.get(msg.ck) ?? 0) !== msg.gen) return; // stale: the chunk changed since the request → still dirty, re-queued
+    this.onColliderCooked?.(msg.ck, msg.boxes);
+  }
+}

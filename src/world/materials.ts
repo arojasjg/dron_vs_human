@@ -1,6 +1,7 @@
 export type MaterialId =
   | "wood" | "concrete" | "brick" | "glass" | "metal" | "gastank"
-  | "wall_slate" | "wall_moss" | "wall_clay" | "wall_navy";
+  | "wall_slate" | "wall_moss" | "wall_clay" | "wall_navy"
+  | "car_red" | "car_blue" | "car_teal" | "tire";
 
 export interface MaterialDef {
   id: MaterialId;
@@ -66,9 +67,29 @@ export const MATERIALS: Record<MaterialId, MaterialDef> = {
     id: "wall_navy", name: "Marino", color: 0x3d4654, roughness: 0.92, metalness: 0.0,
     density: 1900, strength: 95, hp: 3, restitution: 0.08, friction: 0.9, opacity: 1, shatters: false,
   },
+  // Glossy vehicle paint — physically like sheet metal (so destruction is unchanged), only the colour
+  // + a car-paint sheen differ. A vehicle picks one per body (seeded) for a varied street.
+  car_red: {
+    id: "car_red", name: "Rojo", color: 0xb23a2e, roughness: 0.35, metalness: 0.45,
+    density: 7800, strength: 320, hp: 5, restitution: 0.2, friction: 0.6, opacity: 1, shatters: false,
+  },
+  car_blue: {
+    id: "car_blue", name: "Azul", color: 0x2f5b8a, roughness: 0.35, metalness: 0.45,
+    density: 7800, strength: 320, hp: 5, restitution: 0.2, friction: 0.6, opacity: 1, shatters: false,
+  },
+  car_teal: {
+    id: "car_teal", name: "Verde", color: 0x2f7f6e, roughness: 0.35, metalness: 0.45,
+    density: 7800, strength: 320, hp: 5, restitution: 0.2, friction: 0.6, opacity: 1, shatters: false,
+  },
+  // Rubber tyre — dark, matte, tough.
+  tire: {
+    id: "tire", name: "Neumático", color: 0x18181c, roughness: 0.95, metalness: 0.0,
+    density: 1100, strength: 90, hp: 4, restitution: 0.35, friction: 0.95, opacity: 1, shatters: false,
+  },
 };
 
 export const MATERIAL_ORDER: MaterialId[] = [
   "wood", "concrete", "brick", "glass", "metal", "gastank",
   "wall_slate", "wall_moss", "wall_clay", "wall_navy",
+  "car_red", "car_blue", "car_teal", "tire",
 ];

@@ -1,11 +1,17 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
-import { DEBRIS_HIT_DRONE_R, DEBRIS_HIT_TANK_R, DEBRIS_IMPACT_KE, FIXED_DT, MAX_DEBRIS, MAX_DEBRIS_PER_EVENT, VOXEL } from "./config";
+import { DEBRIS_HIT_DRONE_R, DEBRIS_HIT_TANK_R, DEBRIS_IMPACT_KE, FIXED_DT, MAX_DEBRIS, MAX_DEBRIS_PER_EVENT, VOXEL, maxPhysicsSteps } from "./config";
 import { Player } from "./engine/player";
 import { Walker } from "./engine/walker";
 import { Input } from "./engine/input";
 import { PerfGovernor } from "./engine/perfGovernor";
-import { autoQuality, qualityConfig, QUALITY_ORDER, type Quality } from "./engine/quality";
+import { autoQuality, qualityConfig, QUALITY_ORDER, lowerQuality, LOW_FPS, type Quality } from "./engine/quality";
+import { nextResScaleGpu, nextResScaleFps, RES_MIN } from "./engine/dynamicRes";
+import { shouldRefreshShadows, SHADOW_MOVE_SQ } from "./engine/shadowPolicy";
+import { nextPerfLever } from "./engine/perfLever";
+import { Rng, mix32, eventSeed, EVT, q2, q3 } from "./engine/rng";
+import { CookService } from "./world/cookService";
+import { GpuTimer, makeGpuTimer } from "./engine/gpuTimer";
 import { humanFallDamage, droneImpactDamage } from "./engine/falldamage";
 import { Physics, GROUP_GROUND } from "./engine/physics";
 import { Renderer } from "./engine/renderer";
@@ -20,17 +26,18 @@ import { ImpactMarks } from "./fx/impactMarks";
 import { RubbleField } from "./fx/rubble";
 import { HeightField } from "./fx/heightField";
 import { placeVoxel, eraseVoxel, type EditRegion } from "./build/editor";
-import { BIG, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, objectiveHp, objectiveDestroyed, OBJECTIVE_SITES, placedBuildings, setWorldSeed } from "./build/prefabs";
+import { BIG, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, groundClass, objectiveHp, objectiveDestroyed, OBJECTIVE_SITES, placedBuildings, setWorldSeed } from "./build/prefabs";
 import { InteriorLights } from "./engine/interiorLights";
 import { Hud, type Mode, type Tool } from "./ui/hud";
 import { CameraFx } from "./fx/cameraFx";
+import { addTrauma, decayTrauma, shakeOffset } from "./engine/cameraFeel";
 import { GameAudio } from "./fx/audio";
 import { Scenery } from "./fx/scenery";
 import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleMaxHp, roleWeapon, type Role } from "./net/roles";
-import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, type Weapon, type Ammo } from "./net/weapons";
-import { checkWin, reconcileKills, type MatchState } from "./net/objectives";
+import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, type Weapon, type Ammo } from "./net/weapons";
+import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, VoxelGrid, type RayHit } from "./world/voxelGrid";
 import { chunkCoord, VoxelCollider } from "./world/voxelCollider";
@@ -42,6 +49,21 @@ import { connectedComponents, type Voxel } from "./world/structuralIntegrity";
 // unsupported and falls. Measured: an intact city stands at 2 (0 false floaters), so 2 (~4 m cantilever
 // budget) makes blasted overhangs fall realistically while intact buildings — and their stairs — hold.
 const CELL_OVERHANG = 2;
+
+// Load-bearing mass floor: a 2m cell (max 8³=512 voxels) must hold at least this many STRUCTURAL voxels
+// to carry a building's weight. Below it the cell is a sliver — it stays up itself but can't suspend the
+// floors above, so a blast that guts a column to a thread lets the tower above collapse instead of
+// floating on "one block". A probe across every city seed + building shape shows 8..15 all give 0 false
+// floaters and 16 starts clipping a thin legit cell, so 12 sits mid-band (margin for arbitrary room-code
+// seeds) while still dropping any 1-wide sliver (≤8 voxels). Verified across seeds by the collapse test.
+const CELL_MIN_MASS = 12;
+
+// Pancake threshold: topological support alone keeps floors up while ANY thread reaches the ground, so
+// blasting out a lower storey leaves the intact upper floors floating on the surviving perimeter. The
+// pancake pass collapses everything above a storey whose cross-section fell below this fraction of the
+// mass resting on it. A probe shows intact buildings stay 0 up to 0.56 (0.57 starts clipping a real
+// feature), so 0.5 keeps a 0.07 margin while still pancaking "blow out half a storey" — the user's case.
+const PANCAKE_FRAC = 0.5;
 
 /** Deterministic 32-bit hash of the room code → world seed (so all clients build the same world). */
 function hashStr(s: string): number {
@@ -91,6 +113,16 @@ export class Game {
   private readonly targets: CarveTargets;
 
   private readonly governor = new PerfGovernor();
+  private lowFpsSec = 0;          // seconds of sustained low fps → triggers an adaptive quality drop
+  private resScale = 1;           // current dynamic-resolution scale (fill-rate lever)
+  private resTimer = 0;           // debounce so the drawing-buffer realloc doesn't thrash
+  private gpuTimer!: GpuTimer;    // real GPU-ms of the render (drives dynamic resolution); set in ctor
+  private shadowSince = 99;       // frames since the last shadow-map refresh (starts high → refresh frame 1)
+  private readonly lastShadowPos = new THREE.Vector3(); // camera pos at the last refresh (movement gate)
+  private voxelDetailOn = true;   // live mortar-detail state (perf floor lever, separate from the preset)
+  private worldSeed = 0;          // room-code seed → per-event RNG seeds (deterministic destruction)
+  private cookService!: CookService; // off-thread greedy-box cooking for collider rebuilds; set in ctor
+  private trauma = 0;             // screen-shake energy (0..1) from blasts/damage/firing; decays each frame
   private readonly heightField = new HeightField();
   private static readonly MAX_FLASHES = 5;
   private readonly flashes: Flash[] = [];
@@ -111,8 +143,11 @@ export class Game {
     shotgun: fullAmmo(WEAPONS.shotgun), glauncher: fullAmmo(WEAPONS.glauncher), net: fullAmmo(WEAPONS.net),
   };
   private weaponReadyAt = 0;      // shared per-shot cooldown gate
+  private firing = false;         // LMB held → auto-fire (machine gun) each frame at the weapon's rate
+  private bulletReadyAt = 0;      // free-mode auto-fire cadence gate
   private battery = BATTERY_MAX;  // drone battery (drains with movement; 0 → fall & die)
   private combatHudT = 0;         // throttle for the combat HUD panels
+  private statsT = 0;             // throttle for the fps/debris/wind stats DOM write (~6Hz, not every frame)
   private lowBatBeepAt = 0;       // next time a low-battery beep may play
   private meleeReadyAt = 0;       // human melee cooldown gate
   // personal scoreboard (K/D/A). Kills/assists are attributed by the victim's `died` broadcast.
@@ -124,6 +159,7 @@ export class Game {
   private readonly dirtyChunks = new Set<number>();      // chunks whose MESH needs rebuilding (prompt)
   private readonly dirtyCol = new Map<number, number>(); // chunk → last-touched time; collider rebuilt once quiet
   private structureDirty = false; // a blast changed the grid → re-solve the cell support graph
+  private pendingFall: number[] = []; // fallen-cell wave being drained over frames (avoids re-solving each frame)
   // collision LOD: only the building chunks within this many CHUNKs of the player carry physics
   // colliders. Keeps the active collider count (and the broadphase cost) independent of building
   // size — the static world doesn't all live in the physics engine at once.
@@ -138,10 +174,15 @@ export class Game {
     [248 * VOXEL, 2.0, 176 * VOXEL], // NE (west of the gas tank)
   ];
 
-  private prof = { settleMax: 0, settleTotal: 0, settleN: 0, spawnMax: 0, rebuildMax: 0, rebuildTotal: 0, physicsMax: 0, physicsTotal: 0, gpuMax: 0, gpuTotal: 0, renderMax: 0, renderTotal: 0 };
+  // renderMax/renderTotal are CPU SUBMIT time only (GPU work is async) — do NOT read them as GPU cost.
+  // drawCalls/triangles + framesRendered are the honest signals: framesRendered===0 means the tab is
+  // hidden (render skipped, worker-driven at 62Hz) so every fps/timing number is meaningless.
+  private prof = { settleMax: 0, settleTotal: 0, settleN: 0, spawnMax: 0, rebuildMax: 0, rebuildTotal: 0, physicsMax: 0, physicsTotal: 0, gpuMax: 0, gpuTotal: 0, renderMax: 0, renderTotal: 0, drawCalls: 0, triangles: 0, framesRendered: 0, framesSimulated: 0 };
+  private profZero(): typeof this.prof { return { settleMax: 0, settleTotal: 0, settleN: 0, spawnMax: 0, rebuildMax: 0, rebuildTotal: 0, physicsMax: 0, physicsTotal: 0, gpuMax: 0, gpuTotal: 0, renderMax: 0, renderTotal: 0, drawCalls: 0, triangles: 0, framesRendered: 0, framesSimulated: 0 }; }
 
   private time = 0;
   private acc = 0;
+  private lastPhysMs = 0; // last frame's physics-phase cost → adaptively caps this frame's substeps
   private last = performance.now();
   private fps = 60;
 
@@ -154,6 +195,8 @@ export class Game {
   private droneKills = 0;
   private humanKills = 0;
   private matchOver = false;
+  private prevDroneHp = 1;   // weakest drone-base HP last frame → base-under-attack threshold alerts
+  private prevHumanHp = 1;
   private static readonly KILL_LIMIT = 15; // deathmatch limit (win also by destroying the enemy objective)
   private hp = MAX_HP;
   private netT = 0;          // throttle for state broadcasts
@@ -168,11 +211,16 @@ export class Game {
 
   constructor(container: HTMLElement) {
     this.renderer = new Renderer(container);
+    this.gpuTimer = makeGpuTimer(this.renderer.renderer.getContext() as WebGL2RenderingContext);
     this.input = new Input(this.renderer.renderer.domElement);
     this.player = new Player(this.physics);
 
     this.mesher = new VoxelMesher(this.renderer.scene);
     this.collider = new VoxelCollider(this.physics);
+    // Off-thread cooking: the ~80%-of-a-rebuild greedy-box cook runs in a Web Worker; the main thread only
+    // turns cooked boxes into Rapier bodies. ?cook=sync forces the inline path (for A/B verification).
+    this.cookService = new CookService(typeof location !== "undefined" && new URLSearchParams(location.search).get("cook") === "sync");
+    this.cookService.onColliderCooked = (ck, boxes) => this.collider.applyBoxes(ck, boxes);
     this.debris = new DebrisSystem(this.physics, this.renderer.scene);
     this.rubble = new RubbleField(this.renderer.scene);
     this.debris.onSettle = (x, y, z, qx, qy, qz, qw, mat) => this.rubble.deposit(x, y, z, qx, qy, qz, qw, mat);
@@ -198,7 +246,7 @@ export class Game {
     this.quality = savedQ && QUALITY_ORDER.includes(savedQ) ? savedQ : autoQuality(this.gpuName());
     // persist the resolved preset so MSAA (decided at renderer creation from this key) matches it next load
     if (typeof localStorage !== "undefined") localStorage.setItem("quality", this.quality);
-    this.renderer.applyQuality(qualityConfig(this.quality, window.devicePixelRatio || 1));
+    this.applyQualityPreset();
 
     this.targets = { grid: this.grid, debris: this.debris, particles: this.sink };
     this.projectiles = new Projectiles(
@@ -228,6 +276,7 @@ export class Game {
     this.hud.setMaterial(MATERIAL_ORDER[this.matIndex]);
 
     this.input.onMouseDown = (b) => this.onMouseDown(b);
+    this.input.onMouseUp = (b) => { if (b === 0) this.firing = false; }; // release LMB → stop auto-fire
     this.input.onWheel = (s) => this.onWheel(s);
     this.input.onKey = (c) => this.onKey(c);
 
@@ -283,7 +332,11 @@ export class Game {
       );
     } else if (m.t === "died") {
       this.addKill(m.role as Role); // a peer died → the enemy team scores
-      if ((m.by as number) === this.net.id) { this.myKills++; this.hud.flash("¡Derribo!"); }
+      const by = m.by as number, mine = by === this.net.id;
+      const victim = (m.role as Role) === "human" ? "🧍" : "🤖";
+      const killer = mine ? "Tú" : by ? `J${by % 1000}` : ""; // no name layer → short id label
+      this.hud.killfeed(killer ? `${killer} ☠ ${victim}` : `${victim} caído`, mine);
+      if (mine) { this.myKills++; this.hud.flash("¡Derribo!"); this.hud.hitMarker("kill"); this.audio.hitMarker(true); }
       else if (Array.isArray(m.assist) && (m.assist as number[]).includes(this.net.id)) this.myAssists++;
     } else if (m.t === "melee") {
       this.remotes.meleeAnim(m.id as number); // swing on the attacker's avatar
@@ -334,6 +387,16 @@ export class Game {
       else { if (!objectiveDestroyed(s, mat)) humanObjsAlive++; humanHp = Math.min(humanHp, hp); }
     }
     this.hud.setScore(this.droneKills, this.humanKills, droneObjsAlive, humanObjsAlive, droneHp, humanHp);
+    // Alert MY team when OUR base crosses a damage threshold, so teams rotate to defend instead of
+    // losing a base unnoticed. Pure crossing detection → every client alerts on the same synced HP.
+    const myHp = this.role === "drone" ? droneHp : humanHp;
+    const myPrev = this.role === "drone" ? this.prevDroneHp : this.prevHumanHp;
+    const alert = baseAlert(myPrev, myHp);
+    if (alert !== null) {
+      this.hud.flash(alert === 0 ? "🛑 ¡Base destruida!" : `⚠ ¡Base bajo ataque! ${Math.round(alert * 100)}%`);
+      this.audio.baseAlarm();
+    }
+    this.prevDroneHp = droneHp; this.prevHumanHp = humanHp;
     const state: MatchState = { droneObjsAlive, humanObjsAlive, droneKills: this.droneKills, humanKills: this.humanKills };
     const winner = checkWin(state, Game.KILL_LIMIT);
     if (winner) { this.matchOver = true; this.hud.showWin(winner, this.role); }
@@ -346,10 +409,33 @@ export class Game {
     const d = new THREE.Vector3(m.dx as number, m.dy as number, m.dz as number);
     if (m.k === "bullet") {
       this.projectiles.launchBullet(o, d, 120, true);
-      const dmg = (m.dmg as number) || 0; // a bullet in our line of fire hurts us (any team — "a todos")
-      if (dmg > 0 && this.hp > 0 && this.bulletHitsMe(o, d)) { this.recordDamager(m.id as number); this.damageDrone(dmg); }
+      this.muzzleFlash(o, d, 0.34); // enemy gunfire is visible/spottable at range
+      const base = (m.dmg as number) || 0; // a bullet in our line of fire hurts us (any team — "a todos")
+      if (base > 0 && this.hp > 0 && this.bulletHitsMe(o, d)) {
+        const p = this.player.camera.position;
+        const dmg = base * bulletFalloff((m.w as string) || "", Math.hypot(p.x - o.x, p.y - o.y, p.z - o.z));
+        this.recordDamager(m.id as number); this.damageDrone(Math.round(dmg)); // range-scaled (shotgun close = lethal, far = weak)
+      }
     } else if (m.k === "grenade") this.projectiles.launchGrenade(o, d, 22, true);
     else if (m.k === "missile") this.projectiles.launchRocket(o, d, 52, true);
+  }
+
+  private readonly enemyBuf: { x: number; y: number; z: number }[] = [];
+
+  /** Predicts whether OUR shot's line of fire strikes an enemy peer (before a wall stops it) and, if so,
+   *  fires a hit marker + tick locally. Damage stays authoritative on the victim; this is display-only, so
+   *  a rare disagreement self-corrects on the next state tick. */
+  private predictHit(o: THREE.Vector3, d: THREE.Vector3): void {
+    if (!this.net.connected) return;
+    this.remotes.enemyPositions(this.role === "human", this.mode === "free", this.enemyBuf);
+    if (this.enemyBuf.length === 0) return;
+    const wall = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 220);
+    const maxD = wall ? wall.distance : 220;
+    for (const p of this.enemyBuf) {
+      if (rayHitsSphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, maxD, 1.0)) {
+        this.hud.hitMarker("hit"); this.audio.hitMarker(false); return;
+      }
+    }
   }
 
   /** Does an incoming shot's line of fire strike our own player, before a wall stops the bullet? */
@@ -379,7 +465,7 @@ export class Game {
   /** Per-frame networking: broadcast our drone state, drop stale peers, handle respawn. */
   private netUpdate(dt: number): void {
     this.remotes.prune();
-    this.remotes.update(dt); // ease remote peers between network samples → smooth, not stuttery
+    { const cp = this.player.camera.position; this.remotes.update(dt, cp.x, cp.z); } // ease peers + LOD distant skins
     // respawn works in every mode, even offline (blasts/debris can kill you in the sandbox too)
     if (this.hp <= 0 && this.time >= this.respawnAt) {
       this.hp = this.myMaxHp();
@@ -410,8 +496,10 @@ export class Game {
   private damageDrone(amount: number): void {
     if (this.hp <= 0) return;
     this.hp = Math.max(0, this.hp - amount);
+    this.trauma = addTrauma(this.trauma, Math.min(0.6, amount / 60)); // taking a hit jolts the view + flashes the HUD
+    this.hud.damageFlash(Math.min(1, amount / 50));
     this.hud.setHealth(this.hp, this.myMaxHp(), true);
-    if (this.hp > 0) this.audio.hit(); else this.audio.death();
+    if (this.hp > 0) this.audio.hit(); else this.audio.death(this.role === "human"); // drones crash, not grunt
     if (this.hp <= 0) {
       this.respawnAt = this.time + 3;
       this.hud.flash("Derribado — reapareces en 3s");
@@ -459,13 +547,61 @@ export class Game {
     return "";
   }
 
+  /** Applies the current preset across every subsystem it drives (renderer, mortar detail, audio). One
+   *  place so IBL/shadows/pixels/detail/audio can never drift apart. voxelDetail follows the preset here
+   *  (the baseline); the auto-scaler can still drop detail INDEPENDENTLY below that to hold 60 fps. */
+  private applyQualityPreset(): void {
+    const cfg = qualityConfig(this.quality, window.devicePixelRatio || 1);
+    this.renderer.applyQuality(cfg);
+    this.voxelDetailOn = cfg.voxelDetail;
+    this.mesher.setVoxelDetail(this.voxelDetailOn);
+    this.audio.setLowAudio(this.quality === "bajo"); // drop the reverb convolver on the lightest preset
+  }
+
   /** Cycles the graphics-quality preset live (Bajo → Medio → Alto) and persists the choice. */
   private cycleQuality(): void {
     this.quality = QUALITY_ORDER[(QUALITY_ORDER.indexOf(this.quality) + 1) % QUALITY_ORDER.length];
     if (typeof localStorage !== "undefined") localStorage.setItem("quality", this.quality);
-    this.renderer.applyQuality(qualityConfig(this.quality, window.devicePixelRatio || 1));
+    this.applyQualityPreset();
     this.interiorLights?.build(placedBuildings(), this.interiorLightBudget()); // re-scale interior lights to the preset
     this.hud.flash(`Calidad: ${this.quality.toUpperCase()}${this.quality === "bajo" ? " · recargá para quitar el suavizado" : ""}`);
+  }
+
+  /** Defends the 60fps floor when the frame rate stays low for a sustained window. Pulls ONE lever at a
+   *  time, cheapest-visual-first (dynamic-res → mortar detail → preset), so a weak machine keeps playing
+   *  at 60 without manual tuning and gives up the least visual it has to. One-way (bump back with K). */
+  private adaptiveQuality(dt: number): void {
+    // Accumulate sustained-low time only while a lever remains (not yet fully floored at bajo + no detail).
+    const flooredOut = this.quality === "bajo" && !this.voxelDetailOn;
+    if (this.fps < LOW_FPS && !flooredOut) this.lowFpsSec += dt;
+    else this.lowFpsSec = Math.max(0, this.lowFpsSec - dt);
+
+    const lever = nextPerfLever({
+      fps: this.fps,
+      sustainedLowSec: this.lowFpsSec,
+      resAtFloor: this.resScale <= RES_MIN + 0.001, // dynamic-res already floored → can't save more pixels
+      detailOn: this.voxelDetailOn,
+      quality: this.quality,
+    });
+    if (lever === "dropDetail") {
+      // Cheapest visual to lose: the per-voxel mortar seams (~4ms). Below the preset baseline, live.
+      this.voxelDetailOn = false;
+      this.mesher.setVoxelDetail(false);
+      this.lowFpsSec = 0;
+      this.hud.flash("Detalle de superficie → OFF (auto, por rendimiento)");
+    } else if (lever === "dropPreset") {
+      const lower = lowerQuality(this.quality);
+      if (!lower) return;
+      // Session-only: do NOT persist the auto-downgrade, so one bad session can't silently ratchet down
+      // the user's saved preference — their manual K choice is what persists. On reload it re-evaluates.
+      this.quality = lower;
+      this.applyQualityPreset();
+      this.interiorLights?.build(placedBuildings(), this.interiorLightBudget());
+      this.lowFpsSec = 0;
+      const aa = lower === "bajo" ? " · recargá para quitar el suavizado" : "";
+      this.hud.flash(`Calidad → ${lower.toUpperCase()} (auto, por rendimiento)${aa}`);
+    }
+    // "shrinkRes" / "none" → nothing to do here; the dynamic-res controller (every 0.4s) owns resolution.
   }
 
   /** Interior-light budget by graphics preset (bajo → none, so weak GPUs aren't taxed by extra lights). */
@@ -503,10 +639,14 @@ export class Game {
   /** Per-frame audio: the drone's rotor hum tracks its speed; a human plays footstep/jump/land events. */
   private audioFrame(): void {
     if (this.player instanceof Player) {
-      this.audio.setRotor(this.mode === "free" || this.hp > 0 ? 1 : 0, this.player.speed());
+      this.audio.setRotor(this.mode === "free" || this.hp > 0 ? 1 : 0, this.player.speed(), 0.032); // your own rotor: quiet
     } else {
-      this.audio.setRotor(0, 0);
       const w = this.player;
+      // a human on the ground HEARS enemy drones — the closer one gets, the louder its rotor
+      const p = w.camera.position;
+      const dist = this.remotes.nearestDroneDist(p.x, p.y, p.z);
+      const AUD = 50; // metres of audibility
+      this.audio.setRotor(dist < AUD ? Math.min(1, 1 - dist / AUD) : 0, 30, 0.14);
       if (w.audioStep) { this.audio.footstep(w.audioRun); w.audioStep = false; }
       if (w.audioJump) { this.audio.jump(); w.audioJump = false; }
       if (w.audioLand) { this.audio.land(); w.audioLand = false; }
@@ -555,7 +695,7 @@ export class Game {
   /** Returns the per-component frame timing peaks/totals since the last call, then resets. */
   debugFrameProf(): typeof this.prof {
     const p = { ...this.prof };
-    this.prof = { settleMax: 0, settleTotal: 0, settleN: 0, spawnMax: 0, rebuildMax: 0, rebuildTotal: 0, physicsMax: 0, physicsTotal: 0, gpuMax: 0, gpuTotal: 0, renderMax: 0, renderTotal: 0 };
+    this.prof = this.profZero();
     return p;
   }
 
@@ -583,7 +723,7 @@ export class Game {
   /** Voxels the coarse cell-support model considers unsupported right now (0 when intact). */
   debugUnsupportedCount(): number {
     let n = 0;
-    for (const ck of this.grid.fallenCells(CELL_OVERHANG)) n += this.grid.cellVoxelKeys(ck).length;
+    for (const ck of this.grid.fallenCells(CELL_OVERHANG, CELL_MIN_MASS)) n += this.grid.cellVoxelKeys(ck).length;
     return n;
   }
 
@@ -688,18 +828,22 @@ export class Game {
     // grassy terrain: a big subdivided plane — flat under the city, gently rolling beyond it, and
     // mottled with muted greens so it reads as grass/ground without a texture. Purely visual; the
     // physics floor above stays a flat slab, and the displacement never rises under the buildings.
-    const SEG = 96, SIZE = 400;
+    // Higher SEG so the 3.5 m streets resolve. Flat under the city, rolling hills only well beyond it.
+    const SEG = 160, SIZE = 400;
     const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
     const pos = geo.attributes.position as THREE.BufferAttribute;
     const colors = new Float32Array(pos.count * 3);
-    const grass = new THREE.Color(0x3f4a2e), tint = new THREE.Color();
+    const grass = new THREE.Color(0x3f4a2e), asphalt = new THREE.Color(0x2b2d31), concrete = new THREE.Color(0x6b675e), tint = new THREE.Color();
     const noise = (x: number, z: number) => Math.sin(x * 0.05) * Math.cos(z * 0.045) + 0.5 * Math.sin(x * 0.12 + z * 0.1);
     for (let i = 0; i < pos.count; i++) {
       const wx = pos.getX(i), wz = -pos.getY(i);                                  // plane local → world XZ
-      const edge = Math.max(0, Math.abs(wx) - 95, Math.abs(wz) - 80);            // 0 inside the city
-      pos.setZ(i, Math.min(edge / 60, 1) * 4 * noise(wx, wz));                    // rolling hills only outside
-      const shade = 0.72 + 0.28 * (0.5 + 0.5 * noise(wx * 1.7, wz * 1.7));        // mottled grass
-      tint.copy(grass).multiplyScalar(shade);
+      const cls = groundClass(wx / VOXEL, wz / VOXEL);                            // street / plot / outside
+      const edge = cls === "outside" ? Math.max(0, Math.abs(wx) - 95, Math.abs(wz) - 80) : 0;
+      pos.setZ(i, Math.min(edge / 60, 1) * 4 * noise(wx, wz));                    // rolling hills only outside the city
+      const n = 0.5 + 0.5 * noise(wx * 1.7, wz * 1.7);
+      if (cls === "street") tint.copy(asphalt).multiplyScalar(0.82 + 0.18 * n);   // dark asphalt with faint lane variation
+      else if (cls === "plot") tint.copy(concrete).multiplyScalar(0.8 + 0.2 * n); // concrete apron under buildings
+      else tint.copy(grass).multiplyScalar(0.72 + 0.28 * n);                      // mottled grass beyond the city
       colors[i * 3] = tint.r; colors[i * 3 + 1] = tint.g; colors[i * 3 + 2] = tint.b;
     }
     geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
@@ -720,6 +864,7 @@ export class Game {
    *  VS drops the loose crates (dynamic props would diverge across clients). */
   private rebuildWorld(seed: number, withProps: boolean): void {
     setWorldSeed(seed);
+    this.worldSeed = seed >>> 0; // same seed drives world gen AND every per-event destruction RNG
     for (const p of this.props) { this.physics.world.removeRigidBody(p.body); this.renderer.scene.remove(p.mesh); }
     this.props.length = 0;
     this.grid.clear();
@@ -737,6 +882,7 @@ export class Game {
     this.collider.clear();
     this.streamColliders(true);
     this.structureDirty = false;
+    this.pendingFall.length = 0; // drop any in-flight collapse wave from the old grid
     if (withProps) this.spawnInitialProps();
     this.spawnPlayerInBuilding();
   }
@@ -773,6 +919,7 @@ export class Game {
   private markChunkKey(ck: number): void {
     this.dirtyChunks.add(ck);        // mesh: rebuilt promptly (visual)
     this.dirtyCol.set(ck, this.time); // collider: debounced until this chunk stops changing
+    this.cookService.touch(ck);      // bump gen → any in-flight cook for the old state is dropped on return
   }
 
   private markChunk(x: number, y: number, z: number): void {
@@ -805,16 +952,19 @@ export class Game {
     const [pvx, pvy, pvz] = VoxelGrid.worldToVoxel(p.x, p.y, p.z);
     const pcx = chunkCoord(pvx), pcy = chunkCoord(pvy), pcz = chunkCoord(pvz);
     const R = Game.COLLIDER_RADIUS;
-    let budget = initial ? Number.POSITIVE_INFINITY : 3;
+    // TIME-budget the collider builds: each dense chunk's Rapier cuboids cost a few ms, so building a
+    // fixed 3/frame spikes when you fly into a NEW area ("jalón al cruzar esquinas"). Cap the per-frame
+    // collider work instead (less under governor load) → it streams over several frames, no hitch.
+    const _cs0 = performance.now();
+    const colMs = 2 * this.governor.budgetScale;
 
     build:
     for (let cx = pcx - R; cx <= pcx + R; cx++)
       for (let cy = pcy - R; cy <= pcy + R; cy++)
         for (let cz = pcz - R; cz <= pcz + R; cz++) {
-          if (budget <= 0) break build;
           if (this.collider.hasChunk(cx, cy, cz) || !this.grid.chunkNonEmpty(cx, cy, cz)) continue;
+          if (!initial && performance.now() - _cs0 > colMs) break build; // only time-check when about to build
           this.collider.rebuildChunk(this.grid, cx, cy, cz);
-          budget--;
         }
 
     const far = R + 2; // hysteresis so chunks at the edge don't thrash in/out
@@ -830,14 +980,21 @@ export class Game {
   }
 
   private explodeAt(x: number, y: number, z: number, radius: number, power: number, broadcast = false, by = 0): void {
-    // A player-initiated blast is authoritative: broadcast its exact position so EVERY client carves
-    // identically. Cascades (gas chains, collapse) are deterministic on the synced grid, so they run
-    // locally on each client and are NOT broadcast (broadcast stays false for those calls).
+    // Quantize to the wire precision AT SOURCE, so this client carves with the EXACT numbers every peer
+    // receives — otherwise a <1cm float mismatch flips crater-edge voxels (the lobe test at carve.ts is a
+    // hard cutoff) and the per-event RNG seed diverges. Math.round (not toFixed → stable on negatives).
+    x = q2(x) / 100; y = q2(y) / 100; z = q2(z) / 100; radius = q2(radius) / 100;
+    const seed = eventSeed(this.worldSeed, EVT.EXPLODE, q2(x), q2(y), q2(z), q2(radius), power | 0);
+    // A player-initiated blast is authoritative: broadcast its (already quantized) position so EVERY
+    // client carves identically. Cascades (gas chains, collapse) are deterministic on the synced grid,
+    // so they run locally on each client and are NOT broadcast (broadcast stays false for those calls).
     if (broadcast && this.net.connected) {
-      this.net.send({ t: "explode", x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2), r: radius, p: power });
+      this.net.send({ t: "explode", x, y, z, r: radius, p: power });
     }
-    { const pp = this.player.camera.position; this.audio.explosion(power, Math.hypot(pp.x - x, pp.y - y, pp.z - z)); }
-    const { removed } = explode(this.physics, this.targets, x, y, z, radius, power, (fx, fy, fz, r) => this.addFlash(fx, fy, fz, r));
+    { const pp = this.player.camera.position; const d = Math.hypot(pp.x - x, pp.y - y, pp.z - z);
+      this.audio.explosion(power, d);
+      this.trauma = addTrauma(this.trauma, Math.min(0.9, (power / 3000) / (1 + d * d * 0.03))); } // blast kicks the camera; near = heavy, far = ripple
+    const { removed } = explode(this.physics, this.targets, x, y, z, radius, power, seed, (fx, fy, fz, r) => this.addFlash(fx, fy, fz, r));
     if (removed > 0) {
       this.markSphere(x, y, z, radius);
       this.structureDirty = true; // re-solve the cell support graph next frame
@@ -865,47 +1022,64 @@ export class Game {
   private collapseStep(): void {
     if (!this.structureDirty) return;
     const _t0 = performance.now();
-    const fallen = this.grid.fallenCells(CELL_OVERHANG);
-    if (fallen.length === 0) {
-      this.structureDirty = false;
-    } else {
-      const matCount = new Map<MaterialId, number>();
-      let sx = 0, sy = 0, sz = 0, nn = 0, cubes = 0;
-      const limit = Math.min(fallen.length, COLLAPSE_BUDGET);
-      for (let ci = 0; ci < limit; ci++) {
-        for (const k of this.grid.cellVoxelKeys(fallen[ci])) {
-          const x = (k % 1024) - 512, y = (Math.floor(k / 1024) % 1024) - 512, z = Math.floor(k / 1048576) - 512;
-          const mat = this.grid.get(x, y, z);
-          if (mat === undefined) continue;
-          matCount.set(mat, (matCount.get(mat) ?? 0) + 1);
-          sx += x; sy += y; sz += z; nn++;
-          this.impactMarks.clearVoxel(k);
-          this.grid.remove(x, y, z);
-          this.markChunk(x, y, z);
-          // a few pooled CPU cubes (sparse) for close-up rubble; GPU debris carries the mass
-          if (cubes < MAX_DEBRIS_PER_EVENT && ((x + y + z) & 7) === 0) {
-            const c = VoxelGrid.center(x, y, z);
-            if (this.debris.spawn(c.x, c.y, c.z, mat, (Math.random() - 0.5) * 0.8, -0.2, (Math.random() - 0.5) * 0.8)) cubes++;
-          }
-        }
+    // Re-solve the global O(cells) support graph ONLY when the previous fallen wave is fully drained.
+    // A mega-bomb collapse spans many frames; re-running the solve EVERY frame was the measured
+    // 'settle' spike (~8 ms × many frames). Solve once → drain the wave over frames (COLLAPSE_BUDGET
+    // cells each) → solve again to catch the cascade. Every fallen cell is already doomed, so draining
+    // the wave across frames reaches the identical final state with a fraction of the solves.
+    if (this.pendingFall.length === 0) {
+      // Topological support (disconnected/sliver-held) UNION pancake (a gutted lower storey can't carry
+      // the intact floors above). Both are deterministic on the synced grid → consistent across clients.
+      const topo = this.grid.fallenCells(CELL_OVERHANG, CELL_MIN_MASS);
+      const pan = this.grid.pancakeCells(CELL_MIN_MASS, PANCAKE_FRAC);
+      this.pendingFall = pan.length ? [...new Set([...topo, ...pan])] : topo;
+      if (this.pendingFall.length === 0) {
+        this.structureDirty = false;
+        this.recordSettle(performance.now() - _t0);
+        return;
       }
-      if (nn > 0) {
-        let dom: MaterialId = "concrete", best = 0;
-        for (const [m, c] of matCount) if (c > best) { best = c; dom = m; }
-        const wc = VoxelGrid.center(Math.round(sx / nn), Math.round(sy / nn), Math.round(sz / nn));
-        this.sink.burst(wc.x, wc.y, wc.z, {
-          count: 0, color: 0, speed: 5, life: 12, kind: "debris",
-          colorType: DEBRIS_CT[dom], strength: Math.min(0.9, 0.12 + nn / 80),
-        });
-        // VS: rubble falling on/near our drone hurts it (accumulates while buried)
-        if (this.mode === "vs") {
-          const p = this.player.camera.position;
-          if (Math.hypot(p.x - wc.x, p.y - wc.y, p.z - wc.z) < 3) this.damageDrone(Math.min(8, nn / 18));
-        }
-      }
-      // stays dirty → re-solve next frame to finish the budget / catch cascades
     }
-    const d = performance.now() - _t0;
+    const matCount = new Map<MaterialId, number>();
+    let sx = 0, sy = 0, sz = 0, nn = 0, cubes = 0;
+    const limit = Math.min(this.pendingFall.length, COLLAPSE_BUDGET);
+    for (let ci = 0; ci < limit; ci++) {
+      for (const k of this.grid.cellVoxelKeys(this.pendingFall[ci])) {
+        const x = (k % 1024) - 512, y = (Math.floor(k / 1024) % 1024) - 512, z = Math.floor(k / 1048576) - 512;
+        const mat = this.grid.get(x, y, z);
+        if (mat === undefined) continue;
+        matCount.set(mat, (matCount.get(mat) ?? 0) + 1);
+        sx += x; sy += y; sz += z; nn++;
+        this.impactMarks.clearVoxel(k);
+        this.grid.remove(x, y, z);
+        this.markChunk(x, y, z);
+        // a few pooled CPU cubes (sparse) for close-up rubble; GPU debris carries the mass
+        if (cubes < MAX_DEBRIS_PER_EVENT && ((x + y + z) & 7) === 0) {
+          const c = VoxelGrid.center(x, y, z);
+          // per-voxel-key seed → collapse rubble is deterministic on the synced grid (same as carve)
+          const cr = new Rng(mix32(this.worldSeed, EVT.COLLAPSE, k));
+          if (this.debris.spawn(c.x, c.y, c.z, mat, cr.centered(0.8), -0.2, cr.centered(0.8), VOXEL / 2, cr)) cubes++;
+        }
+      }
+    }
+    this.pendingFall.splice(0, limit); // drop the drained slice; emptied → re-solve next call (cascade)
+    if (nn > 0) {
+      let dom: MaterialId = "concrete", best = 0;
+      for (const [m, c] of matCount) if (c > best) { best = c; dom = m; }
+      const wc = VoxelGrid.center(Math.round(sx / nn), Math.round(sy / nn), Math.round(sz / nn));
+      this.sink.burst(wc.x, wc.y, wc.z, {
+        count: 0, color: 0, speed: 5, life: 12, kind: "debris",
+        colorType: DEBRIS_CT[dom], strength: Math.min(0.9, 0.12 + nn / 80),
+      });
+      // VS: rubble falling on/near our drone hurts it (accumulates while buried)
+      if (this.mode === "vs") {
+        const p = this.player.camera.position;
+        if (Math.hypot(p.x - wc.x, p.y - wc.y, p.z - wc.z) < 3) this.damageDrone(Math.min(8, nn / 18));
+      }
+    }
+    this.recordSettle(performance.now() - _t0);
+  }
+
+  private recordSettle(d: number): void {
     this.prof.settleN++;
     this.prof.settleTotal += d;
     if (d > this.prof.settleMax) this.prof.settleMax = d;
@@ -976,9 +1150,22 @@ export class Game {
     f.life = f.max = 0.16;
   }
 
+  /** A muzzle pop at the gun: a small pooled-light flash + a couple of sparks. Uses the pooled lights
+   *  (constant count → no material recompile), so it's free during auto-fire. Also called for REMOTE
+   *  shooters at their broadcast origin, so enemy gunfire is visible/spottable at range. */
+  private muzzleFlash(origin: THREE.Vector3, dir: THREE.Vector3, radius: number): void {
+    const x = origin.x + dir.x * 0.7, y = origin.y + dir.y * 0.7, z = origin.z + dir.z * 0.7;
+    this.addFlash(x, y, z, radius);
+    this.sink.burst(x, y, z, {
+      count: 2, color: 0xffd27a, speed: 3, size: 2, life: 0.07,
+      buoyancy: 0, windCoupling: 0.05, kind: "spark", strength: 0.004,
+    });
+  }
+
   // --- input -------------------------------------------------------------
 
   private onMouseDown(button: number): void {
+    if (button === 0) this.firing = true; // hold LMB → keep firing (see autoFire in the frame loop)
     if (this.hp <= 0) return; // dead → wait for respawn
     const origin = this.player.camera.position;
     const dir = this.player.forward(this.tmpDir).clone();
@@ -1030,12 +1217,31 @@ export class Game {
     }
   }
 
+  /** Full-auto: while LMB is held, keep firing the primary weapon at its rate — for BOTH teams. The
+   *  team weapon self-gates on its cooldown (so its own fire rate sets the cadence); the sandbox bullet
+   *  gets a machine-gun cadence. Grenades/missiles/build stay single-click. */
+  private autoFire(): void {
+    if (this.hp <= 0) return;
+    if (this.projectiles.bulletCount > 40) return; // held-fire safety: don't stack unbounded bullet bodies
+    const origin = this.player.camera.position;
+    const dir = this.player.forward(this.tmpDir).clone();
+    if (this.mode !== "free") { this.fireWeapon(origin, dir); return; } // cooldown-gated → full-auto
+    if (this.tool === "shoot" && this.time >= this.bulletReadyAt) {
+      this.bulletReadyAt = this.time + 0.09; // ~11 rounds/sec
+      this.shoot(origin, dir);
+      this.audio.shot("mg");
+    }
+  }
+
   private applyEdit(region: EditRegion | null): void {
     if (region) this.markRegion(region[0], region[1], region[2], region[3], region[4], region[5]);
   }
 
   private shoot(origin: THREE.Vector3, dir: THREE.Vector3, dmg = 0): void {
     this.projectiles.launchBullet(origin, dir);
+    this.muzzleFlash(origin, dir, 0.22); // subtle first-person muzzle glow (pool keeps one alive during auto-fire)
+    this.trauma = addTrauma(this.trauma, 0.03); // light per-shot kick
+    if (dmg > 0) this.predictHit(origin, dir); // local hit marker when our round is on an enemy
     this.broadcastWeapon("bullet", origin, dir, dmg);
   }
 
@@ -1044,7 +1250,7 @@ export class Game {
   private broadcastWeapon(k: string, o: THREE.Vector3, d: THREE.Vector3, dmg = 0): void {
     if (!this.net.connected) return;
     this.net.send({
-      t: "weapon", k, dmg,
+      t: "weapon", k, dmg, w: this.weapon, // w = weapon id, so the victim can apply range falloff
       ox: +o.x.toFixed(2), oy: +o.y.toFixed(2), oz: +o.z.toFixed(2),
       dx: +d.x.toFixed(3), dy: +d.y.toFixed(3), dz: +d.z.toFixed(3),
     });
@@ -1073,14 +1279,20 @@ export class Game {
 
   /** Shotgun: a tight bullet spread. Each pellet's grid hit is broadcast, so peers stay in sync. */
   private fireShotgun(origin: THREE.Vector3, dir: THREE.Vector3, pellets: number, dmg: number): void {
+    // Seeded spread (was Math.random) so every pellet is lockstep-reproducible; each pellet's grid hit
+    // is still broadcast as a `hit` for grid convergence, but the pattern itself is now deterministic.
+    const rng = new Rng(eventSeed(this.worldSeed, EVT.SHOTGUN, q2(origin.x), q2(origin.y), q2(origin.z), q3(dir.x), q3(dir.y), q3(dir.z)));
     for (let i = 0; i < pellets; i++) {
       const d = new THREE.Vector3(
-        dir.x + (Math.random() - 0.5) * 0.09,
-        dir.y + (Math.random() - 0.5) * 0.09,
-        dir.z + (Math.random() - 0.5) * 0.09,
+        dir.x + rng.centered(0.09),
+        dir.y + rng.centered(0.09),
+        dir.z + rng.centered(0.09),
       ).normalize();
       this.projectiles.launchBullet(origin, d);
     }
+    this.muzzleFlash(origin, dir, 0.34); // bigger pop for the shotgun
+    this.trauma = addTrauma(this.trauma, 0.12); // heavy shotgun kick
+    if (dmg > 0) this.predictHit(origin, dir);
     this.broadcastWeapon("bullet", origin, dir, dmg); // one hitscan carries the burst's player damage
   }
 
@@ -1092,7 +1304,7 @@ export class Game {
 
   /** Kamikaze: the drone self-detonates in a big blast (and dies with it). */
   private kamikaze(origin: THREE.Vector3): void {
-    this.explodeAt(origin.x, origin.y, origin.z, 4.5, 900, true);
+    this.explodeAt(origin.x, origin.y, origin.z, 5, 1400, true);
     this.damageDrone(9999);
   }
 
@@ -1217,11 +1429,13 @@ export class Game {
     this.grid.remove(vx, vy, vz);
     this.markRegion(vx, vy, vz, vx, vy, vz);
 
+    // Per-hit seed from the (integer) voxel key + quantized bullet direction → identical on every client.
+    const rng = new Rng(eventSeed(this.worldSeed, EVT.HIT, packKey(vx, vy, vz), q3(dx), q3(dy), q3(dz)));
     const def = MATERIALS[mat];
     const sp = 2.5;
-    const evx = dx * sp + (Math.random() - 0.5);
-    const evy = dy * sp + 1.0 + (Math.random() - 0.5);
-    const evz = dz * sp + (Math.random() - 0.5);
+    const evx = dx * sp + rng.centered(1);
+    const evy = dy * sp + 1.0 + rng.centered(1);
+    const evz = dz * sp + rng.centered(1);
 
     if (def.shatters) {
       // glass: a few quick shards, no dust cloud
@@ -1231,7 +1445,7 @@ export class Game {
       });
     } else {
       // one real rigid chunk of the actual material + a small, short-lived dust puff
-      this.debris.spawn(c.x, c.y, c.z, mat, evx, evy, evz);
+      this.debris.spawn(c.x, c.y, c.z, mat, evx, evy, evz, VOXEL / 2, rng);
       this.sink.burst(c.x, c.y, c.z, {
         count: 6, color: 0xbfae93, speed: 1.5, size: 7, life: 0.5,
         buoyancy: -2, windCoupling: 0.5, spread: 0.25, kind: "dust", strength: 0.015,
@@ -1396,19 +1610,24 @@ export class Game {
 
     this.acc += dt;
     let steps = 0;
+    // Adaptive substep cap: when last frame's physics was already heavy (a big collapse), a 2nd catch-up
+    // step this frame would double the hitch — cap to 1 and drop the backlog below (slow-mo > stutter).
+    const stepCap = maxPhysicsSteps(this.lastPhysMs);
     const _tp = performance.now();
-    while (this.acc >= FIXED_DT && steps < 2) {
+    while (this.acc >= FIXED_DT && steps < stepCap) {
       this.physics.step(this.time);
       this.acc -= FIXED_DT;
       steps++;
     }
     const _pd = performance.now() - _tp;
+    this.lastPhysMs = steps > 0 ? _pd / steps : this.lastPhysMs; // per-step cost drives the next frame's cap
     this.prof.physicsTotal += _pd; if (_pd > this.prof.physicsMax) this.prof.physicsMax = _pd;
     // never try to "catch up" a backlog — that spirals when physics is heavy.
     // Better to run slightly slow-mo for a frame than to freeze.
     if (this.acc > FIXED_DT) this.acc = 0;
 
     this.player.update(dt, this.input);
+    if (this.firing && this.input.locked) this.autoFire(); // hold LMB → machine-gun the primary weapon
     // fall damage (human, >1 storey) always — a human only exists in the combat modes anyway. Drone
     // ram-impact (fast into a wall) only in combat, so the sandbox doesn't punish flying/building.
     if (this.player instanceof Walker) {
@@ -1434,11 +1653,22 @@ export class Game {
     this.prof.gpuTotal += _gd; if (_gd > this.prof.gpuMax) this.prof.gpuMax = _gd;
     this.syncProps();
     this.updateFlashes(dt);
+    this.trauma = decayTrauma(this.trauma, dt); // screen shake bleeds off toward rest
     // one budget scale drives BOTH the rigid-debris cap and the GPU particle emission, so under
     // load the whole spectacle throttles together (compatibility on weak/integrated GPUs).
     const budget = this.governor.update(this.fps);
     this.debris.cap = Math.round(MAX_DEBRIS * budget);
     if (this.gpu) this.gpu.emissionScale = budget;
+    this.adaptiveQuality(dt); // sustained low fps → drop a preset (last resort, only once res is floored)
+    // Dynamic resolution: hold ~60fps by nudging the render scale (debounced). Prefer the REAL GPU-ms from
+    // the timer query (proportional → converges in ~1 tick); fall back to fps where the ext is unavailable.
+    this.resTimer += dt;
+    if (this.resTimer >= 0.4) {
+      this.resTimer = 0;
+      const gpuMs = this.gpuTimer.latest();
+      const rs = gpuMs != null ? nextResScaleGpu(gpuMs, this.resScale) : nextResScaleFps(this.fps, this.resScale);
+      if (rs !== this.resScale) { this.resScale = rs; this.renderer.setRenderScale(rs); }
+    }
     const _tr = performance.now();
     this.rebuildDirty();
     const _rd = performance.now() - _tr;
@@ -1455,12 +1685,44 @@ export class Game {
       battery: this.battery,
     });
     this.hud.update(dt);
-    this.hud.setStats(this.fps, this.debris.count, Math.hypot(this.physics.wind.x, this.physics.wind.z));
+    if (this.hp <= 0) this.hud.showDeath(this.respawnAt - this.time); else this.hud.hideDeath(); // death overlay + live respawn countdown
+    this.statsT -= dt; // the stats readout doesn't need a 60Hz DOM write
+    if (this.statsT <= 0) { this.statsT = 0.16; this.hud.setStats(this.fps, this.debris.count, Math.hypot(this.physics.wind.x, this.physics.wind.z)); }
+    this.prof.framesSimulated++;
     const _trn = performance.now();
     const cp = this.player.camera.position;
     if (!this.hidden()) { // the sim runs while hidden (Web Worker), but there's no point rendering a hidden tab
-      this.renderer.followSun(cp.x, cp.y, cp.z); // keep the tight shadow frustum on the player
+      const info = this.renderer.renderer.info;
+      info.reset(); // autoReset is off (see Renderer ctor) → this frame's calls now include shadow + GPGPU passes
+      // Refresh the shadow map at ~30Hz WHILE anything casts a moving shadow (player moves, geometry is
+      // carved, debris/peers move) — but skip the pass ENTIRELY when the scene is static (stationary
+      // player, no debris, clean grid), since the sun follows the player so the stale map stays valid.
+      // Standing still to aim no longer pays the ~6ms shadow pass; a rare safety refresh unsticks it.
+      const shadowActive = this.dirtyChunks.size > 0 || this.rebuildAllColliders
+        || this.debris.count > 0 || this.remotes.count > 0
+        || cp.distanceToSquared(this.lastShadowPos) > SHADOW_MOVE_SQ;
+      if (shouldRefreshShadows(shadowActive, this.shadowSince)) {
+        this.renderer.followSun(cp.x, cp.y, cp.z);
+        this.renderer.refreshShadows();
+        this.lastShadowPos.copy(cp);
+        this.shadowSince = 0;
+      } else {
+        this.shadowSince++;
+      }
+      // Screen shake for the render only, then RESTORED — never leaks into physics or the broadcast
+      // position (netUpdate already ran). Positional + roll about the view axis → aim/crosshair unmoved.
+      const sh = shakeOffset(this.trauma, this.time);
+      const cam = this.player.camera;
+      cam.position.x += sh.dx; cam.position.y += sh.dy; cam.position.z += sh.dz;
+      if (sh.roll !== 0) cam.rotateZ(sh.roll);
+      this.gpuTimer.begin();
       this.renderer.render(this.player.camera);
+      this.gpuTimer.end();
+      if (sh.roll !== 0) cam.rotateZ(-sh.roll);
+      cam.position.x -= sh.dx; cam.position.y -= sh.dy; cam.position.z -= sh.dz;
+      this.prof.framesRendered++;
+      if (info.render.calls > this.prof.drawCalls) this.prof.drawCalls = info.render.calls;
+      if (info.render.triangles > this.prof.triangles) this.prof.triangles = info.render.triangles;
     }
     const _rn = performance.now() - _trn;
     this.prof.renderTotal += _rn; if (_rn > this.prof.renderMax) this.prof.renderMax = _rn;
@@ -1481,28 +1743,47 @@ export class Game {
     // Rebuilds are TIME-budgeted so they never stack into a visible hitch — a chunk rebuild can be
     // several ms, so 4 of them was a ~20ms jolt. Spread across frames instead.
     const _rt0 = performance.now();
+    // Under load the governor shrinks the per-frame rebuild budget so a carving spree spreads the
+    // chunk rebuilds over MORE frames (lower peak) instead of stacking into a hitch — the biggest
+    // measured cost during "many shots". Full budget with headroom, ~half when the governor is floored.
+    const s = this.governor.budgetScale;
+    const meshBudget = 2.5 + 2.5 * s;   // 2.5..5 ms
     // Meshes (visual) first — prompt, but capped.
     if (this.dirtyChunks.size > 0) {
       for (const ck of this.dirtyChunks) {
         const [cx, cy, cz] = unpackKey(ck);
         this.mesher.rebuildChunk(this.grid, cx, cy, cz);
         this.dirtyChunks.delete(ck);
-        if (performance.now() - _rt0 > 5) break;
+        if (performance.now() - _rt0 > meshBudget) break;
       }
     }
-    // Colliders churn the static broadphase (every edit re-costs world.step over all building
-    // colliders), so only rebuild a chunk once it has STOPPED changing for a moment, and only a
-    // little time per frame. The brief staleness only means a just-destroyed floor stays solid ~0.3s.
-    if (this.dirtyCol.size > 0 && performance.now() - _rt0 < 8) {
+    // Rebuilding a chunk collider forces Rapier to re-optimise the static broadphase on the NEXT
+    // world.step, and doing SEVERAL in one frame is SUPERLINEAR (measured: 1 chunk ≈ no churn, 4 ≈
+    // +14 ms in the next step, 8 ≈ +25 ms). So rebuild AT MOST ONE collider chunk per frame, and pick
+    // the one NEAREST the player: building colliders exist ONLY for the local player's movement
+    // (bullets raycast the grid with EXCLUDE_FIXED, debris are in a separate group), so a wall carved
+    // far away can wait its turn without any visible effect. This is the dominant cost during combat.
+    if (this.dirtyCol.size > 0) {
       const COL_DELAY = 0.3;
+      const pp = this.player.camera.position;
+      const [pvx, pvy, pvz] = VoxelGrid.worldToVoxel(pp.x, pp.y, pp.z);
+      const pcx = chunkCoord(pvx), pcy = chunkCoord(pvy), pcz = chunkCoord(pvz);
+      let bestKey = -1, bestDist = Infinity;
       for (const [ck, t] of this.dirtyCol) {
-        if (this.time - t < COL_DELAY) continue;
+        if (this.time - t < COL_DELAY) continue; // still being carved → let it settle first
         const [cx, cy, cz] = unpackKey(ck);
-        // only rebuild if this chunk is in the active LOD set; far ones get a fresh collider from
-        // the (already-updated) grid when the player streams them back in
-        if (this.collider.hasChunk(cx, cy, cz)) this.collider.rebuildChunk(this.grid, cx, cy, cz);
-        this.dirtyCol.delete(ck);
-        if (performance.now() - _rt0 > 8) break;
+        // out of the LOD set → drop it; streamColliders rebuilds it fresh from the grid on return
+        if (!this.collider.hasChunk(cx, cy, cz)) { this.dirtyCol.delete(ck); continue; }
+        const d = Math.abs(cx - pcx) + Math.abs(cy - pcy) + Math.abs(cz - pcz);
+        if (d < bestDist) { bestDist = d; bestKey = ck; }
+      }
+      if (bestKey >= 0) {
+        const [cx, cy, cz] = unpackKey(bestKey);
+        // Snapshot the chunk's voxels and cook OFF-THREAD (or inline via the sync fallback). Taken off the
+        // dirty set now; a later carve re-adds it via markChunkKey (which also bumps gen → any stale
+        // in-flight result is dropped). onColliderCooked applies the boxes when they return.
+        this.dirtyCol.delete(bestKey);
+        this.cookService.requestCollider(bestKey, Int32Array.from(this.grid.chunkVoxelKeys(cx, cy, cz)));
       }
     }
   }

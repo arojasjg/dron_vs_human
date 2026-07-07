@@ -10,9 +10,10 @@ export function explode(
   cx: number, cy: number, cz: number,
   radius: number,
   power: number,
+  seed: number,
   onFlash?: FlashFn,
 ): { removed: number } {
-  const { removed } = carveSphere(targets, cx, cy, cz, radius, power, radius * 5);
+  const { removed } = carveSphere(targets, cx, cy, cz, radius, power, radius * 5, seed);
 
   const blastR = radius * 1.9;
   const blastR2 = blastR * blastR;

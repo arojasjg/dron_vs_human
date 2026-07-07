@@ -68,28 +68,49 @@ export function buildTower(grid: VoxelGrid, ox = -12, oz = 4): void {
   fillBox(grid, ox, ox + 3, 0, 39, oz, oz + 3, "concrete");
 }
 
-/** Static destructible car: metal body + glass cabin + dark wheels. */
-export function buildCar(grid: VoxelGrid, ox = 2, oz = -9): void {
-  // lower body
-  fillBox(grid, ox, ox + 13, 1, 3, oz, oz + 6, "metal");
-  // cabin
-  fillBox(grid, ox + 3, ox + 9, 4, 6, oz + 1, oz + 5, "metal");
-  // cabin windows
-  fillBox(grid, ox + 3, ox + 9, 4, 5, oz, oz, "glass");
-  fillBox(grid, ox + 3, ox + 9, 4, 5, oz + 6, oz + 6, "glass");
-  fillBox(grid, ox + 3, ox + 3, 4, 5, oz + 1, oz + 5, "glass");
-  fillBox(grid, ox + 9, ox + 9, 4, 5, oz + 1, oz + 5, "glass");
-  // wheels
-  for (const [wx, wz] of [[ox + 1, oz], [ox + 1, oz + 6], [ox + 12, oz], [ox + 12, oz + 6]] as const) {
-    fillBox(grid, wx, wx + 1, 0, 1, wz, wz, "metal");
-  }
-  // a car is a standalone prop, not load-bearing structure: mark it non-structural so its
-  // body (which cantilevers over the wheels) isn't treated as "floating" and doesn't force
-  // a huge overhang budget on the whole world.
-  for (let x = ox; x <= ox + 13; x++)
-    for (let y = 0; y <= 6; y++)
-      for (let z = oz; z <= oz + 6; z++)
-        if (grid.has(x, y, z)) grid.markSettled(x, y, z);
+// A vehicle is a standalone prop, not load-bearing structure: mark every voxel non-structural so its
+// body (cantilevered over the wheels) isn't treated as "floating" and doesn't force a huge overhang
+// budget on the whole world.
+function markSettledBox(grid: VoxelGrid, x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): void {
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++)
+    if (grid.has(x, y, z)) grid.markSettled(x, y, z);
+}
+
+/** Static destructible sedan: painted body + raised cabin + glass greenhouse + rubber tyres + lights. */
+export function buildCar(grid: VoxelGrid, ox = 2, oz = -9, paint: MaterialId = "car_red"): void {
+  fillBox(grid, ox, ox + 13, 1, 2, oz, oz + 6, paint);          // chassis / lower body
+  fillBox(grid, ox, ox + 3, 3, 3, oz, oz + 6, paint);           // hood (front, low)
+  fillBox(grid, ox + 10, ox + 13, 3, 3, oz, oz + 6, paint);     // trunk (rear, low)
+  fillBox(grid, ox + 4, ox + 9, 3, 5, oz, oz + 6, paint);       // raised cabin
+  fillBox(grid, ox + 4, ox + 9, 4, 5, oz, oz, "glass");         // side windows
+  fillBox(grid, ox + 4, ox + 9, 4, 5, oz + 6, oz + 6, "glass");
+  fillBox(grid, ox + 4, ox + 4, 4, 5, oz + 1, oz + 5, "glass"); // windshield
+  fillBox(grid, ox + 9, ox + 9, 4, 5, oz + 1, oz + 5, "glass"); // rear window
+  for (const [wx, wz] of [[ox + 1, oz], [ox + 1, oz + 6], [ox + 11, oz], [ox + 11, oz + 6]] as const)
+    fillBox(grid, wx, wx + 1, 0, 1, wz, wz, "tire");            // tyres
+  fillBox(grid, ox, ox, 2, 2, oz + 1, oz + 1, "glass"); fillBox(grid, ox, ox, 2, 2, oz + 5, oz + 5, "glass"); // headlights
+  markSettledBox(grid, ox, ox + 13, 0, 5, oz, oz + 6);
+}
+
+/** Box truck: painted cab + tall steel cargo box on six tyres. */
+export function buildTruck(grid: VoxelGrid, ox = 0, oz = 0, paint: MaterialId = "car_blue"): void {
+  fillBox(grid, ox, ox + 18, 1, 2, oz, oz + 7, "metal");        // chassis
+  fillBox(grid, ox, ox + 5, 1, 6, oz, oz + 7, paint);          // cab
+  fillBox(grid, ox, ox, 4, 6, oz + 1, oz + 6, "glass");        // windshield
+  fillBox(grid, ox + 1, ox + 5, 5, 6, oz, oz, "glass"); fillBox(grid, ox + 1, ox + 5, 5, 6, oz + 7, oz + 7, "glass");
+  fillBox(grid, ox + 6, ox + 18, 1, 8, oz, oz + 7, "metal");    // cargo box
+  for (const wx of [ox + 2, ox + 13, ox + 16]) for (const wz of [oz, oz + 7]) fillBox(grid, wx, wx + 1, 0, 1, wz, wz, "tire");
+  markSettledBox(grid, ox, ox + 18, 0, 8, oz, oz + 7);
+}
+
+/** Boxy delivery van: tall painted body + wraparound glass + tyres. */
+export function buildVan(grid: VoxelGrid, ox = 0, oz = 0, paint: MaterialId = "car_teal"): void {
+  fillBox(grid, ox, ox + 11, 1, 7, oz, oz + 6, paint);         // body
+  fillBox(grid, ox, ox, 4, 6, oz + 1, oz + 5, "glass");        // windshield
+  fillBox(grid, ox + 1, ox + 3, 5, 6, oz, oz, "glass"); fillBox(grid, ox + 1, ox + 3, 5, 6, oz + 6, oz + 6, "glass"); // cab windows
+  for (const [wx, wz] of [[ox + 1, oz], [ox + 1, oz + 6], [ox + 9, oz], [ox + 9, oz + 6]] as const)
+    fillBox(grid, wx, wx + 1, 0, 1, wz, wz, "tire");
+  markSettledBox(grid, ox, ox + 11, 0, 7, oz, oz + 6);
 }
 
 /** A small gas tank (cluster of explosive voxels) standing on the floor at (x,y,z). */
@@ -467,6 +488,22 @@ function decorateBuilding(grid: VoxelGrid, ox: number, oz: number, spec: BuildSp
 export interface Placed { ox: number; oz: number; W: number; D: number; FLOORS: number }
 const PLOTS_X = 5, PLOTS_Z = 4, STREET = 14; // 20 plots in the same footprint → more, smaller buildings
 const PLOT_W = Math.floor(BIG.W / PLOTS_X), PLOT_D = Math.floor(BIG.D / PLOTS_Z);
+
+/** City ground extent in VOXELS (the plot grid buildDefaultScene fills). */
+export const CITY_VOX = { x1: PLOTS_X * PLOT_W, z1: PLOTS_Z * PLOT_D };
+
+/** Classifies a voxel-space XZ column under the city so the ground can be painted as a real city floor:
+ *  'street' (a plot-boundary gap → asphalt), 'plot' (under/around a building → concrete apron), or
+ *  'outside' (beyond the footprint → grass). Pure & deterministic → unit-testable, visual only. */
+export function groundClass(vx: number, vz: number): "street" | "plot" | "outside" {
+  const m = 6; // pavement extends a little past the outer plots
+  if (vx < -m || vz < -m || vx > CITY_VOX.x1 + m || vz > CITY_VOX.z1 + m) return "outside";
+  const nearBoundary = (v: number, period: number) => {
+    const r = ((v % period) + period) % period;
+    return r < STREET / 2 || r > period - STREET / 2; // within half a street-width of a plot boundary
+  };
+  return nearBoundary(vx, PLOT_W) || nearBoundary(vz, PLOT_D) ? "street" : "plot";
+}
 /** Muted facade palette — brick plus the sombre wall tints; one is picked per building. */
 const WALL_MATS: MaterialId[] = ["brick", "wall_slate", "wall_moss", "wall_clay", "wall_navy"];
 let _placed: Placed[] = [];
@@ -496,7 +533,21 @@ export function buildDefaultScene(grid: VoxelGrid): void {
       buildBuilding(grid, ox, oz, { W, D, FLOORS }, wallMat);
       _placed.push({ ox, oz, W, D, FLOORS });
     }
-  buildCar(grid, -16, 8); // parked outside, west of the block
+  // parked vehicles along the horizontal streets (seeded → identical on every client), varied type + paint
+  const PAINTS: MaterialId[] = ["car_red", "car_blue", "car_teal", "metal"];
+  const park = (ox: number, oz: number): void => {
+    const paint = PAINTS[Math.floor(rand() * PAINTS.length)];
+    const t = rand();
+    if (t < 0.45) buildCar(grid, ox, oz, paint);
+    else if (t < 0.75) buildVan(grid, ox, oz, paint);
+    else buildTruck(grid, ox, oz, paint);
+  };
+  buildCar(grid, -16, 8, "car_red"); // the original parked car, west of the block
+  for (let pz = 1; pz < PLOTS_Z; pz++) {
+    const z = pz * PLOT_D - 4;                       // in the horizontal street gap (clear of buildings)
+    const n = 1 + Math.floor(rand() * 2);
+    for (let k = 0; k < n; k++) park(6 + Math.floor(rand() * (PLOTS_X * PLOT_W - 30)), z);
+  }
 }
 
 // Drones-vs-Humans bases (destructible objectives). Each carries the voxel bounds + its built voxel
