@@ -34,7 +34,7 @@ describe("carveSphere", () => {
     fillWall(h.grid, "brick");
     const before = h.grid.size;
     const cx = 4 * VOXEL, cy = 4 * VOXEL, cz = 0.5 * VOXEL;
-    const res = carveSphere(h.targets, cx, cy, cz, 0.5, 200, 9);
+    const res = carveSphere(h.targets, cx, cy, cz, 0.5, 200, 9, 1);
     expect(res.removed).toBeGreaterThan(0);
     expect(h.grid.size).toBe(before - res.removed);
     // the center voxel of the impact must be gone
@@ -46,12 +46,12 @@ describe("carveSphere", () => {
   it("metal resists a weak impact (no hole), glass shatters from the same energy", () => {
     const metal = harness();
     fillWall(metal.grid, "metal");
-    const m = carveSphere(metal.targets, 4 * VOXEL, 4 * VOXEL, 0.5 * VOXEL, 0.5, 40, 6);
+    const m = carveSphere(metal.targets, 4 * VOXEL, 4 * VOXEL, 0.5 * VOXEL, 0.5, 40, 6, 1);
     expect(m.removed).toBe(0);
 
     const glass = harness();
     fillWall(glass.grid, "glass");
-    const g = carveSphere(glass.targets, 4 * VOXEL, 4 * VOXEL, 0.5 * VOXEL, 0.5, 40, 6);
+    const g = carveSphere(glass.targets, 4 * VOXEL, 4 * VOXEL, 0.5 * VOXEL, 0.5, 40, 6, 1);
     expect(g.removed).toBeGreaterThan(0);
   });
 });
@@ -69,7 +69,7 @@ describe("explode", () => {
     const v0 = body.linvel();
     expect(Math.hypot(v0.x, v0.y, v0.z)).toBeCloseTo(0, 5);
 
-    const { removed } = explode(h.physics, h.targets, 6 * VOXEL, 6 * VOXEL, 0, 1.2, 300);
+    const { removed } = explode(h.physics, h.targets, 6 * VOXEL, 6 * VOXEL, 0, 1.2, 300, 1);
     expect(removed).toBeGreaterThan(0);
 
     const v1 = body.linvel();
@@ -94,7 +94,7 @@ describe("irregular crater", () => {
   it("carves a lumpy, non-spherical crater", () => {
     const h = harness();
     solidCube(h.grid, "glass", 31);
-    carveSphere(h.targets, C, C, C, R, 5000, 8);
+    carveSphere(h.targets, C, C, C, R, 5000, 8, 1);
     const ext = [
       rayExtent(h.grid, 1, 0, 0), rayExtent(h.grid, -1, 0, 0),
       rayExtent(h.grid, 0, 1, 0), rayExtent(h.grid, 0, -1, 0),
@@ -107,8 +107,8 @@ describe("irregular crater", () => {
   it("carves identically every time (deterministic → multiplayer-safe)", () => {
     const a = harness(); solidCube(a.grid, "glass", 31);
     const b = harness(); solidCube(b.grid, "glass", 31);
-    carveSphere(a.targets, C, C, C, R, 5000, 8);
-    carveSphere(b.targets, C, C, C, R, 5000, 8);
+    carveSphere(a.targets, C, C, C, R, 5000, 8, 7);
+    carveSphere(b.targets, C, C, C, R, 5000, 8, 7);
     expect(b.grid.size).toBe(a.grid.size); // same voxels removed, no Math.random in the decision
     for (const [sx, sy, sz] of [[1, 0, 0], [0, 1, 0], [0, 0, 1], [-1, 0, 0]] as const)
       expect(rayExtent(b.grid, sx, sy, sz)).toBe(rayExtent(a.grid, sx, sy, sz));

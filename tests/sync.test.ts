@@ -39,7 +39,7 @@ function client(seed: number): MockGrid {
   setWorldSeed(seed);
   buildDefaultScene(grid as never);
   for (const [x, y, z, r] of BLASTS)
-    carveSphere(targets as never, x, y, z, r, 600, 8);
+    carveSphere(targets as never, x, y, z, r, 600, 8, seed);
   return grid;
 }
 

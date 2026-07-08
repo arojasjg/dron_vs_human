@@ -1,11 +1,21 @@
 import * as THREE from "three";
 import type { Role } from "./roles";
 import { legSwing, stanceInfo, type Stance } from "./humanPose";
+import { instanceModel, pickAction, type ModelInstance } from "../engine/modelLoader";
 
 export const MAX_HP = 100;
 
+// Rigged + animated soldier (three.js examples "Soldier" by kupvom, CC-BY 4.0) — replaces the procedural
+// human rig on every peer avatar; falls back to the procedural rig if the .glb fails to load. Scale /
+// offset / facing are tunable by eye (the model is added to the yawing human group at the eye).
+const HUMAN_MODEL = "models/Soldier.glb";
+const HUMAN_SCALE = 1.0;
+const HUMAN_Y = -1.5;       // drop the model so its feet reach the ground
+const HUMAN_ROT = Math.PI;  // face the same way the body yaws
+
 interface Remote {
   drone: THREE.Group;  // quadcopter avatar (role "drone"), positioned at the eye
+  rotors: THREE.Mesh[]; // the 4 rotor discs — spun every frame so the copter looks alive
   human: THREE.Group;  // human avatar OUTER group (at the eye) — turns by YAW only, stays upright
   rig: THREE.Group;    // model container, dropped so the feet reach the ground (+ stance rig-lift)
   upper: THREE.Group;  // head + arms + rifle — PITCHES with the aim (not the whole body)
@@ -27,6 +37,9 @@ interface Remote {
   hp: number;                  // raw hp/maxHp — for the teammates panel
   maxHp: number;
   lastSeen: number;
+  model: ModelInstance | null;   // rigged soldier glTF (null until loaded / if it failed → procedural rig)
+  modelReq: boolean;             // load kicked off (only for humans, once)
+  curClip: string;               // current animation clip, for crossfading
 }
 
 const LERP = 18;               // interpolation rate → smooths the ~20 Hz network samples into 60 fps motion
@@ -45,7 +58,8 @@ const D_LENS = new THREE.CylinderGeometry(0.045, 0.055, 0.05, 12);
 const D_DOME = new THREE.SphereGeometry(0.1, 14, 8);             // top sensor dome
 const D_ARM = new THREE.BoxGeometry(0.52, 0.035, 0.06);          // boom
 const D_MOTOR = new THREE.CylinderGeometry(0.05, 0.06, 0.09, 12);
-const D_ROTOR = new THREE.CylinderGeometry(0.2, 0.2, 0.012, 20); // rotor disc
+const D_ROTOR = new THREE.CylinderGeometry(0.2, 0.2, 0.012, 20); // rotor disc (spins → motion-blur look)
+const D_BLADE = new THREE.BoxGeometry(0.4, 0.006, 0.03);         // a solid blade bar spun with the rotor
 const D_HUB = new THREE.CylinderGeometry(0.028, 0.028, 0.05, 8);
 const D_SKID = new THREE.BoxGeometry(0.028, 0.028, 0.4);         // landing skid rail
 const D_SKIDLEG = new THREE.BoxGeometry(0.025, 0.12, 0.025);
@@ -100,10 +114,48 @@ export class RemoteDrones {
 
   get count(): number { return this.drones.size; }
 
+  /** Positions of ENEMY peers (opposite team, or everyone in free-for-all) — for local hit prediction so
+   *  the shooter gets a hit marker even though damage is applied authoritatively on the victim. */
+  enemyPositions(iAmHuman: boolean, freeForAll: boolean, out: { x: number; y: number; z: number }[]): void {
+    out.length = 0;
+    for (const d of this.drones.values())
+      if (freeForAll || d.isHuman !== iAmHuman) out.push({ x: d.drone.position.x, y: d.drone.position.y, z: d.drone.position.z });
+  }
+
   /** First remote's position (test helper). */
   firstPos(): { x: number; y: number; z: number } | null {
     for (const d of this.drones.values()) return { x: d.drone.position.x, y: d.drone.position.y, z: d.drone.position.z };
     return null;
+  }
+
+  /** Distance to the nearest ENEMY-drone avatar (role drone), or Infinity if none — lets a human on
+   *  the ground HEAR drones approach (the closer the louder). */
+  nearestDroneDist(x: number, y: number, z: number): number {
+    let best = Infinity;
+    for (const d of this.drones.values()) {
+      if (d.isHuman) continue;
+      const p = d.drone.position, dd = Math.hypot(p.x - x, p.y - y, p.z - z);
+      if (dd < best) best = dd;
+    }
+    return best;
+  }
+
+  /** Loads the rigged soldier glTF for a human peer (once); on success it replaces the procedural rig. */
+  private loadHumanModel(d: Remote): void {
+    d.modelReq = true;
+    instanceModel(HUMAN_MODEL).then((m) => {
+      if (!m || !d.human.parent) return; // load failed, OR the peer was pruned mid-load → no orphan
+
+      m.scene.scale.setScalar(HUMAN_SCALE);
+      m.scene.position.y = HUMAN_Y;
+      m.scene.rotation.y = HUMAN_ROT;
+      d.human.add(m.scene);
+      d.rig.visible = false;                       // hide the hand-built rig
+      const idle = pickAction(m.actions, "Idle"); if (idle) idle.play();
+      m.mixer.update(0); // pose to Idle NOW so a peer that loads while far (LOD-frozen) isn't a bind-pose T-pose
+      d.curClip = "Idle";
+      d.model = m;                                  // set LAST so update() only drives a fully-ready model
+    });
   }
 
   /** Triggers a rifle-butt swing animation on a peer's avatar (they just melee'd). */
@@ -124,6 +176,7 @@ export class RemoteDrones {
     d.targetQuat.set(qx, qy, qz, qw);
     d.targetYaw = yaw; d.targetPitch = pitch; d.stance = stance;
     d.isHuman = role === "human";
+    if (d.isHuman && !d.modelReq) this.loadHumanModel(d);
     d.hp = hp; d.maxHp = maxHp;
     d.frac = Math.max(0, Math.min(1, hp / maxHp));
     d.drone.visible = !d.isHuman;
@@ -139,13 +192,14 @@ export class RemoteDrones {
 
   /** Per-frame: ease each remote toward its last received transform, so peers glide smoothly between
    *  the ~20 Hz network samples instead of stuttering, and their health bars follow the eased body. */
-  update(dt: number): void {
+  update(dt: number, camX?: number, camZ?: number): void {
     const k = 1 - Math.exp(-LERP * dt);
     for (const d of this.drones.values()) {
       // a normal step between 20 Hz samples is < ~1 m; a jump this big is a respawn/teleport → snap it.
       const f = d.drone.position.distanceToSquared(d.targetPos) > SNAP_DIST * SNAP_DIST ? 1 : k;
       // DRONE: full orientation (it banks/rolls) straight from the camera quaternion.
       d.drone.position.lerp(d.targetPos, f); d.drone.quaternion.slerp(d.targetQuat, f);
+      if (!d.isHuman) for (const r of d.rotors) r.rotation.y += dt * 45; // spinning props → a live copter
       // HUMAN: the body turns by YAW only (stays upright); the head+arms+rifle pitch; legs walk.
       const h = d.human, st = stanceInfo(d.stance);
       h.position.lerp(d.targetPos, f);
@@ -161,6 +215,18 @@ export class RemoteDrones {
       const sw = legSwing(d.walkPhase, spd, HUMAN_RUN);
       d.legL.rotation.x = st.legBend + sw;
       d.legR.rotation.x = st.legBend - sw;
+      // rigged model (if loaded): advance its skeleton + crossfade Idle → Walk → Run from the eased speed.
+      // LOD: freeze the animation (skip the costly skinning update) for peers far from the camera.
+      if (d.model) {
+        const far = camX !== undefined && Math.hypot(h.position.x - camX, h.position.z - (camZ as number)) > 45;
+        if (!far) d.model.mixer.update(dt);
+        const want = spd > 5 ? "Run" : spd > 0.4 ? "Walk" : "Idle";
+        if (want !== d.curClip) {
+          const to = pickAction(d.model.actions, want), from = pickAction(d.model.actions, d.curClip);
+          if (to) { to.reset().play(); if (from && from !== to) from.crossFadeTo(to, 0.3, false); }
+          d.curClip = want;
+        }
+      }
       // melee: a quick rifle-butt jab arc, then rest
       if (d.meleeTimer > 0) {
         d.meleeTimer = Math.max(0, d.meleeTimer - dt);
@@ -206,13 +272,16 @@ export class RemoteDrones {
       drone.add(skid, legF, legB);
     }
     for (const aa of [Math.PI / 4, -Math.PI / 4]) { const arm = new THREE.Mesh(D_ARM, this.carbonMat); arm.rotation.y = aa; arm.castShadow = true; drone.add(arm); }
+    const rotors: THREE.Mesh[] = [];
     for (let k = 0; k < 4; k++) {
       const a = Math.PI / 4 + k * Math.PI / 2, ex = Math.cos(a) * 0.26, ez = Math.sin(a) * 0.26;
       const motor = new THREE.Mesh(D_MOTOR, this.bodyMat); motor.position.set(ex, 0.03, ez);
       const hub = new THREE.Mesh(D_HUB, this.bodyMat); hub.position.set(ex, 0.08, ez);
       const rotor = new THREE.Mesh(D_ROTOR, this.rotorMat); rotor.position.set(ex, 0.09, ez);
+      const blade = new THREE.Mesh(D_BLADE, this.carbonMat); blade.position.set(ex, 0.092, ez); rotor.add(blade); // a visible blade under the disc blur
       const light = new THREE.Mesh(D_LIGHT, ez > 0 ? this.greenLight : this.redLight); light.position.set(ex, -0.02, ez);
       drone.add(motor, hub, rotor, light);
+      rotors.push(rotor);
     }
     drone.frustumCulled = false;
     this.scene.add(drone);
@@ -281,10 +350,11 @@ export class RemoteDrones {
     this.scene.add(barBg, barFg);
 
     const d: Remote = {
-      drone, human, rig, upper, rifle, legL, legR, barBg, barFg,
+      drone, rotors, human, rig, upper, rifle, legL, legR, barBg, barFg,
       targetPos: new THREE.Vector3(), targetQuat: new THREE.Quaternion(),
       targetYaw: 0, targetPitch: 0, stance: 0, walkPhase: 0, prevX: 0, prevZ: 0, meleeTimer: 0,
       isHuman: false, frac: 1, hp: MAX_HP, maxHp: MAX_HP, lastSeen: performance.now(),
+      model: null, modelReq: false, curClip: "none",
     };
     this.drones.set(id, d);
     return d;

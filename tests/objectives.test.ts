@@ -1,5 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { applyDeath, checkWin, reconcileKills, type MatchState } from "../src/net/objectives";
+import { applyDeath, checkWin, reconcileKills, baseAlert, type MatchState } from "../src/net/objectives";
+
+describe("base-under-attack alerts", () => {
+  it("fires one alert per downward threshold crossing, none while stable or healing", () => {
+    expect(baseAlert(1, 0.8)).toBeNull();      // still above 75%
+    expect(baseAlert(1, 0.7)).toBe(0.75);      // crossed 75%
+    expect(baseAlert(0.6, 0.4)).toBe(0.5);     // crossed 50%
+    expect(baseAlert(0.4, 0.2)).toBe(0.25);    // crossed 25%
+    expect(baseAlert(0.1, 0)).toBe(0);         // destroyed
+    expect(baseAlert(0.5, 0.5)).toBeNull();    // no change → no repeat alert
+    expect(baseAlert(0.3, 0.9)).toBeNull();    // healing → no alert
+  });
+
+  it("a mega-bomb that blows through several thresholds reports the MOST URGENT (lowest) crossed", () => {
+    expect(baseAlert(1, 0.1)).toBe(0.25);      // 1 → 0.1 crosses 75/50/25 → the lowest crossed is 25%
+    expect(baseAlert(1, 0)).toBe(0);           // 1 → 0 crosses all incl. destroyed → 0
+  });
+});
 import { BIG, OBJECTIVE_SITES, buildDefaultScene, buildObjectives, objectiveAlive, objectiveHp, objectiveDestroyed, setWorldSeed } from "../src/build/prefabs";
 import type { MaterialId } from "../src/world/materials";
 

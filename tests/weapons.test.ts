@@ -1,5 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere } from "../src/net/weapons";
+import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff } from "../src/net/weapons";
+
+describe("bullet range falloff + TTK intent", () => {
+  it("shotgun punches up close and fades with range; mg is flat; unknown is version-safe 1.0", () => {
+    expect(bulletFalloff("shotgun", 3)).toBeGreaterThan(1);   // close buff
+    expect(bulletFalloff("shotgun", 3)).toBeGreaterThan(bulletFalloff("shotgun", 20)); // monotonic decrease
+    expect(bulletFalloff("shotgun", 20)).toBeGreaterThan(bulletFalloff("shotgun", 40));
+    expect(bulletFalloff("shotgun", 40)).toBeLessThan(0.5);   // weak far
+    expect(bulletFalloff("mg", 3)).toBe(1);                   // mg flat…
+    expect(bulletFalloff("mg", 40)).toBe(1);                  // …at every range
+    expect(bulletFalloff("", 10)).toBe(1);                    // untagged (old client) → no change
+  });
+
+  it("TTK table pins the niche: shotgun WINS at close range, mg wins at range", () => {
+    // effective damage-per-second = playerDmg * falloff / cooldown
+    const dps = (w: "mg" | "shotgun", dist: number) => (WEAPONS[w].playerDmg! * bulletFalloff(w, dist)) / WEAPONS[w].cooldown;
+    expect(dps("shotgun", 4)).toBeGreaterThan(dps("mg", 4));  // close quarters → shotgun is the answer
+    expect(dps("shotgun", 40)).toBeLessThan(dps("mg", 40));   // at range → mg dominates (shotgun's weakness)
+  });
+});
 
 describe("team weapon loadouts", () => {
   it("drones get FEWER weapons (mg/grenade/kamikaze); humans get mg/shotgun/glauncher/net", () => {

@@ -119,34 +119,53 @@ describe("buildDefaultScene — varied city block", () => {
     buildDefaultScene(g as unknown as Parameters<typeof buildDefaultScene>[0]);
     return g;
   };
-  const PLOT_W = Math.floor(BIG.W / 5), PLOT_D = Math.floor(BIG.D / 4);
+  const PLOT_W = 57, PLOT_D = 54;                            // fixed plot size (prefabs source of truth)
+  const matCount = (g: MockGrid, mat: string) => { let n = 0; for (const m of g.m.values()) if (m === mat) n++; return n; };
 
-  it("places many small buildings with at least one taller landmark", () => {
+  it("places ~90 buildings (9×11 grid minus the central 3×3 plaza) with a taller landmark", () => {
     const g = scene(3);
     const b = placedBuildings();
-    expect(b.length).toBe(20);                                              // 5×4 plots → more buildings
+    expect(b.length).toBe(90);                                              // 99 plots − 9 plaza plots
     expect(Math.max(...b.map((p) => p.FLOORS))).toBeGreaterThanOrEqual(5);  // a taller landmark exists
     expect(Math.min(...b.map((p) => p.FLOORS))).toBeLessThanOrEqual(3);     // the majority are low
     expect(new Set(b.map((p) => p.W)).size).toBeGreaterThan(3);             // varied (randomised) footprints
-    // every building sits on the ground at its own centre
-    for (const p of b) expect(g.has(p.ox + (p.W >> 1), 0, p.oz + (p.D >> 1))).toBe(true);
-  });
+    for (const p of b) expect(g.has(p.ox + (p.W >> 1), 0, p.oz + (p.D >> 1))).toBe(true); // grounded at its centre
+  }, 30000);
+
+  it("has a central plaza: no building in the middle 3×3, a metal monument at its centre", () => {
+    const g = scene(3);
+    const b = placedBuildings();
+    // no placed building's centre falls inside the plaza plot region (px 3..5, pz 4..6)
+    for (const p of b) {
+      const px = Math.floor((p.ox + (p.W >> 1)) / PLOT_W), pz = Math.floor((p.oz + (p.D >> 1)) / PLOT_D);
+      expect(px >= 3 && px <= 5 && pz >= 4 && pz <= 6).toBe(false);
+    }
+    expect(g.get(257, 6, 297)).toBe("metal");                              // the plaza monument spire
+  }, 30000);
+
+  it("dresses the streets with destructible props (trees, etc.)", () => {
+    const g = scene(3);
+    expect(matCount(g, "leaves")).toBeGreaterThan(0);                      // trees (foliage) exist
+    expect(matCount(g, "wood")).toBeGreaterThan(0);                        // trunks / benches
+  }, 30000);
 
   it("leaves streets (gaps) between the buildings", () => {
     const g = scene(3);
-    for (const px of [1, 2, 3, 4]) expect(g.has(px * PLOT_W, 0, Math.floor(PLOT_D / 2))).toBe(false);
-  });
+    for (const px of [1, 2, 6, 7, 8]) expect(g.has(px * PLOT_W, 0, Math.floor(PLOT_D / 2))).toBe(false);
+  }, 30000);
 
-  it("generates the identical block for a given seed (multiplayer-safe)", () => {
+  it("generates the identical town for a given seed (multiplayer-safe)", () => {
     const a = scene(9), b = scene(9);
     expect(b.m.size).toBe(a.m.size);
-  });
+  }, 30000);
 
-  it("builds a grounded block — nothing floats", () => {
-    const g = scene(3);
-    const floating = findFloatingVoxels(g.cells(), (x, y, z) => g.has(x, y, z), (_x, y) => y === 0);
-    expect(floating.length).toBe(0);
-  });
+  it("builds a grounded town — nothing floats (incl. seed 7)", () => {
+    for (const seed of [3, 7]) {
+      const g = scene(seed);
+      const floating = findFloatingVoxels(g.cells(), (x, y, z) => g.has(x, y, z), (_x, y) => y === 0);
+      expect(floating.length).toBe(0);
+    }
+  }, 60000);
 });
 
 describe("building entrances", () => {

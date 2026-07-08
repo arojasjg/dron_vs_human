@@ -1,5 +1,6 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
+import { BLAST_POWER, WEAPON_BLAST_MUL } from "../config";
 import type { Physics } from "../engine/physics";
 import type { RayHit, VoxelGrid } from "../world/voxelGrid";
 
@@ -71,7 +72,7 @@ export class Projectiles {
     const m = new THREE.Mesh(this.cannonGeo, this.cannonMat);
     m.castShadow = true;
     this.spawn("cannon", origin, dir, speed, m, {
-      radius: 0.18, ccd: true, density: 7800, restitution: 0, fuse: 0, blast: 2.6, power: 700 * powerMul,
+      radius: 0.18, ccd: true, density: 7800, restitution: 0, fuse: 0, blast: 2.9, power: BLAST_POWER.cannon * powerMul * WEAPON_BLAST_MUL,
     }, ghost);
   }
 
@@ -79,13 +80,13 @@ export class Projectiles {
     const m = new THREE.Mesh(this.grenadeGeo, this.grenadeMat);
     m.castShadow = true;
     this.spawn("grenade", origin, dir, speed, m, {
-      radius: 0.13, ccd: true, density: 1200, restitution: 0.0, fuse: 1.6, blast: 2.4, power: 360 * powerMul,
+      radius: 0.13, ccd: true, density: 1200, restitution: 0.0, fuse: 1.6, blast: 2.7, power: BLAST_POWER.grenade * powerMul * WEAPON_BLAST_MUL,
     }, ghost);
   }
 
   launchRocket(origin: THREE.Vector3, dir: THREE.Vector3, speed = 52, ghost = false, powerMul = 1): void {
     this.spawn("rocket", origin, dir, speed, this.makeRocketMesh(), {
-      radius: 0.17, ccd: true, density: 1500, restitution: 0, fuse: 0, blast: 3.4, power: 520 * powerMul, gravityScale: 0.1,
+      radius: 0.17, ccd: true, density: 1500, restitution: 0, fuse: 0, blast: 3.9, power: BLAST_POWER.rocket * powerMul * WEAPON_BLAST_MUL, gravityScale: 0.1,
     }, ghost);
   }
 

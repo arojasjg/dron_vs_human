@@ -141,6 +141,12 @@ export class Particles {
   }
 
   update(dt: number, wind: { x: number; y: number; z: number }): void {
+    // Idle gate: with every slot free, nothing is alive → skip the whole cap-slot loop AND the four
+    // ~128 KB attribute re-uploads that otherwise run every frame (a constant drain on exactly the
+    // weak/software GPUs that fall back to this CPU path). The frame a particle dies still runs (its
+    // alpha=0 upload), then the NEXT frame gates. Mirrors the GPU sink's idle gate.
+    if (this.free.length >= this.cap) { if (this.points.visible) this.points.visible = false; return; }
+    if (!this.points.visible) this.points.visible = true;
     for (let i = 0; i < this.cap; i++) {
       const l = this.life[i];
       if (l <= 0) continue;

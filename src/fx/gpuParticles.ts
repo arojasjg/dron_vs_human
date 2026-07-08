@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { GPUComputationRenderer, type Variable } from "three/addons/misc/GPUComputationRenderer.js";
 import { VOXEL } from "../config";
 import type { BurstOptions, ParticleKind, ParticleSink } from "./particles";
+import { idleGate } from "./idleGate";
 
 const EMITTERS = 24;
 
@@ -177,8 +178,19 @@ const RENDER_FRAG = DEBRIS_COLOR + /* glsl */ `
     vec2 d = gl_PointCoord - 0.5;
     float r2 = dot(d, d);
     if (r2 > 0.25) discard;
+    vec3 base = colorOf(vType);
+    if (vType >= 0.2 && vType < 0.4){
+      // SMOKE: shade the disc as a pseudo-sphere (fake normal from the point coord) → a lit volumetric
+      // puff with a dark core and a warm-lit rim, instead of a flat grey circle.
+      vec3 n = normalize(vec3(d * 2.0, sqrt(max(0.0, 1.0 - r2 * 4.0))));
+      float lit = 0.4 + 0.6 * max(0.0, dot(n, normalize(vec3(0.4, 0.75, 0.5))));
+      base = mix(vec3(0.12, 0.12, 0.14), vec3(0.52, 0.49, 0.43), lit);
+    } else if (vType >= 0.4 && vType < 0.6){
+      // SPARK: a white-hot core fading to orange at the rim → reads as a glowing ember (LDR-safe).
+      base = mix(vec3(1.0, 0.55, 0.12), vec3(1.0, 0.96, 0.75), smoothstep(0.16, 0.0, r2));
+    }
     float a = clamp(vLife*1.6, 0.0, 1.0) * smoothstep(0.25, 0.0, r2);
-    gl_FragColor = vec4(colorOf(vType), a);
+    gl_FragColor = vec4(base, a);
   }
 `;
 
@@ -251,6 +263,11 @@ export class GpuParticles implements ParticleSink {
    *  per burst so a detonation storm can't spike a weak/integrated GPU. */
   emissionScale = 1;
   readonly points: THREE.Points;
+  private cubes!: THREE.Mesh;
+  /** Game time until which particles may still be alive. While idle (time past this), the whole GPU
+   *  particle pipeline — density splat, the compute passes, and the two draw layers — is skipped, so
+   *  an empty scene costs nothing on the GPU instead of always simulating+drawing the full buffer. */
+  private aliveUntil = 0;
   private readonly gpu: GPUComputationRenderer;
   private readonly posVar: Variable;
   private readonly velVar: Variable;
@@ -363,7 +380,10 @@ export class GpuParticles implements ParticleSink {
     });
     const cubes = new THREE.Mesh(cg, cubeMat);
     cubes.frustumCulled = false;
+    cubes.visible = false; // hidden until a burst brings particles to life (see update())
     scene.add(cubes);
+    this.cubes = cubes;
+    this.points.visible = false;
 
     // density splat infrastructure (off-screen, additive)
     this.densityRT = new THREE.WebGLRenderTarget(128, 128, {
@@ -425,6 +445,20 @@ export class GpuParticles implements ParticleSink {
   }
 
   update(dt: number, time: number, wind: { x: number; y: number; z: number }): void {
+    // Largest life among emitters armed since last frame (each records life in eParams.y, strength in .z).
+    let armedMaxLife = -1;
+    for (let i = 0; i < EMITTERS; i++) if (this.eParams[i].z > 0 && this.eParams[i].y > armedMaxLife) armedMaxLife = this.eParams[i].y;
+    const gate = idleGate(time, this.aliveUntil, armedMaxLife);
+    this.aliveUntil = gate.aliveUntil;
+
+    // Idle: nothing is alive → skip the density splat, both compute passes, and both draw layers. This
+    // is the whole point — an empty/quiet scene must not pay the full 65 k-particle GPU cost every frame.
+    if (!gate.active) {
+      if (this.points.visible) { this.points.visible = false; this.cubes.visible = false; }
+      return;
+    }
+    if (!this.points.visible) { this.points.visible = true; this.cubes.visible = true; }
+
     this.densityPass();
     for (const v of [this.velVar, this.posVar]) {
       v.material.uniforms.uTime.value = time;

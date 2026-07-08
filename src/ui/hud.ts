@@ -44,6 +44,10 @@ export class Hud {
   private readonly batteryFill: HTMLElement;
   private readonly kda: HTMLElement;
   private readonly team: HTMLElement;
+  private readonly dmg: HTMLElement;
+  private readonly hit: HTMLElement;
+  private readonly death: HTMLElement;
+  private readonly killfeedEl: HTMLElement;
   private toastTimer = 0;
 
   constructor() {
@@ -64,7 +68,51 @@ export class Hud {
     this.batteryFill = document.getElementById("hud-battery-fill")!;
     this.kda = document.getElementById("hud-kda")!;
     this.team = document.getElementById("hud-team")!;
+    this.dmg = document.getElementById("hud-dmg")!;
+    this.hit = document.getElementById("hud-hit")!;
+    this.death = document.getElementById("hud-death")!;
+    this.killfeedEl = document.getElementById("hud-killfeed")!;
     this.help.innerHTML = HELP;
+  }
+
+  /** Death overlay with a live respawn countdown (seconds left). Idempotent — safe to call every frame. */
+  showDeath(secondsLeft: number): void {
+    const s = Math.max(0, Math.ceil(secondsLeft));
+    const html = `☠ Derribado<small>Reapareces en ${s}…</small>`;
+    if (this.death.innerHTML !== html) this.death.innerHTML = html;
+    if (this.death.style.display !== "flex") this.death.style.display = "flex";
+  }
+
+  hideDeath(): void { if (this.death.style.display !== "none") this.death.style.display = "none"; }
+
+  /** Appends a killfeed line (auto-fades via CSS; keeps the last ~4). `mine` highlights our own kills. */
+  killfeed(text: string, mine = false): void {
+    const line = document.createElement("div");
+    line.textContent = text;
+    if (mine) line.className = "mine";
+    this.killfeedEl.prepend(line);
+    while (this.killfeedEl.childElementCount > 4) this.killfeedEl.lastElementChild!.remove();
+    setTimeout(() => line.remove(), 4100); // matches the CSS fade
+  }
+
+  /** A red screen-edge pulse when we take damage (intensity 0..1 scales the peak opacity). */
+  damageFlash(intensity: number): void {
+    this.dmg.style.transition = "none";
+    this.dmg.style.opacity = String(Math.min(0.85, 0.25 + intensity * 0.6));
+    void this.dmg.offsetWidth;                    // force reflow so the fade restarts
+    this.dmg.style.transition = "opacity .4s ease-out";
+    this.dmg.style.opacity = "0";
+  }
+
+  /** A crosshair hit marker: a quick white X on a confirmed hit, red + bigger on a kill. */
+  hitMarker(kind: "hit" | "kill" = "hit"): void {
+    this.hit.className = kind === "kill" ? "kill" : "";
+    this.hit.style.transition = "none";
+    this.hit.style.opacity = "1";
+    this.hit.style.transform = kind === "kill" ? "scale(1.6)" : "scale(1)";
+    void this.hit.offsetWidth;
+    this.hit.style.transition = "opacity .2s ease-out, transform .2s ease-out";
+    this.hit.style.opacity = "0";
   }
 
   /** DvH scoreboard: each team's kills and whether its objective still stands. */
@@ -167,8 +215,13 @@ export class Hud {
     this.mat.innerHTML = `<span class="sw" style="background:${hex}"></span>${def.name}`;
   }
 
-  setStats(fps: number, debris: number, wind: number): void {
-    this.stats.textContent = `${fps.toFixed(0)} fps · escombros ${debris} · viento ${wind.toFixed(1)}`;
+  setStats(fps: number, debris: number, wind: number, drawCalls = -1, gpuMs = -1): void {
+    // draw calls + real GPU-ms (timer query) are the two numbers that reveal a CPU-submit vs GPU-fill
+    // bottleneck at a glance — shown so perf can be confirmed on the real machine (the automation tab
+    // can't render). Hidden (-1) until the values exist.
+    const perf = drawCalls >= 0 ? ` · draws ${drawCalls}` : "";
+    const gpu = gpuMs >= 0 ? ` · gpu ${gpuMs.toFixed(1)}ms` : "";
+    this.stats.textContent = `${fps.toFixed(0)} fps · escombros ${debris} · viento ${wind.toFixed(1)}${perf}${gpu}`;
   }
 
   toggleHelp(): void {
@@ -207,6 +260,13 @@ function inject(): void {
       background: rgba(20,28,40,.8); padding: 8px 16px; border-radius: 20px; font-size: 13px; }
     #crosshair { position: absolute; top: 50%; left: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px;
       border-radius: 50%; background: rgba(255,255,255,.85); box-shadow: 0 0 0 1.5px rgba(0,0,0,.5); }
+    #hud-dmg { position: fixed; inset: 0; pointer-events: none; opacity: 0;
+      box-shadow: inset 0 0 150px 34px rgba(200,20,20,.78); }
+    #hud-hit { position: absolute; top: 50%; left: 50%; width: 20px; height: 20px; margin: -10px 0 0 -10px; opacity: 0; }
+    #hud-hit::before, #hud-hit::after { content: ""; position: absolute; left: 50%; top: 50%; width: 2px; height: 7px;
+      margin: -3.5px 0 0 -1px; background: #fff; box-shadow: 0 0 2px #000; }
+    #hud-hit::before { transform: rotate(45deg); } #hud-hit::after { transform: rotate(-45deg); }
+    #hud-hit.kill::before, #hud-hit.kill::after { background: #ff5a4d; height: 9px; margin-top: -4.5px; }
     #hud-mode { top: 14px; left: 50%; transform: translateX(-50%); display: none; font-size: 12px;
       letter-spacing: .4px; }
     #hud-health { bottom: 70px; left: 50%; transform: translateX(-50%); display: none; width: 240px;
@@ -252,6 +312,16 @@ function inject(): void {
     #hud-win { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
       font: 700 34px system-ui, sans-serif; color: #fff; background: rgba(0,0,0,.55);
       pointer-events: none; text-align: center; text-shadow: 0 2px 14px #000; }
+    #hud-death { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center;
+      justify-content: center; gap: 6px; font: 700 40px system-ui, sans-serif; color: #ffd7d0;
+      background: radial-gradient(rgba(60,0,0,.35), rgba(90,0,0,.72)); pointer-events: none; text-shadow: 0 2px 16px #000; }
+    #hud-death small { font-size: 17px; font-weight: 500; color: #ffb3a8; }
+    #hud-killfeed { position: absolute; top: 52px; right: 14px; display: flex; flex-direction: column;
+      align-items: flex-end; gap: 4px; pointer-events: none; }
+    #hud-killfeed div { background: rgba(15,20,30,.72); padding: 3px 9px; border-radius: 6px; font-size: 12px;
+      color: #e6eef7; white-space: nowrap; animation: kf 4s forwards; }
+    #hud-killfeed div.mine { border: 1px solid rgba(120,180,255,.6); }
+    @keyframes kf { 0%{opacity:0; transform:translateX(8px)} 8%{opacity:1; transform:none} 82%{opacity:1} 100%{opacity:0} }
     #hud-menu .room { display: flex; gap: 8px; align-items: center; justify-content: center; font-size: 12px; color: #9fb3c8; }
     #hud-room { pointer-events: auto; background: rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.15);
       border-radius: 7px; padding: 6px 9px; color: #eef2f6; font-size: 13px; width: 130px; }
@@ -279,6 +349,8 @@ function inject(): void {
     <div id="hud-team" class="panel"></div>
     <div id="hud-toast" class="panel"></div>
     <div id="crosshair"></div>
+    <div id="hud-hit"></div>
+    <div id="hud-dmg"></div>
     <div id="hud-menu">
       <div class="card">
         <h1>PARTICLES</h1>
@@ -292,6 +364,8 @@ function inject(): void {
       </div>
     </div>
     <div id="hud-win"></div>
+    <div id="hud-death"></div>
+    <div id="hud-killfeed"></div>
   `;
   document.body.appendChild(hud);
 }

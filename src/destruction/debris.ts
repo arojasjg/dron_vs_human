@@ -3,6 +3,7 @@ import * as THREE from "three";
 import { DEBRIS_SLEEP_DESPAWN, MAX_DEBRIS, VOXEL } from "../config";
 import { GROUP_DEBRIS, type Physics } from "../engine/physics";
 import { MATERIALS, MATERIAL_ORDER, type MaterialId } from "../world/materials";
+import type { Rng } from "../engine/rng";
 
 const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0);
 const Q = new THREE.Quaternion();
@@ -81,12 +82,25 @@ export class DebrisSystem {
     return out;
   }
 
+  /** Canonical snapshot of every active chunk's material + world transform — for determinism hashing.
+   *  Read-only sibling of impacts(); the caller sorts + rounds for a stable, order-free comparison. */
+  snapshot(): { material: MaterialId; x: number; y: number; z: number; qx: number; qy: number; qz: number; qw: number }[] {
+    const out: { material: MaterialId; x: number; y: number; z: number; qx: number; qy: number; qz: number; qw: number }[] = [];
+    for (const d of this.active) {
+      const t = d.body.translation();
+      const r = d.body.rotation();
+      out.push({ material: d.material, x: t.x, y: t.y, z: t.z, qx: r.x, qy: r.y, qz: r.z, qw: r.w });
+    }
+    return out;
+  }
+
   /** Spawns one voxel-sized rigid cube of debris. Returns false if the pool is full. */
   spawn(
     cx: number, cy: number, cz: number,
     material: MaterialId,
     vx: number, vy: number, vz: number,
     half = VOXEL / 2,
+    rng?: Rng,
   ): boolean {
     if (this.active.length >= this.cap) this.despawnOldest();
     const pool = this.pools.get(material)!;
@@ -99,7 +113,7 @@ export class DebrisSystem {
       RAPIER.RigidBodyDesc.dynamic()
         .setTranslation(cx, cy, cz)
         .setLinvel(vx, vy, vz)
-        .setAngvel({ x: (Math.random() - 0.5) * 8, y: (Math.random() - 0.5) * 8, z: (Math.random() - 0.5) * 8 })
+        .setAngvel(rng ? { x: rng.centered(8), y: rng.centered(8), z: rng.centered(8) } : { x: 0, y: 0, z: 0 })
         .setLinearDamping(0.05)
         .setAngularDamping(0.25),
     );

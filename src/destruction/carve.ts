@@ -6,8 +6,10 @@ import { MATERIALS, type MaterialId } from "../world/materials";
 export const DEBRIS_CT: Record<MaterialId, number> = {
   concrete: 0.61, brick: 0.65, wood: 0.69, metal: 0.73, glass: 0.77, gastank: 0.73,
   wall_slate: 0.65, wall_moss: 0.65, wall_clay: 0.65, wall_navy: 0.65,
+  car_red: 0.73, car_blue: 0.73, car_teal: 0.73, tire: 0.61, leaves: 0.69,
 };
-import { VoxelGrid } from "../world/voxelGrid";
+import { VoxelGrid, packKey } from "../world/voxelGrid";
+import { Rng, mix32 } from "../engine/rng";
 import type { DebrisSystem } from "./debris";
 import type { ParticleSink } from "../fx/particles";
 
@@ -34,6 +36,7 @@ export function carveSphere(
   radius: number,
   energy: number,
   velScale: number,
+  seed: number,
 ): CarveResult {
   // AMP = how far the crater edge lumps in/out as a fraction of the radius. The lumpiness is a
   // pure function of the blast centre + voxel position (no Math.random), so every client carves
@@ -73,13 +76,16 @@ export function carveSphere(
         removed++;
         matCount.set(mat, (matCount.get(mat) ?? 0) + 1);
 
-        const out = velScale * (0.45 + Math.random() * 0.55);
-        const vxv = dx * inv * out + (Math.random() - 0.5) * out * 0.4;
-        const vyv = dy * inv * out + out * 0.35 + (Math.random() - 0.5) * out * 0.4;
-        const vzv = dz * inv * out + (Math.random() - 0.5) * out * 0.4;
+        // Per-voxel-key RNG (not one sequential stream): identical on every client regardless of the
+        // scan/iteration order, so debris launched from the same event/voxel matches everywhere.
+        const vr = new Rng(mix32(seed, packKey(x, y, z)));
+        const out = velScale * (0.45 + vr.next() * 0.55);
+        const vxv = dx * inv * out + vr.centered(out * 0.4);
+        const vyv = dy * inv * out + out * 0.35 + vr.centered(out * 0.4);
+        const vzv = dz * inv * out + vr.centered(out * 0.4);
 
-        const pulverize = spawned >= MAX_DEBRIS_PER_EVENT || (def.shatters && Math.random() > 0.55);
-        if (!pulverize && t.debris.spawn(wx, wy, wz, mat, vxv, vyv, vzv)) {
+        const pulverize = spawned >= MAX_DEBRIS_PER_EVENT || (def.shatters && vr.next() > 0.55);
+        if (!pulverize && t.debris.spawn(wx, wy, wz, mat, vxv, vyv, vzv, VOXEL / 2, vr)) {
           spawned++;
         }
         // pulverised voxels become part of the aggregate dust burst below
