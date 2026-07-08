@@ -1,6 +1,6 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
-import { DEBRIS_HIT_DRONE_R, DEBRIS_HIT_TANK_R, DEBRIS_IMPACT_KE, FIXED_DT, MAX_DEBRIS, MAX_DEBRIS_PER_EVENT, VOXEL, maxPhysicsSteps } from "./config";
+import { DEBRIS_HIT_DRONE_R, DEBRIS_HIT_TANK_R, DEBRIS_IMPACT_KE, FIXED_DT, MAX_DEBRIS, VOXEL, maxPhysicsSteps } from "./config";
 import { Player } from "./engine/player";
 import { Walker } from "./engine/walker";
 import { Input } from "./engine/input";
@@ -9,8 +9,9 @@ import { autoQuality, qualityConfig, QUALITY_ORDER, lowerQuality, LOW_FPS, type 
 import { nextResScaleGpu, nextResScaleFps, RES_MIN } from "./engine/dynamicRes";
 import { shouldRefreshShadows, SHADOW_MOVE_SQ } from "./engine/shadowPolicy";
 import { nextPerfLever } from "./engine/perfLever";
-import { Rng, mix32, eventSeed, EVT, q2, q3 } from "./engine/rng";
+import { Rng, eventSeed, EVT, q2, q3 } from "./engine/rng";
 import { CookService } from "./world/cookService";
+import { collapseTick, CELL_OVERHANG, CELL_MIN_MASS } from "./destruction/collapse";
 import { GpuTimer, makeGpuTimer } from "./engine/gpuTimer";
 import { humanFallDamage, droneImpactDamage } from "./engine/falldamage";
 import { Physics, GROUP_GROUND } from "./engine/physics";
@@ -44,26 +45,8 @@ import { chunkCoord, VoxelCollider } from "./world/voxelCollider";
 import { VoxelMesher } from "./world/voxelMesh";
 import { connectedComponents, type Voxel } from "./world/structuralIntegrity";
 
-// Support is solved on the COARSE CELL GRAPH (VoxelGrid.fallenCells). This is how many 2 m cells of
-// lateral support a slab/beam may span to reach a load-bearing column-cell before it is considered
-// unsupported and falls. Measured: an intact city stands at 2 (0 false floaters), so 2 (~4 m cantilever
-// budget) makes blasted overhangs fall realistically while intact buildings — and their stairs — hold.
-const CELL_OVERHANG = 2;
-
-// Load-bearing mass floor: a 2m cell (max 8³=512 voxels) must hold at least this many STRUCTURAL voxels
-// to carry a building's weight. Below it the cell is a sliver — it stays up itself but can't suspend the
-// floors above, so a blast that guts a column to a thread lets the tower above collapse instead of
-// floating on "one block". A probe across every city seed + building shape shows 8..15 all give 0 false
-// floaters and 16 starts clipping a thin legit cell, so 12 sits mid-band (margin for arbitrary room-code
-// seeds) while still dropping any 1-wide sliver (≤8 voxels). Verified across seeds by the collapse test.
-const CELL_MIN_MASS = 12;
-
-// Pancake threshold: topological support alone keeps floors up while ANY thread reaches the ground, so
-// blasting out a lower storey leaves the intact upper floors floating on the surviving perimeter. The
-// pancake pass collapses everything above a storey whose cross-section fell below this fraction of the
-// mass resting on it. A probe shows intact buildings stay 0 up to 0.56 (0.57 starts clipping a real
-// feature), so 0.5 keeps a 0.07 margin while still pancaking "blow out half a storey" — the user's case.
-const PANCAKE_FRAC = 0.5;
+// Structural-collapse constants (CELL_OVERHANG, CELL_MIN_MASS, PANCAKE_FRAC, COLLAPSE_BUDGET) + the pure
+// collapseTick now live in ./destruction/collapse so the tick runs headless in the divergence harness.
 
 /** Deterministic 32-bit hash of the room code → world seed (so all clients build the same world). */
 function hashStr(s: string): number {
@@ -71,9 +54,6 @@ function hashStr(s: string): number {
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
   return h >>> 0;
 }
-// Coarse cells dropped per frame during a collapse (progressive — a huge collapse spreads over
-// frames instead of one stall).
-const COLLAPSE_BUDGET = 48;
 
 interface Flash {
   light: THREE.PointLight;
@@ -160,6 +140,7 @@ export class Game {
   private readonly dirtyCol = new Map<number, number>(); // chunk → last-touched time; collider rebuilt once quiet
   private structureDirty = false; // a blast changed the grid → re-solve the cell support graph
   private pendingFall: number[] = []; // fallen-cell wave being drained over frames (avoids re-solving each frame)
+  private syncedFromPeer = false; // a late joiner applies exactly one grid-reconciliation snapshot per world
   // collision LOD: only the building chunks within this many CHUNKs of the player carry physics
   // colliders. Keeps the active collider count (and the broadphase cost) independent of building
   // size — the static world doesn't all live in the physics engine at once.
@@ -221,6 +202,7 @@ export class Game {
     // turns cooked boxes into Rapier bodies. ?cook=sync forces the inline path (for A/B verification).
     this.cookService = new CookService(typeof location !== "undefined" && new URLSearchParams(location.search).get("cook") === "sync");
     this.cookService.onColliderCooked = (ck, boxes) => this.collider.applyBoxes(ck, boxes);
+    this.cookService.onMeshCooked = (ck, parts) => this.mesher.applyCooked(ck, parts);
     this.debris = new DebrisSystem(this.physics, this.renderer.scene);
     this.rubble = new RubbleField(this.renderer.scene);
     this.debris.onSettle = (x, y, z, qx, qy, qz, qw, mat) => this.rubble.deposit(x, y, z, qx, qy, qz, qw, mat);
@@ -312,6 +294,25 @@ export class Game {
       this.spawnIndex = (this.net.id - 1) % Game.SPAWNS.length;
       if (this.mode === "dvh" || this.mode === "vs") this.assignRoleAndController();
       this.spawnPlayerInBuilding();
+      // We may have joined AFTER destruction happened. Our world is pristine (seed-built) → ask any peer
+      // that already has destruction to send us its diff, so our grid matches theirs (fixes the desync
+      // where a late joiner sees a building standing that everyone else already collapsed).
+      this.net.send({ t: "needsync" });
+    } else if (m.t === "needsync") {
+      // a peer joined and asked for the world's destruction. If we have any, send our compact diff
+      // (only real gameplay destruction, not window/door cuts) addressed to that joiner.
+      if (this.grid.removedSinceGen.size > 0 && (m.id as number) !== this.net.id) {
+        this.net.send({ t: "gridsync", to: m.id, keys: [...this.grid.removedSinceGen] });
+      }
+    } else if (m.t === "gridsync") {
+      // we're the joiner: replay the room's destruction on top of our pristine world so the grids match.
+      // Exactly one snapshot per world (first peer to answer wins) — later duplicates are ignored.
+      if ((m.to as number) === this.net.id && !this.syncedFromPeer) {
+        this.syncedFromPeer = true;
+        for (const k of m.keys as number[]) { const [x, y, z] = unpackKey(k); this.grid.remove(x, y, z); }
+        this.markAllDirty();        // rebuild every mesh/collider chunk to match the reconciled grid
+        this.structureDirty = true; // settle anything the diff leaves unsupported (already-settled → no-op)
+      }
     } else if (m.t === "state") {
       this.remotes.upsert(m.id as number, m.x as number, m.y as number, m.z as number,
         m.qx as number, m.qy as number, m.qz as number, m.qw as number, m.hp as number, (m.role as Role) ?? "drone", (m.mhp as number) || MAX_HP,
@@ -883,6 +884,8 @@ export class Game {
     this.streamColliders(true);
     this.structureDirty = false;
     this.pendingFall.length = 0; // drop any in-flight collapse wave from the old grid
+    this.grid.baselineGen();     // window/door cuts are world-gen, not destruction → don't sync them
+    this.syncedFromPeer = false; // a fresh world → accept one reconciliation snapshot from a peer again
     if (withProps) this.spawnInitialProps();
     this.spawnPlayerInBuilding();
   }
@@ -1022,61 +1025,27 @@ export class Game {
   private collapseStep(): void {
     if (!this.structureDirty) return;
     const _t0 = performance.now();
-    // Re-solve the global O(cells) support graph ONLY when the previous fallen wave is fully drained.
-    // A mega-bomb collapse spans many frames; re-running the solve EVERY frame was the measured
-    // 'settle' spike (~8 ms × many frames). Solve once → drain the wave over frames (COLLAPSE_BUDGET
-    // cells each) → solve again to catch the cascade. Every fallen cell is already doomed, so draining
-    // the wave across frames reaches the identical final state with a fraction of the solves.
-    if (this.pendingFall.length === 0) {
-      // Topological support (disconnected/sliver-held) UNION pancake (a gutted lower storey can't carry
-      // the intact floors above). Both are deterministic on the synced grid → consistent across clients.
-      const topo = this.grid.fallenCells(CELL_OVERHANG, CELL_MIN_MASS);
-      const pan = this.grid.pancakeCells(CELL_MIN_MASS, PANCAKE_FRAC);
-      this.pendingFall = pan.length ? [...new Set([...topo, ...pan])] : topo;
-      if (this.pendingFall.length === 0) {
-        this.structureDirty = false;
-        this.recordSettle(performance.now() - _t0);
-        return;
-      }
-    }
-    const matCount = new Map<MaterialId, number>();
-    let sx = 0, sy = 0, sz = 0, nn = 0, cubes = 0;
-    const limit = Math.min(this.pendingFall.length, COLLAPSE_BUDGET);
-    for (let ci = 0; ci < limit; ci++) {
-      for (const k of this.grid.cellVoxelKeys(this.pendingFall[ci])) {
-        const x = (k % 1024) - 512, y = (Math.floor(k / 1024) % 1024) - 512, z = Math.floor(k / 1048576) - 512;
-        const mat = this.grid.get(x, y, z);
-        if (mat === undefined) continue;
-        matCount.set(mat, (matCount.get(mat) ?? 0) + 1);
-        sx += x; sy += y; sz += z; nn++;
-        this.impactMarks.clearVoxel(k);
-        this.grid.remove(x, y, z);
-        this.markChunk(x, y, z);
-        // a few pooled CPU cubes (sparse) for close-up rubble; GPU debris carries the mass
-        if (cubes < MAX_DEBRIS_PER_EVENT && ((x + y + z) & 7) === 0) {
-          const c = VoxelGrid.center(x, y, z);
-          // per-voxel-key seed → collapse rubble is deterministic on the synced grid (same as carve)
-          const cr = new Rng(mix32(this.worldSeed, EVT.COLLAPSE, k));
-          if (this.debris.spawn(c.x, c.y, c.z, mat, cr.centered(0.8), -0.2, cr.centered(0.8), VOXEL / 2, cr)) cubes++;
-        }
-      }
-    }
-    this.pendingFall.splice(0, limit); // drop the drained slice; emptied → re-solve next call (cascade)
-    if (nn > 0) {
-      let dom: MaterialId = "concrete", best = 0;
-      for (const [m, c] of matCount) if (c > best) { best = c; dom = m; }
-      const wc = VoxelGrid.center(Math.round(sx / nn), Math.round(sy / nn), Math.round(sz / nn));
-      this.sink.burst(wc.x, wc.y, wc.z, {
-        count: 0, color: 0, speed: 5, life: 12, kind: "debris",
-        colorType: DEBRIS_CT[dom], strength: Math.min(0.9, 0.12 + nn / 80),
-      });
-      // VS: rubble falling on/near our drone hurts it (accumulates while buried)
-      if (this.mode === "vs") {
-        const p = this.player.camera.position;
-        if (Math.hypot(p.x - wc.x, p.y - wc.y, p.z - wc.z) < 3) this.damageDrone(Math.min(8, nn / 18));
-      }
-    }
+    // Pure collapse tick (headless-testable) + game-side hooks: impact-mark clear + chunk dirty per fallen
+    // voxel, and the GPU dust burst + VS rubble damage per wave. structureDirty follows the tick's return.
+    this.structureDirty = collapseTick(
+      this.grid, this.pendingFall, this.worldSeed,
+      (x, y, z, mat, vx, vy, vz, rng) => this.debris.spawn(x, y, z, mat, vx, vy, vz, VOXEL / 2, rng),
+      (k, x, y, z) => { this.impactMarks.clearVoxel(k); this.markChunk(x, y, z); },
+      (cx, cy, cz, n, dom) => this.onCollapseWave(cx, cy, cz, n, dom),
+    );
     this.recordSettle(performance.now() - _t0);
+  }
+
+  /** GPU dust burst + (in VS) rubble damage when a collapse wave drops voxels — the game-side effects. */
+  private onCollapseWave(cx: number, cy: number, cz: number, n: number, dom: MaterialId): void {
+    this.sink.burst(cx, cy, cz, {
+      count: 0, color: 0, speed: 5, life: 12, kind: "debris",
+      colorType: DEBRIS_CT[dom], strength: Math.min(0.9, 0.12 + n / 80),
+    });
+    if (this.mode === "vs") {
+      const p = this.player.camera.position;
+      if (Math.hypot(p.x - cx, p.y - cy, p.z - cz) < 3) this.damageDrone(Math.min(8, n / 18));
+    }
   }
 
   private recordSettle(d: number): void {
@@ -1748,12 +1717,31 @@ export class Game {
     // measured cost during "many shots". Full budget with headroom, ~half when the governor is floored.
     const s = this.governor.budgetScale;
     const meshBudget = 2.5 + 2.5 * s;   // 2.5..5 ms
-    // Meshes (visual) first — prompt, but capped.
+    // Meshes (visual): keep the chunk NEAREST the player (the carve site they're looking at) SYNCHRONOUS
+    // so its geometry updates the SAME frame — no visible lag where it matters. Distant dirty chunks cook
+    // OFF-THREAD (their 1-2 frame delay is imperceptible and masked by the carve FX). markChunkKey re-adds
+    // + bumps gen if a chunk changes again; onMeshCooked applies the async ones when they return.
     if (this.dirtyChunks.size > 0) {
+      const pp = this.player.camera.position;
+      const [pvx, pvy, pvz] = VoxelGrid.worldToVoxel(pp.x, pp.y, pp.z);
+      const pcx = chunkCoord(pvx), pcy = chunkCoord(pvy), pcz = chunkCoord(pvz);
+      let nearest = -1, nd = Infinity;
       for (const ck of this.dirtyChunks) {
         const [cx, cy, cz] = unpackKey(ck);
-        this.mesher.rebuildChunk(this.grid, cx, cy, cz);
+        const d = Math.abs(cx - pcx) + Math.abs(cy - pcy) + Math.abs(cz - pcz);
+        if (d < nd) { nd = d; nearest = ck; }
+      }
+      for (const ck of this.dirtyChunks) {
+        const [cx, cy, cz] = unpackKey(ck);
         this.dirtyChunks.delete(ck);
+        if (ck === nearest) {
+          this.mesher.rebuildChunk(this.grid, cx, cy, cz); // the focus chunk: immediate, on the main thread
+        } else {
+          const keys = this.grid.chunkVoxelKeys(cx, cy, cz);
+          const matIdx = new Uint8Array(keys.length);
+          for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(this.grid.cells.get(keys[i])!);
+          this.cookService.requestMesh(ck, Int32Array.from(keys), matIdx);
+        }
         if (performance.now() - _rt0 > meshBudget) break;
       }
     }

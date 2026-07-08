@@ -1,4 +1,4 @@
-import { cookColliderBoxes } from "./cook";
+import { cookColliderBoxes, cookMeshChunk, type CookedMeshPart } from "./cook";
 
 /**
  * Routes chunk cooking to a Web Worker (off the main thread) when one is available, and cooks INLINE
@@ -17,6 +17,8 @@ export class CookService {
 
   /** Called with a chunk's cooked collider boxes — synchronously in the fallback, else 1–2 frames later. */
   onColliderCooked?: (ck: number, boxes: Int32Array) => void;
+  /** Called with a chunk's cooked mesh instance data (per material) — same sync/async contract. */
+  onMeshCooked?: (ck: number, parts: CookedMeshPart[]) => void;
 
   constructor(forceSync = false) {
     if (!forceSync && typeof Worker !== "undefined") {
@@ -50,9 +52,22 @@ export class CookService {
     this.worker.postMessage({ kind: "collider", ck, gen, keys }, [keys.buffer]);
   }
 
-  private receive(msg: { kind: string; ck: number; gen: number; boxes: Int32Array }): void {
+  /** Cook one chunk's mesh instance data. Off-thread if possible; else inline (onMeshCooked synchronous).
+   *  `keys`/`matIdx` are transferred to the worker — do not reuse them after calling. */
+  requestMesh(ck: number, keys: Int32Array, matIdx: Uint8Array): void {
+    if (!this.worker || this.inflight >= CookService.MAX_INFLIGHT) {
+      this.onMeshCooked?.(ck, cookMeshChunk(keys, matIdx)); // synchronous fallback
+      return;
+    }
+    this.inflight++;
+    const gen = this.gen.get(ck) ?? 0;
+    this.worker.postMessage({ kind: "mesh", ck, gen, keys, matIdx }, [keys.buffer, matIdx.buffer]);
+  }
+
+  private receive(msg: { kind: string; ck: number; gen: number; boxes?: Int32Array; parts?: CookedMeshPart[] }): void {
     this.inflight--;
     if ((this.gen.get(msg.ck) ?? 0) !== msg.gen) return; // stale: the chunk changed since the request → still dirty, re-queued
-    this.onColliderCooked?.(msg.ck, msg.boxes);
+    if (msg.kind === "collider") this.onColliderCooked?.(msg.ck, msg.boxes!);
+    else if (msg.kind === "mesh") this.onMeshCooked?.(msg.ck, msg.parts!);
   }
 }

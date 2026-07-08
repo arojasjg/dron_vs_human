@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { VoxelGrid } from "../src/world/voxelGrid";
 import { buildBuilding, buildDefaultScene, setWorldSeed } from "../src/build/prefabs";
+import { collapseTick } from "../src/destruction/collapse";
 
 const OVERHANG = 2; // must match game.ts CELL_OVERHANG
 
@@ -161,5 +162,34 @@ describe("cached per-cell mass — incremental maintenance matches a from-scratc
     // identical final state → identical support solves ⇒ A's incrementally-cached mass is correct
     expect(sorted(a.fallenCells(2, 12))).toEqual(sorted(b.fallenCells(2, 12)));
     expect(sorted(a.pancakeCells(12, 0.5))).toEqual(sorted(b.pancakeCells(12, 0.5)));
+  });
+});
+
+describe("collapseTick — pure headless collapse (fixed-tick / harness-ready)", () => {
+  // drain to a stable grid (no debris, no side-effects) — returns the tick count
+  const settle = (g: VoxelGrid, seed = 1): number => {
+    const pending: number[] = [];
+    let guard = 0;
+    while (collapseTick(g, pending, seed, () => false, () => {}, () => {}) && guard++ < 2000) { /* drain */ }
+    return guard;
+  };
+
+  it("fully settles a gutted building to a stable grid (nothing left unsupported)", () => {
+    setWorldSeed(7); const g = new VoxelGrid(); buildBuilding(g, 0, 0, { W: 44, D: 44, FLOORS: 5 });
+    const before = g.cells.size;
+    for (let x = -4; x <= 22; x++) for (let y = 0; y <= 18; y++) for (let z = -4; z <= 48; z++) g.remove(x, y, z); // gut ~half the ground storey
+    settle(g);
+    expect(g.cells.size).toBeLessThan(before);        // floors came down
+    expect(g.fallenCells(2, 12)).toHaveLength(0);      // fully settled — nothing unsupported remains
+    expect(g.pancakeCells(12, 0.5)).toHaveLength(0);   // and no pancake pinch remains
+  });
+
+  it("is deterministic: two identical damaged grids settle to byte-identical results", () => {
+    const damage = (g: VoxelGrid) => { for (let x = 6; x <= 38; x++) for (let y = 0; y <= 12; y++) for (let z = -4; z <= 26; z++) g.remove(x, y, z); };
+    setWorldSeed(7); const a = new VoxelGrid(); buildBuilding(a, 0, 0, { W: 44, D: 44, FLOORS: 5 }); damage(a);
+    setWorldSeed(7); const b = new VoxelGrid(); buildBuilding(b, 0, 0, { W: 44, D: 44, FLOORS: 5 }); damage(b);
+    settle(a, 99); settle(b, 99);
+    expect(b.cells.size).toBe(a.cells.size);
+    expect([...b.cells.keys()].sort((p, q) => p - q)).toEqual([...a.cells.keys()].sort((p, q) => p - q));
   });
 });

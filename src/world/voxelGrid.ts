@@ -55,6 +55,10 @@ export class VoxelGrid {
    *  the collapse solver reads it in O(1) instead of re-summing every city voxel each re-solve (the
    *  dominant cost of a big collapse). Invariant: massByCell[ck] == |byCell[ck] \ weakVoxels|. */
   private readonly massByCell = new Map<number, number>();
+  /** Keys of voxels DESTROYED since the last world-gen baseline — the compact "destruction diff" a late
+   *  joiner needs to reconcile its pristine (seed-built) world with the room's current state. Reset by
+   *  baselineGen() once world-gen finishes, so it holds only gameplay destruction, not window/door cuts. */
+  readonly removedSinceGen = new Set<number>();
 
   get(x: number, y: number, z: number): MaterialId | undefined {
     return this.cells.get(packKey(x, y, z));
@@ -84,8 +88,14 @@ export class VoxelGrid {
     this.weakVoxels.delete(k);
     const s = this.byCell.get(ck);
     if (s) { s.delete(k); if (s.size === 0) this.byCell.delete(ck); }
-    return this.cells.delete(k);
+    const existed = this.cells.delete(k);
+    if (existed) this.removedSinceGen.add(k); // record the destruction for late-join reconciliation
+    return existed;
   }
+
+  /** Marks the current grid as the world-gen baseline: forget window/door cuts so removedSinceGen
+   *  accumulates only real gameplay destruction from here on. Called once world-gen completes. */
+  baselineGen(): void { this.removedSinceGen.clear(); }
 
   private bumpMass(ck: number, delta: number): void {
     const m = (this.massByCell.get(ck) ?? 0) + delta;
@@ -271,6 +281,7 @@ export class VoxelGrid {
     this.weakVoxels.clear();
     this.byCell.clear();
     this.massByCell.clear();
+    this.removedSinceGen.clear();
   }
 
   /** World-space center of a voxel. */

@@ -8,7 +8,8 @@ import { VoxelGrid } from "../src/world/voxelGrid";
 import { MATERIAL_ORDER } from "../src/world/materials";
 import { buildDefaultScene, setWorldSeed } from "../src/build/prefabs";
 import { eventSeed, EVT, q2 } from "../src/engine/rng";
-import { FIXED_DT } from "../src/config";
+import { collapseTick } from "../src/destruction/collapse";
+import { FIXED_DT, VOXEL } from "../src/config";
 
 beforeAll(async () => { await RAPIER.init(); });
 
@@ -26,6 +27,7 @@ function makeSim(roomSeed: number) {
   const targets = { grid, debris, particles: { burst() {} } } as unknown as Parameters<typeof explode>[1];
   let time = 0;
   let debrisSpawned = 0;
+  const pending: number[] = []; // collapse wave, drained across ticks
   return {
     grid, debris,
     get debrisSpawned() { return debrisSpawned; },
@@ -36,7 +38,12 @@ function makeSim(roomSeed: number) {
       explode(physics, targets, qx, qy, qz, qr, p, seed);
       debrisSpawned = Math.max(debrisSpawned, debris.count);
     },
-    step() { physics.step(time); time += FIXED_DT; debris.update(FIXED_DT); },
+    step() {
+      physics.step(time); time += FIXED_DT; debris.update(FIXED_DT);
+      // Run the SAME collapse the game runs — so the two-sim identity assertions now cover the collapse
+      // path (fallen cells + seeded collapse debris) end-to-end, not just the initial carve.
+      collapseTick(grid, pending, roomSeed, (x, y, z, mat, vx, vy, vz, rng) => debris.spawn(x, y, z, mat, vx, vy, vz, VOXEL / 2, rng), () => {}, () => {});
+    },
     initialCells: grid.cells.size,
   };
 }

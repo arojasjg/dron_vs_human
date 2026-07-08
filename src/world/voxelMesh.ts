@@ -2,15 +2,7 @@ import * as THREE from "three";
 import { VOXEL } from "../config";
 import { MATERIALS, MATERIAL_ORDER, type MaterialId } from "./materials";
 import { packKey, unpackKey, type VoxelGrid } from "./voxelGrid";
-import { chunkCoord, greedyBoxesFromKeys } from "./voxelCollider";
-import { weatherTint, type RGB } from "./weathering";
-
-const DUMMY = new THREE.Object3D();
-const _WCOL = new THREE.Color();
-const _WRGB: RGB = { r: 1, g: 1, b: 1 };
-// materials kept NEUTRAL by weathering (painted/reflective/glass) so chromatic grime doesn't dirty their
-// speculars; everything else (masonry, concrete, wood) gets the full chromatic staining.
-const NEUTRAL_WEATHER = new Set<MaterialId>(["glass", "metal", "tire", "gastank", "car_red", "car_blue", "car_teal"]);
+import { chunkCoord, cookMeshChunk, NEUTRAL_WEATHER, type CookedMeshPart } from "./cook";
 
 // Voxel-pitch surface detail injected into MeshStandardMaterial: darken thin (fwidth-AA'd) mortar/plank
 // seams at each VOXEL boundary on the two axes tangent to the face, plus per-voxel albedo/roughness
@@ -91,51 +83,37 @@ export class VoxelMesher {
     for (const [ck, keys] of buckets) this.build(ck, grid, keys);
   }
 
-  /** Rebuilds just one chunk's meshes from the grid. */
+  /** Rebuilds just one chunk's meshes from the grid (synchronous cook + apply). */
   rebuildChunk(grid: VoxelGrid, cx: number, cy: number, cz: number): void {
-    const ck = packKey(cx, cy, cz);
-    const old = this.chunks.get(ck);
-    if (old) { for (const mesh of old.values()) this.disposeMesh(mesh); this.chunks.delete(ck); }
-
     // Gather the chunk's voxels from the grid's cell index — O(voxels present), not 32768 has()-probes.
-    const keys = grid.chunkVoxelKeys(cx, cy, cz);
-    if (keys.length) this.build(ck, grid, keys);
+    this.build(packKey(cx, cy, cz), grid, grid.chunkVoxelKeys(cx, cy, cz));
   }
 
   private build(ck: number, grid: VoxelGrid, keys: number[]): void {
-    const byMat = new Map<MaterialId, number[]>();
-    for (const key of keys) {
-      const mat = grid.cells.get(key)!;
-      let arr = byMat.get(mat);
-      if (!arr) { arr = []; byMat.set(mat, arr); }
-      arr.push(key);
-    }
+    const matIdx = new Uint8Array(keys.length);
+    for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(grid.cells.get(keys[i])!);
+    this.applyCooked(ck, cookMeshChunk(keys, matIdx)); // pure cook (the big part) → build the meshes
+  }
 
+  /**
+   * Builds one chunk's InstancedMeshes from ALREADY-COOKED per-material instance data. The cook (greedy +
+   * matrices + weathering colours) can come from the synchronous path OR the off-thread worker — both feed
+   * this same apply. Disposes the old chunk meshes atomically here, so there's no visual gap.
+   */
+  applyCooked(ck: number, parts: CookedMeshPart[]): void {
+    const old = this.chunks.get(ck);
+    if (old) { for (const mesh of old.values()) this.disposeMesh(mesh); this.chunks.delete(ck); }
+    if (parts.length === 0) return;
     const map = new Map<MaterialId, THREE.InstancedMesh>();
-    for (const [mat, list] of byMat) {
-      // merge runs of same-material voxels into big boxes → far fewer instances to draw
-      const boxes = greedyBoxesFromKeys(list);
-      const mesh = new THREE.InstancedMesh(this.geo, this.mats.get(mat)!, boxes.length);
+    for (const part of parts) {
+      const mat = MATERIAL_ORDER[part.matIdx];
+      const count = part.matrices.length / 16;
+      const mesh = new THREE.InstancedMesh(this.geo, this.mats.get(mat)!, count);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      mesh.frustumCulled = true; // per-chunk mesh with a computed bounding sphere → draw only when
-                                 // on-screen (and only cast shadows when in the light frustum)
-      for (let i = 0; i < boxes.length; i++) {
-        const [x0, y0, z0, x1, y1, z1] = boxes[i];
-        const sx = (x1 - x0 + 1) * VOXEL, sy = (y1 - y0 + 1) * VOXEL, sz = (z1 - z0 + 1) * VOXEL;
-        DUMMY.position.set(x0 * VOXEL + sx / 2, y0 * VOXEL + sy / 2, z0 * VOXEL + sz / 2);
-        DUMMY.scale.set(sx, sy, sz);
-        DUMMY.rotation.set(0, 0, 0);
-        DUMMY.updateMatrix();
-        mesh.setMatrixAt(i, DUMMY.matrix);
-        // weathering: modulate each box's colour by a deterministic chromatic grime/wear/rust factor so
-        // walls read as aged masonry, not flat. Per-box (greedy), hashed from the box centre → stable +
-        // client-consistent. Painted/reflective materials stay neutral so speculars stay clean.
-        const t = weatherTint((x0 + x1) >> 1, (y0 + y1) >> 1, (z0 + z1) >> 1, !NEUTRAL_WEATHER.has(mat), _WRGB);
-        mesh.setColorAt(i, _WCOL.setRGB(t.r, t.g, t.b));
-      }
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.frustumCulled = true; // per-chunk mesh with a computed bounding sphere → drawn only on-screen
+      mesh.instanceMatrix = new THREE.InstancedBufferAttribute(part.matrices, 16); // reuse cooked buffers (no copy)
+      mesh.instanceColor = new THREE.InstancedBufferAttribute(part.colors, 3);
       mesh.computeBoundingSphere();
       this.group.add(mesh);
       map.set(mat, mesh);
