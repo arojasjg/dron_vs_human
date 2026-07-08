@@ -125,7 +125,7 @@ export function placeGasTank(grid: VoxelGrid, x: number, y: number, z: number): 
  */
 // Building layout — exported so the player can be spawned inside the ground-floor lobby.
 // BIG doubles as the overall world footprint that buildDefaultScene fills with smaller plots.
-export const BIG = { W: 288, D: 216, H: 18, FLOORS: 6 }; // fewer, taller storeys
+export const BIG = { W: 346, D: 270, H: 18, FLOORS: 6 }; // larger footprint → 30 plots at the SAME plot size (57×54)
 /** Per-building size. Storey height (H) is fixed to BIG.H so STRIDE stays constant everywhere. */
 export interface BuildSpec { W: number; D: number; FLOORS: number }
 const STRIDE = BIG.H + 1;        // voxels between floor slabs
@@ -486,7 +486,7 @@ function decorateBuilding(grid: VoxelGrid, ox: number, oz: number, spec: BuildSp
 }
 
 export interface Placed { ox: number; oz: number; W: number; D: number; FLOORS: number }
-const PLOTS_X = 5, PLOTS_Z = 4, STREET = 14; // 20 plots in the same footprint → more, smaller buildings
+const PLOTS_X = 6, PLOTS_Z = 5, STREET = 14; // 30 plots (was 20) on a larger footprint → more buildings, same size
 const PLOT_W = Math.floor(BIG.W / PLOTS_X), PLOT_D = Math.floor(BIG.D / PLOTS_Z);
 
 /** City ground extent in VOXELS (the plot grid buildDefaultScene fills). */

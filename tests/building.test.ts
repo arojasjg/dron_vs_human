@@ -119,12 +119,12 @@ describe("buildDefaultScene — varied city block", () => {
     buildDefaultScene(g as unknown as Parameters<typeof buildDefaultScene>[0]);
     return g;
   };
-  const PLOT_W = Math.floor(BIG.W / 5), PLOT_D = Math.floor(BIG.D / 4);
+  const PLOT_W = Math.floor(BIG.W / 6), PLOT_D = Math.floor(BIG.D / 5);
 
   it("places many small buildings with at least one taller landmark", () => {
     const g = scene(3);
     const b = placedBuildings();
-    expect(b.length).toBe(20);                                              // 5×4 plots → more buildings
+    expect(b.length).toBe(30);                                              // 6×5 plots → more buildings
     expect(Math.max(...b.map((p) => p.FLOORS))).toBeGreaterThanOrEqual(5);  // a taller landmark exists
     expect(Math.min(...b.map((p) => p.FLOORS))).toBeLessThanOrEqual(3);     // the majority are low
     expect(new Set(b.map((p) => p.W)).size).toBeGreaterThan(3);             // varied (randomised) footprints
@@ -134,7 +134,7 @@ describe("buildDefaultScene — varied city block", () => {
 
   it("leaves streets (gaps) between the buildings", () => {
     const g = scene(3);
-    for (const px of [1, 2, 3, 4]) expect(g.has(px * PLOT_W, 0, Math.floor(PLOT_D / 2))).toBe(false);
+    for (const px of [1, 2, 3, 4, 5]) expect(g.has(px * PLOT_W, 0, Math.floor(PLOT_D / 2))).toBe(false);
   });
 
   it("generates the identical block for a given seed (multiplayer-safe)", () => {
