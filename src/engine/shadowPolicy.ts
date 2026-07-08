@@ -6,7 +6,7 @@
 // nothing can get stuck. Pure so it unit-tests; the caller owns the frame counter, the reset, and the
 // `active` OR of its own signals (player-moved / grid-dirty / debris / peers).
 
-export const SHADOW_ACTIVE_INTERVAL = 2;  // frames between refreshes while things move (~30Hz at 60fps) — unchanged from before
+export const SHADOW_ACTIVE_INTERVAL = 3;  // frames between refreshes while things move (~20Hz at 60fps): the shadow pass is the heaviest frame, so spacing it out kills the 2-frame time oscillation (the "tirón") without a visible shadow lag
 export const SHADOW_IDLE_INTERVAL = 60;   // static scene: one safety refresh per ~1s, otherwise skip the whole pass
 export const SHADOW_MOVE_SQ = 0.02;       // m² the camera must travel since the last refresh to count as "moved" (~14cm)
 

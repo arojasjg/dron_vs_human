@@ -11,7 +11,10 @@ import { cookColliderBoxes, cookMeshChunk, type CookedMeshPart } from "./cook";
  */
 export class CookService {
   private worker: Worker | null = null;
-  private readonly gen = new Map<number, number>();
+  // Per-KIND generation counters. Mesh and collider chunks now use DIFFERENT chunk sizes (64 vs 32), so
+  // their packed keys live in overlapping number ranges — a shared map would let a mesh touch() spuriously
+  // drop a collider result (and vice versa). Keeping one map per kind isolates them.
+  private readonly gen = { mesh: new Map<number, number>(), collider: new Map<number, number>() };
   private inflight = 0;
   private static readonly MAX_INFLIGHT = 4;
 
@@ -33,9 +36,12 @@ export class CookService {
   /** True when cooking actually runs off-thread (a worker is live). */
   get async(): boolean { return this.worker !== null; }
 
-  /** Bump a chunk's generation so any in-flight cook for its OLD state is dropped when it returns. Call
-   *  whenever the chunk is edited/dirtied. */
-  touch(ck: number): void { this.gen.set(ck, (this.gen.get(ck) ?? 0) + 1); }
+  /** Bump a chunk's generation (for the given cook kind) so any in-flight cook for its OLD state is
+   *  dropped when it returns. Call whenever the chunk is edited/dirtied. */
+  touch(ck: number, kind: "mesh" | "collider"): void {
+    const m = this.gen[kind];
+    m.set(ck, (m.get(ck) ?? 0) + 1);
+  }
 
   /**
    * Cook one chunk's colliders from a snapshot of its voxel keys. Off-thread if possible (result via
@@ -48,7 +54,7 @@ export class CookService {
       return;
     }
     this.inflight++;
-    const gen = this.gen.get(ck) ?? 0;
+    const gen = this.gen.collider.get(ck) ?? 0;
     this.worker.postMessage({ kind: "collider", ck, gen, keys }, [keys.buffer]);
   }
 
@@ -60,13 +66,14 @@ export class CookService {
       return;
     }
     this.inflight++;
-    const gen = this.gen.get(ck) ?? 0;
+    const gen = this.gen.mesh.get(ck) ?? 0;
     this.worker.postMessage({ kind: "mesh", ck, gen, keys, matIdx }, [keys.buffer, matIdx.buffer]);
   }
 
   private receive(msg: { kind: string; ck: number; gen: number; boxes?: Int32Array; parts?: CookedMeshPart[] }): void {
     this.inflight--;
-    if ((this.gen.get(msg.ck) ?? 0) !== msg.gen) return; // stale: the chunk changed since the request → still dirty, re-queued
+    const g = msg.kind === "mesh" ? this.gen.mesh : this.gen.collider;
+    if ((g.get(msg.ck) ?? 0) !== msg.gen) return; // stale: the chunk changed since the request → still dirty, re-queued
     if (msg.kind === "collider") this.onColliderCooked?.(msg.ck, msg.boxes!);
     else if (msg.kind === "mesh") this.onMeshCooked?.(msg.ck, msg.parts!);
   }

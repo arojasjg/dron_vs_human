@@ -25,6 +25,19 @@ export function chunkCoord(v: number): number {
   return Math.floor(v / CHUNK);
 }
 
+// RENDER chunk — deliberately LARGER than the collider chunk. Rendering cost is dominated by the sheer
+// COUNT of InstancedMeshes Three.js must traverse/cull/submit every frame (one per chunk×material), which
+// scaled badly when the town tripled (measured ~2100 draw calls / ~11 ms CPU from an open view). A bigger
+// mesh chunk means far fewer, larger meshes → far fewer draw calls. Kept SEPARATE from CHUNK so the
+// collider streaming/LOD (tuned to avoid a broadphase hitch) is untouched: MESH_CHUNK must be a multiple
+// of CHUNK so a collider chunk maps cleanly onto its parent mesh chunk (meshCoord = colCoord / RATIO).
+export const MESH_CHUNK = 64;
+export const MESH_CHUNK_RATIO = MESH_CHUNK / CHUNK; // collider chunks per mesh chunk, per axis
+
+export function meshChunkCoord(v: number): number {
+  return Math.floor(v / MESH_CHUNK);
+}
+
 /**
  * Greedy box decomposition over a set of packed voxel keys: merges runs of solid
  * voxels into a small set of boxes. Expansion stops at the set boundary, so passing

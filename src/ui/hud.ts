@@ -215,8 +215,13 @@ export class Hud {
     this.mat.innerHTML = `<span class="sw" style="background:${hex}"></span>${def.name}`;
   }
 
-  setStats(fps: number, debris: number, wind: number): void {
-    this.stats.textContent = `${fps.toFixed(0)} fps · escombros ${debris} · viento ${wind.toFixed(1)}`;
+  setStats(fps: number, debris: number, wind: number, drawCalls = -1, gpuMs = -1): void {
+    // draw calls + real GPU-ms (timer query) are the two numbers that reveal a CPU-submit vs GPU-fill
+    // bottleneck at a glance — shown so perf can be confirmed on the real machine (the automation tab
+    // can't render). Hidden (-1) until the values exist.
+    const perf = drawCalls >= 0 ? ` · draws ${drawCalls}` : "";
+    const gpu = gpuMs >= 0 ? ` · gpu ${gpuMs.toFixed(1)}ms` : "";
+    this.stats.textContent = `${fps.toFixed(0)} fps · escombros ${debris} · viento ${wind.toFixed(1)}${perf}${gpu}`;
   }
 
   toggleHelp(): void {

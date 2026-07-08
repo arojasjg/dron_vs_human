@@ -1,7 +1,7 @@
 export type MaterialId =
   | "wood" | "concrete" | "brick" | "glass" | "metal" | "gastank"
   | "wall_slate" | "wall_moss" | "wall_clay" | "wall_navy"
-  | "car_red" | "car_blue" | "car_teal" | "tire";
+  | "car_red" | "car_blue" | "car_teal" | "tire" | "leaves";
 
 export interface MaterialDef {
   id: MaterialId;
@@ -86,10 +86,15 @@ export const MATERIALS: Record<MaterialId, MaterialDef> = {
     id: "tire", name: "Neumático", color: 0x18181c, roughness: 0.95, metalness: 0.0,
     density: 1100, strength: 90, hp: 4, restitution: 0.35, friction: 0.95, opacity: 1, shatters: false,
   },
+  // Tree foliage — light, weak, shatters into leaf dust. A tree's canopy breaks off with almost any hit.
+  leaves: {
+    id: "leaves", name: "Follaje", color: 0x4a7a3a, roughness: 0.9, metalness: 0.0,
+    density: 300, strength: 18, hp: 1, restitution: 0.0, friction: 0.8, opacity: 1, shatters: true,
+  },
 };
 
 export const MATERIAL_ORDER: MaterialId[] = [
   "wood", "concrete", "brick", "glass", "metal", "gastank",
   "wall_slate", "wall_moss", "wall_clay", "wall_navy",
-  "car_red", "car_blue", "car_teal", "tire",
+  "car_red", "car_blue", "car_teal", "tire", "leaves",
 ];

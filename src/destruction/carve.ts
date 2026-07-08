@@ -6,7 +6,7 @@ import { MATERIALS, type MaterialId } from "../world/materials";
 export const DEBRIS_CT: Record<MaterialId, number> = {
   concrete: 0.61, brick: 0.65, wood: 0.69, metal: 0.73, glass: 0.77, gastank: 0.73,
   wall_slate: 0.65, wall_moss: 0.65, wall_clay: 0.65, wall_navy: 0.65,
-  car_red: 0.73, car_blue: 0.73, car_teal: 0.73, tire: 0.61,
+  car_red: 0.73, car_blue: 0.73, car_teal: 0.73, tire: 0.61, leaves: 0.69,
 };
 import { VoxelGrid, packKey } from "../world/voxelGrid";
 import { Rng, mix32 } from "../engine/rng";

@@ -47,8 +47,11 @@ export class Renderer {
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.camera.near = 1;
-    this.sun.shadow.camera.far = 120;
-    const s = 40;
+    this.sun.shadow.camera.far = 110;
+    // Tighter shadow box (~70 m, matched to fog-near) → far fewer chunk meshes are shadow-casters, so the
+    // shadow pass submits far fewer draw calls (its cost is CPU submit, not map resolution). Distant shadows
+    // are lost, but they dissolve into fog at ~70 m anyway, so there's no visible shadowless band.
+    const s = 35;
     this.sun.shadow.camera.left = -s;
     this.sun.shadow.camera.right = s;
     this.sun.shadow.camera.top = s;

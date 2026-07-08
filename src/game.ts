@@ -27,13 +27,14 @@ import { ImpactMarks } from "./fx/impactMarks";
 import { RubbleField } from "./fx/rubble";
 import { HeightField } from "./fx/heightField";
 import { placeVoxel, eraseVoxel, type EditRegion } from "./build/editor";
-import { BIG, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, groundClass, objectiveHp, objectiveDestroyed, OBJECTIVE_SITES, placedBuildings, setWorldSeed } from "./build/prefabs";
+import { BIG, ammoBoxSites, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, groundClass, objectiveHp, objectiveDestroyed, OBJECTIVE_SITES, placedBuildings, setWorldSeed } from "./build/prefabs";
 import { InteriorLights } from "./engine/interiorLights";
 import { Hud, type Mode, type Tool } from "./ui/hud";
 import { CameraFx } from "./fx/cameraFx";
 import { addTrauma, decayTrauma, shakeOffset } from "./engine/cameraFeel";
 import { GameAudio } from "./fx/audio";
 import { Scenery } from "./fx/scenery";
+import { AmmoCrates } from "./fx/ammoCrates";
 import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleMaxHp, roleWeapon, type Role } from "./net/roles";
@@ -42,6 +43,7 @@ import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/obje
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, VoxelGrid, type RayHit } from "./world/voxelGrid";
 import { chunkCoord, VoxelCollider } from "./world/voxelCollider";
+import { MESH_CHUNK_RATIO } from "./world/cook";
 import { VoxelMesher } from "./world/voxelMesh";
 import { connectedComponents, type Voxel } from "./world/structuralIntegrity";
 
@@ -77,6 +79,7 @@ export class Game {
   private readonly audio = new GameAudio(); // procedural SFX (its live context also keeps the tab awake)
   private interiorLights?: InteriorLights;  // dim/flickering lights inside some buildings
   private scenery?: Scenery;                // trees + drifting clouds (visual scene dressing)
+  private ammoCrates!: AmmoCrates;          // soldier ammo-supply pickups on the streets (set in ctor)
   private flashlight?: THREE.SpotLight;     // head-mounted torch for the local player (F to toggle)
   private flashOn = false;
 
@@ -239,6 +242,7 @@ export class Game {
 
     this.buildGround();
     this.scenery = new Scenery(this.renderer.scene); // trees + clouds
+    this.ammoCrates = new AmmoCrates(this.renderer.scene); // soldier ammo pickups (populated per world)
     this.initFlashes();
     buildDefaultScene(this.grid);
     this.mesher.rebuild(this.grid);
@@ -326,6 +330,8 @@ export class Game {
       this.fireRemoteWeapon(m);
     } else if (m.t === "explode") {
       this.explodeAt(m.x as number, m.y as number, m.z as number, m.r as number, m.p as number, false, m.id as number);
+    } else if (m.t === "ammo") {
+      this.ammoCrates.take(m.i as number, this.time); // a peer grabbed a crate → hide it here too
     } else if (m.t === "hit") {
       this.applyBulletHit(
         m.vx as number, m.vy as number, m.vz as number, m.dx as number, m.dy as number, m.dz as number,
@@ -886,6 +892,9 @@ export class Game {
     this.pendingFall.length = 0; // drop any in-flight collapse wave from the old grid
     this.grid.baselineGen();     // window/door cuts are world-gen, not destruction → don't sync them
     this.syncedFromPeer = false; // a fresh world → accept one reconciliation snapshot from a peer again
+    // Ammo-supply crates for the soldiers, on a deterministic per-room grid (same on every client). Only
+    // in combat modes — the free sandbox has no ammo, so no crates. Rebuilding resets every crate to live.
+    this.ammoCrates.build(this.mode !== "free" ? ammoBoxSites(this.worldSeed) : []);
     if (withProps) this.spawnInitialProps();
     this.spawnPlayerInBuilding();
   }
@@ -919,21 +928,29 @@ export class Game {
     this.rebuildGasTanks();
   }
 
-  private markChunkKey(ck: number): void {
-    this.dirtyChunks.add(ck);        // mesh: rebuilt promptly (visual)
-    this.dirtyCol.set(ck, this.time); // collider: debounced until this chunk stops changing
-    this.cookService.touch(ck);      // bump gen → any in-flight cook for the old state is dropped on return
+  // Dirty a single COLLIDER chunk (cx,cy,cz in 32-chunk coords) and its parent RENDER chunk. Mesh and
+  // collider now use different chunk sizes, so each edit dirties both grids: the 32³ collider chunk
+  // (debounced) and the 64³ render chunk that contains it (rebuilt promptly). gen bumps per kind so any
+  // in-flight cook for the old state is dropped when it returns.
+  private markColChunk(cx: number, cy: number, cz: number): void {
+    const colCK = packKey(cx, cy, cz);
+    this.dirtyCol.set(colCK, this.time);
+    this.cookService.touch(colCK, "collider");
+    const R = MESH_CHUNK_RATIO;
+    const meshCK = packKey(Math.floor(cx / R), Math.floor(cy / R), Math.floor(cz / R));
+    this.dirtyChunks.add(meshCK);        // mesh: rebuilt promptly (visual)
+    this.cookService.touch(meshCK, "mesh");
   }
 
   private markChunk(x: number, y: number, z: number): void {
-    this.markChunkKey(packKey(chunkCoord(x), chunkCoord(y), chunkCoord(z)));
+    this.markColChunk(chunkCoord(x), chunkCoord(y), chunkCoord(z));
   }
 
   private markRegion(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void {
     for (let cx = chunkCoord(x0); cx <= chunkCoord(x1); cx++)
       for (let cy = chunkCoord(y0); cy <= chunkCoord(y1); cy++)
         for (let cz = chunkCoord(z0); cz <= chunkCoord(z1); cz++) {
-          this.markChunkKey(packKey(cx, cy, cz));
+          this.markColChunk(cx, cy, cz);
         }
   }
 
@@ -1324,10 +1341,38 @@ export class Game {
     return false;
   }
 
+  /** Refill this role's weapon ammo (full mag + full reserve) — the part a supply crate gives. Returns
+   *  whether anything was below full, so a crate isn't wasted on an already-stocked soldier. NO battery. */
+  private resupplyAmmo(): boolean {
+    let gained = false;
+    for (const w of roleLoadout(this.role)) {
+      const spec = WEAPONS[w], cur = this.ammo[w];
+      if (cur.mag < spec.magSize || cur.reserve < spec.maxReserve) gained = true;
+      this.ammo[w] = fullAmmo(spec);
+    }
+    return gained;
+  }
+
   /** Refill all weapons + battery (on respawn, and whenever standing in the base). */
   private resupply(): void {
-    for (const w of roleLoadout(this.role)) this.ammo[w] = fullAmmo(WEAPONS[w]);
+    this.resupplyAmmo();
     this.battery = BATTERY_MAX;
+  }
+
+  /** Soldiers (on foot) resupply AMMO by walking over a street crate. The pickup is broadcast so every
+   *  client hides the same crate; crates respawn after a cooldown. Drones recharge at their base instead. */
+  private ammoFrame(): void {
+    if (this.mode === "free") return;
+    this.ammoCrates.update(this.time);                            // tick respawns on every client
+    if (!(this.player instanceof Walker) || this.hp <= 0) return; // only a living soldier grabs crates
+    const p = this.player.camera.position;
+    const i = this.ammoCrates.nearestLive(p.x, p.z);
+    if (i < 0 || !this.resupplyAmmo()) return;                    // nothing near, or already full → don't waste it
+    this.ammoCrates.take(i, this.time);
+    if (this.net.connected) this.net.send({ t: "ammo", i });
+    this.hud.flash("📦 Munición reabastecida");
+    this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon]);
+    this.audio.ui();
   }
 
   /** Per-frame combat upkeep: base recharge, drone battery drain + power-out death, HUD panels. */
@@ -1644,6 +1689,7 @@ export class Game {
     this.prof.rebuildTotal += _rd; if (_rd > this.prof.rebuildMax) this.prof.rebuildMax = _rd;
 
     this.combatFrame(dt); // team weapons: base recharge, drone battery, HUD panels
+    this.ammoFrame();     // soldier ammo-crate pickups on the streets + crate respawns
     this.audioFrame();
     this.interiorLights?.update(this.time); // flicker the interior lights
     this.scenery?.update(dt);               // drift the clouds
@@ -1656,7 +1702,12 @@ export class Game {
     this.hud.update(dt);
     if (this.hp <= 0) this.hud.showDeath(this.respawnAt - this.time); else this.hud.hideDeath(); // death overlay + live respawn countdown
     this.statsT -= dt; // the stats readout doesn't need a 60Hz DOM write
-    if (this.statsT <= 0) { this.statsT = 0.16; this.hud.setStats(this.fps, this.debris.count, Math.hypot(this.physics.wind.x, this.physics.wind.z)); }
+    if (this.statsT <= 0) {
+      this.statsT = 0.16;
+      const gpuMs = this.gpuTimer.latest();
+      this.hud.setStats(this.fps, this.debris.count, Math.hypot(this.physics.wind.x, this.physics.wind.z),
+        this.renderer.renderer.info.render.calls, gpuMs ?? -1);
+    }
     this.prof.framesSimulated++;
     const _trn = performance.now();
     const cp = this.player.camera.position;
@@ -1722,26 +1773,18 @@ export class Game {
     // OFF-THREAD (their 1-2 frame delay is imperceptible and masked by the carve FX). markChunkKey re-adds
     // + bumps gen if a chunk changes again; onMeshCooked applies the async ones when they return.
     if (this.dirtyChunks.size > 0) {
-      const pp = this.player.camera.position;
-      const [pvx, pvy, pvz] = VoxelGrid.worldToVoxel(pp.x, pp.y, pp.z);
-      const pcx = chunkCoord(pvx), pcy = chunkCoord(pvy), pcz = chunkCoord(pvz);
-      let nearest = -1, nd = Infinity;
-      for (const ck of this.dirtyChunks) {
-        const [cx, cy, cz] = unpackKey(ck);
-        const d = Math.abs(cx - pcx) + Math.abs(cy - pcy) + Math.abs(cz - pcz);
-        if (d < nd) { nd = d; nearest = ck; }
-      }
+      // Every dirty RENDER chunk cooks OFF-THREAD now. A 64³ mesh chunk is 8× the voxels of the old 32³,
+      // so cooking even the focus chunk synchronously would be a visible carve hitch — and the user's floor
+      // is "never below 60". The blast's muzzle flash + debris burst fire the SAME frame, so the ~1-frame
+      // async lag on the hole itself is imperceptible. (In node/tests with no worker, requestMesh cooks
+      // inline via the sync fallback, so behaviour there is unchanged.)
       for (const ck of this.dirtyChunks) {
         const [cx, cy, cz] = unpackKey(ck);
         this.dirtyChunks.delete(ck);
-        if (ck === nearest) {
-          this.mesher.rebuildChunk(this.grid, cx, cy, cz); // the focus chunk: immediate, on the main thread
-        } else {
-          const keys = this.grid.chunkVoxelKeys(cx, cy, cz);
-          const matIdx = new Uint8Array(keys.length);
-          for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(this.grid.cells.get(keys[i])!);
-          this.cookService.requestMesh(ck, Int32Array.from(keys), matIdx);
-        }
+        const keys = this.grid.meshChunkVoxelKeys(cx, cy, cz);
+        const matIdx = new Uint8Array(keys.length);
+        for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(this.grid.cells.get(keys[i])!);
+        this.cookService.requestMesh(ck, Int32Array.from(keys), matIdx);
         if (performance.now() - _rt0 > meshBudget) break;
       }
     }

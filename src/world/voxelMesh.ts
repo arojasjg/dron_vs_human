@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { VOXEL } from "../config";
 import { MATERIALS, MATERIAL_ORDER, type MaterialId } from "./materials";
 import { packKey, unpackKey, type VoxelGrid } from "./voxelGrid";
-import { chunkCoord, cookMeshChunk, NEUTRAL_WEATHER, type CookedMeshPart } from "./cook";
+import { meshChunkCoord, cookMeshChunk, NEUTRAL_WEATHER, type CookedMeshPart } from "./cook";
 
 // Voxel-pitch surface detail injected into MeshStandardMaterial: darken thin (fwidth-AA'd) mortar/plank
 // seams at each VOXEL boundary on the two axes tangent to the face, plus per-voxel albedo/roughness
@@ -75,7 +75,7 @@ export class VoxelMesher {
     const buckets = new Map<number, number[]>();
     for (const key of grid.cells.keys()) {
       const [x, y, z] = unpackKey(key);
-      const ck = packKey(chunkCoord(x), chunkCoord(y), chunkCoord(z));
+      const ck = packKey(meshChunkCoord(x), meshChunkCoord(y), meshChunkCoord(z));
       let b = buckets.get(ck);
       if (!b) { b = []; buckets.set(ck, b); }
       b.push(key);
@@ -83,10 +83,10 @@ export class VoxelMesher {
     for (const [ck, keys] of buckets) this.build(ck, grid, keys);
   }
 
-  /** Rebuilds just one chunk's meshes from the grid (synchronous cook + apply). */
+  /** Rebuilds just one RENDER chunk's meshes from the grid (synchronous cook + apply). */
   rebuildChunk(grid: VoxelGrid, cx: number, cy: number, cz: number): void {
-    // Gather the chunk's voxels from the grid's cell index — O(voxels present), not 32768 has()-probes.
-    this.build(packKey(cx, cy, cz), grid, grid.chunkVoxelKeys(cx, cy, cz));
+    // Gather the render chunk's voxels from the grid's cell index — O(voxels present), not O(volume).
+    this.build(packKey(cx, cy, cz), grid, grid.meshChunkVoxelKeys(cx, cy, cz));
   }
 
   private build(ck: number, grid: VoxelGrid, keys: number[]): void {
@@ -115,6 +115,11 @@ export class VoxelMesher {
       mesh.instanceMatrix = new THREE.InstancedBufferAttribute(part.matrices, 16); // reuse cooked buffers (no copy)
       mesh.instanceColor = new THREE.InstancedBufferAttribute(part.colors, 3);
       mesh.computeBoundingSphere();
+      // The mesh itself never moves — instances are positioned in world space by instanceMatrix, and the
+      // mesh sits at the identity transform. So recomputing its matrix/matrixWorld every frame (the Three.js
+      // default) is pure waste over thousands of chunk meshes. Freeze both (measured ~1 ms/frame saved).
+      mesh.matrixAutoUpdate = false;
+      mesh.matrixWorldAutoUpdate = false;
       this.group.add(mesh);
       map.set(mat, mesh);
     }

@@ -5,8 +5,9 @@ describe("shadow refresh policy — skip the pass when the scene is static", () 
   it("while active (moving), keeps the ~30Hz cadence exactly as before", () => {
     expect(shouldRefreshShadows(true, 0)).toBe(false);
     expect(shouldRefreshShadows(true, 1)).toBe(false);
-    expect(shouldRefreshShadows(true, SHADOW_ACTIVE_INTERVAL)).toBe(true); // every 2 frames
-    expect(shouldRefreshShadows(true, 5)).toBe(true);
+    expect(shouldRefreshShadows(true, SHADOW_ACTIVE_INTERVAL)).toBe(true); // refreshes once the interval elapses
+    expect(shouldRefreshShadows(true, SHADOW_ACTIVE_INTERVAL - 1)).toBe(false); // ...not before
+    expect(shouldRefreshShadows(true, 6)).toBe(true);
   });
 
   it("while static, skips the whole shadow pass until a rare safety refresh (~1s)", () => {
@@ -21,8 +22,8 @@ describe("shadow refresh policy — skip the pass when the scene is static", () 
   });
 
   it("any moving caster (active=true) always wins over the idle interval", () => {
-    // e.g. a drone flies past while the player stands still → active, so it refreshes at 30Hz not 1Hz
-    expect(shouldRefreshShadows(true, 2)).toBe(true);
-    expect(shouldRefreshShadows(false, 2)).toBe(false);
+    // e.g. a drone flies past while the player stands still → active, so it refreshes on cadence not 1Hz
+    expect(shouldRefreshShadows(true, SHADOW_ACTIVE_INTERVAL)).toBe(true);
+    expect(shouldRefreshShadows(false, SHADOW_ACTIVE_INTERVAL)).toBe(false);
   });
 });

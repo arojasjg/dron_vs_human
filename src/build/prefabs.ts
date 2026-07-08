@@ -1,5 +1,6 @@
 import type { MaterialId } from "../world/materials";
 import type { VoxelGrid } from "../world/voxelGrid";
+import { Rng, mix32 } from "../engine/rng";
 
 // Seeded PRNG (mulberry32) so every client in a multiplayer room generates the IDENTICAL building —
 // the foundation of full destruction sync. setWorldSeed() is called from the room code before build.
@@ -118,14 +119,58 @@ export function placeGasTank(grid: VoxelGrid, x: number, y: number, z: number): 
   fillBox(grid, x, x + 1, y, y + 4, z, z + 1, "gastank");
 }
 
+// ---- Street dressing: small destructible voxel props (all markSettled → non-structural) -------------
+
+/** A destructible tree: a wood trunk with a roughly-spherical leaves canopy. The canopy is weak
+ *  foliage (shatters), so a single hit knocks it apart. Height varies by position (deterministic). */
+export function buildTree(grid: VoxelGrid, ox: number, oz: number): void {
+  const h = 5 + (mix32(ox, oz) % 3);                        // trunk height 5..7, hashed by position
+  for (let y = 0; y < h; y++) grid.set(ox, y, oz, "wood");
+  grid.set(ox, h, oz, "leaves");                            // neck: canopy sits on the trunk top
+  const cy = h + 1, R = 2;
+  for (let dx = -R; dx <= R; dx++)
+    for (let dy = -R; dy <= R; dy++)
+      for (let dz = -R; dz <= R; dz++)
+        if (dx * dx + dy * dy + dz * dz <= R * R + 1) grid.set(ox + dx, cy + dy, oz + dz, "leaves");
+  markSettledBox(grid, ox - R, ox + R, 0, cy + R, oz - R, oz + R);
+}
+
+/** A street lamp: a metal pole with a short arm and a glowing glass lamp head. */
+export function buildLamppost(grid: VoxelGrid, ox: number, oz: number): void {
+  const h = 6;
+  for (let y = 0; y <= h; y++) grid.set(ox, y, oz, "metal");  // pole
+  grid.set(ox + 1, h, oz, "metal");                            // arm
+  grid.set(ox + 1, h - 1, oz, "glass");                        // lamp head
+  markSettledBox(grid, ox, ox + 1, 0, h, oz, oz);
+}
+
+/** A small metal trash can (2×2 footprint, waist-high). */
+export function buildTrashCan(grid: VoxelGrid, ox: number, oz: number): void {
+  fillBox(grid, ox, ox + 1, 0, 2, oz, oz + 1, "metal");
+  markSettledBox(grid, ox, ox + 1, 0, 2, oz, oz + 1);
+}
+
+/** A little scatter of litter on the pavement — 2-4 tiny bits of mixed material, hashed by position. */
+export function buildLitter(grid: VoxelGrid, ox: number, oz: number): void {
+  const bits: MaterialId[] = ["wood", "glass", "metal"];
+  const s = mix32(ox, oz, 0x11);
+  const n = 2 + (s % 3);
+  for (let i = 0; i < n; i++) {
+    const hx = mix32(s, i), hz = mix32(s, i, 7);
+    grid.set(ox + (hx % 3) - 1, 0, oz + (hz % 3) - 1, bits[hx % bits.length]); // within ±1 voxel
+  }
+  markSettledBox(grid, ox - 1, ox + 1, 0, 0, oz - 1, oz + 1);
+}
+
 /**
  * Multi-storey building with real interiors: concrete floor slabs, brick exterior +
  * interior dividing walls with doorways, glass windows, a stairwell hole between
  * floors, a roof, and gas tanks placed inside each storey.
  */
 // Building layout — exported so the player can be spawned inside the ground-floor lobby.
-// BIG doubles as the overall world footprint that buildDefaultScene fills with smaller plots.
-export const BIG = { W: 346, D: 270, H: 18, FLOORS: 6 }; // larger footprint → 30 plots at the SAME plot size (57×54)
+// BIG is the DEFAULT single-building spec (used by buildBuilding when no size is given). The town grid
+// no longer derives from it — plot size is its own source of truth (PLOT_W/PLOT_D below).
+export const BIG = { W: 346, D: 270, H: 18, FLOORS: 6 };
 /** Per-building size. Storey height (H) is fixed to BIG.H so STRIDE stays constant everywhere. */
 export interface BuildSpec { W: number; D: number; FLOORS: number }
 const STRIDE = BIG.H + 1;        // voxels between floor slabs
@@ -486,8 +531,15 @@ function decorateBuilding(grid: VoxelGrid, ox: number, oz: number, spec: BuildSp
 }
 
 export interface Placed { ox: number; oz: number; W: number; D: number; FLOORS: number }
-const PLOTS_X = 6, PLOTS_Z = 5, STREET = 14; // 30 plots (was 20) on a larger footprint → more buildings, same size
-const PLOT_W = Math.floor(BIG.W / PLOTS_X), PLOT_D = Math.floor(BIG.D / PLOTS_Z);
+// A mini-town: a 9×11 plot grid (99 plots) with a central 3×3 plaza carved out → 90 buildings. Plot size
+// is fixed (its own source of truth, not derived from BIG) so buildings keep the exact geometry that
+// passes the collapse solver — tripling the count is pure footprint growth, no false floaters.
+const PLOTS_X = 9, PLOTS_Z = 11, STREET = 14;
+const PLOT_W = 57, PLOT_D = 54;
+// central plaza: the 3×3 block of plots in the middle carries no building, just a monument + street furniture
+const PLAZA_PX0 = 3, PLAZA_PX1 = 5, PLAZA_PZ0 = 4, PLAZA_PZ1 = 6;
+const inPlaza = (px: number, pz: number): boolean =>
+  px >= PLAZA_PX0 && px <= PLAZA_PX1 && pz >= PLAZA_PZ0 && pz <= PLAZA_PZ1;
 
 /** City ground extent in VOXELS (the plot grid buildDefaultScene fills). */
 export const CITY_VOX = { x1: PLOTS_X * PLOT_W, z1: PLOTS_Z * PLOT_D };
@@ -504,20 +556,65 @@ export function groundClass(vx: number, vz: number): "street" | "plot" | "outsid
   };
   return nearBoundary(vx, PLOT_W) || nearBoundary(vz, PLOT_D) ? "street" : "plot";
 }
+
+/** An ammo-crate pickup site (voxel-space XZ column; the crate rests on the ground plane). */
+export interface AmmoSite { vx: number; vz: number }
+
+// Ammo crates for the soldiers, scattered along the city's vertical avenues on a regular grid so they
+// blanket the whole map. Seeded from the world seed via its OWN Rng stream (NOT the city rand() stream),
+// so it's identical on every client WITHOUT perturbing building/vehicle/objective placement. Every point
+// sits on a street line (a plot-column boundary → guaranteed clear of the buildings by groundClass).
+const AMMO_SEED_TAG = 0x0a33c0;
+export function ammoBoxSites(worldSeed: number): AmmoSite[] {
+  const rng = new Rng(mix32(worldSeed >>> 0, AMMO_SEED_TAG));
+  const sites: AmmoSite[] = [];
+  for (let px = 1; px < PLOTS_X; px++) {          // each interior vertical avenue (a plot-column gap)
+    const xl = px * PLOT_W;
+    for (let pz = 0; pz < PLOTS_Z; pz++) {         // one crate per block down the avenue → a full-map grid
+      const vx = Math.round(xl + rng.centered(8));                       // ±4 across the avenue → stays street
+      const vz = Math.round((pz + 0.5) * PLOT_D + rng.centered(PLOT_D * 0.4));
+      if (groundClass(vx, vz) === "street") sites.push({ vx, vz });      // defensive: only real street spots
+    }
+  }
+  return sites;
+}
 /** Muted facade palette — brick plus the sombre wall tints; one is picked per building. */
 const WALL_MATS: MaterialId[] = ["brick", "wall_slate", "wall_moss", "wall_clay", "wall_navy"];
 let _placed: Placed[] = [];
 /** The buildings placed by the last buildDefaultScene — used to site the DvH bases. */
 export function placedBuildings(): readonly Placed[] { return _placed; }
 
-/** A city block: many buildings on a 4×3 plot grid with wide streets between them — some "equal"
- *  (a fixed uniform size), some large landmarks, the rest randomised. Seeded rand() → every client
- *  generates the IDENTICAL block (destruction sync). */
+/** A central town plaza: a stepped concrete monument + metal spire, benches, and a ring of trees and
+ *  lampposts. All markSettled (non-structural) so the decor never trips the collapse solver. */
+function buildPlaza(grid: VoxelGrid): void {
+  const cx = Math.round(((PLAZA_PX0 + PLAZA_PX1 + 1) / 2) * PLOT_W); // plaza centre in voxels
+  const cz = Math.round(((PLAZA_PZ0 + PLAZA_PZ1 + 1) / 2) * PLOT_D);
+  fillBox(grid, cx - 4, cx + 4, 0, 1, cz - 4, cz + 4, "concrete");   // stepped base
+  fillBox(grid, cx - 3, cx + 3, 2, 3, cz - 3, cz + 3, "concrete");
+  fillBox(grid, cx - 1, cx + 1, 4, 5, cz - 1, cz + 1, "concrete");
+  fillBox(grid, cx, cx, 6, 11, cz, cz, "metal");                     // spire
+  markSettledBox(grid, cx - 4, cx + 4, 0, 11, cz - 4, cz + 4);
+  for (const [bx, bz] of [[cx - 10, cz], [cx + 10, cz], [cx, cz - 10], [cx, cz + 10]] as const) {
+    fillBox(grid, bx - 1, bx + 1, 0, 0, bz - 1, bz + 1, "wood");     // benches
+    markSettledBox(grid, bx - 1, bx + 1, 0, 0, bz - 1, bz + 1);
+  }
+  for (let a = 0; a < 8; a++) {                                       // ring of trees + lampposts
+    const ang = (a / 8) * Math.PI * 2;
+    const tx = Math.round(cx + Math.cos(ang) * 18), tz = Math.round(cz + Math.sin(ang) * 18);
+    if (a % 2 === 0) buildTree(grid, tx, tz); else buildLamppost(grid, tx, tz);
+  }
+}
+
+/** A mini-town: ~90 buildings on a 9×11 plot grid with a central plaza and wide streets between them —
+ *  some "equal" (a fixed uniform size), some tall landmarks, the rest randomised — plus destructible
+ *  street dressing (trees, lampposts, bins, litter) and parked vehicles. Seeded rand() → every client
+ *  generates the IDENTICAL town (destruction sync). */
 export function buildDefaultScene(grid: VoxelGrid): void {
   grid.clear();
   _placed = [];
   for (let px = 0; px < PLOTS_X; px++)
     for (let pz = 0; pz < PLOTS_Z; pz++) {
+      if (inPlaza(px, pz)) continue;                                                            // the central plaza carries no building
       const i = px * PLOTS_Z + pz;
       let W: number, D: number, FLOORS: number;
       if (i % 7 === 0) {                                                                        // rare taller landmark
@@ -533,6 +630,7 @@ export function buildDefaultScene(grid: VoxelGrid): void {
       buildBuilding(grid, ox, oz, { W, D, FLOORS }, wallMat);
       _placed.push({ ox, oz, W, D, FLOORS });
     }
+  buildPlaza(grid);
   // parked vehicles along the horizontal streets (seeded → identical on every client), varied type + paint
   const PAINTS: MaterialId[] = ["car_red", "car_blue", "car_teal", "metal"];
   const park = (ox: number, oz: number): void => {
@@ -542,11 +640,25 @@ export function buildDefaultScene(grid: VoxelGrid): void {
     else if (t < 0.75) buildVan(grid, ox, oz, paint);
     else buildTruck(grid, ox, oz, paint);
   };
-  buildCar(grid, -16, 8, "car_red"); // the original parked car, west of the block
+  buildCar(grid, -16, 8, "car_red"); // the original parked car, west of the town
   for (let pz = 1; pz < PLOTS_Z; pz++) {
     const z = pz * PLOT_D - 4;                       // in the horizontal street gap (clear of buildings)
-    const n = 1 + Math.floor(rand() * 2);
+    const n = 2 + Math.floor(rand() * 3);            // 2-4 vehicles per street (denser than before)
     for (let k = 0; k < n; k++) park(6 + Math.floor(rand() * (PLOTS_X * PLOT_W - 30)), z);
+  }
+  // destructible street furniture down the vertical avenues (plot-column gaps → clear of buildings). All
+  // markSettled inside their builders, so they never trip the collapse solver. Seeded → identical per client.
+  for (let px = 1; px < PLOTS_X; px++) {
+    const xl = px * PLOT_W;
+    for (let pz = 0; pz < PLOTS_Z; pz++) {
+      if (inPlaza(px, pz) || inPlaza(px - 1, pz)) continue;         // leave the plaza frontage open
+      const zc = Math.round((pz + 0.5) * PLOT_D) + (Math.floor(rand() * 11) - 5);
+      const sideA = rand() < 0.5 ? -3 : 3, sideB = -sideA;
+      if (rand() < 0.75) buildTree(grid, xl + sideA, zc);
+      if (rand() < 0.55) buildLamppost(grid, xl + sideB, zc + 8);
+      if (rand() < 0.4) buildTrashCan(grid, xl + sideB, zc - 6);
+      if (rand() < 0.4) buildLitter(grid, xl + sideA, zc + 3);
+    }
   }
 }
 

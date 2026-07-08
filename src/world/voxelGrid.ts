@@ -46,6 +46,10 @@ export class VoxelGrid {
   private readonly damage = new Map<number, number>();
   /** Voxels deposited by settled rubble; they act as anchors so a debris pile is stable. */
   private readonly settled = new Set<number>();
+  /** How many settled voxels each coarse cell holds. A settled cell is ANCHORED in the collapse solver
+   *  (like the ground) so small non-structural decor — trees, lampposts, bins, litter — never registers
+   *  as a "floating" cell just because it holds fewer voxels than the load-bearing mass threshold. */
+  private readonly settledCells = new Map<number, number>();
   /** Non-load-bearing voxels (bolted-on fire-escapes): supported BY the building but never a ground
    *  ANCHOR themselves, so a thin fire-escape can't float a building whose real structure is gone. */
   private readonly weakVoxels = new Set<number>();
@@ -84,7 +88,7 @@ export class VoxelGrid {
     const ck = cellKey(x, y, z);
     if (this.cells.has(k) && !this.weakVoxels.has(k)) this.bumpMass(ck, -1); // structural voxel leaves
     this.damage.delete(k);
-    this.settled.delete(k);
+    if (this.settled.delete(k)) this.bumpSettledCell(ck, -1);
     this.weakVoxels.delete(k);
     const s = this.byCell.get(ck);
     if (s) { s.delete(k); if (s.size === 0) this.byCell.delete(ck); }
@@ -100,6 +104,11 @@ export class VoxelGrid {
   private bumpMass(ck: number, delta: number): void {
     const m = (this.massByCell.get(ck) ?? 0) + delta;
     if (m <= 0) this.massByCell.delete(ck); else this.massByCell.set(ck, m);
+  }
+
+  private bumpSettledCell(ck: number, delta: number): void {
+    const m = (this.settledCells.get(ck) ?? 0) + delta;
+    if (m <= 0) this.settledCells.delete(ck); else this.settledCells.set(ck, m);
   }
 
   /** Cached structural voxel count of a coarse cell (non-weak voxels). O(1). */
@@ -125,12 +134,15 @@ export class VoxelGrid {
     const DY = CELL_SPAN, DZ = CELL_SPAN * CELL_SPAN;
     // a cell bears load only if its (cached) structural voxel count clears minCellMass
     const bears = (ck: number) => { const m = this.cellMass(ck); return m > 0 && m >= minCellMass; };
+    // a settled cell (parked/decor props, settled rubble) is ANCHORED like the ground — it never falls and
+    // it can pass support on — so small non-structural decor isn't flagged just for being below the mass floor.
+    const anchored = (ck: number) => this.settledCells.has(ck) || bears(ck);
 
     const buckets: number[][] = [[]];
     for (const [ck] of this.byCell) {
       const cy = Math.floor(ck / CELL_SPAN) % CELL_SPAN - CELL_BIAS;
       if (cy !== 0) continue;
-      if (bears(ck)) buckets[0].push(ck); // ground-level load-bearing cell (structural + enough mass)
+      if (anchored(ck)) buckets[0].push(ck); // ground-level anchor (load-bearing mass OR settled decor)
     }
     const done = new Set<number>();
     for (let o = 0; o <= maxOverhang; o++) {
@@ -140,12 +152,15 @@ export class VoxelGrid {
         const ck = b[i];
         if (done.has(ck)) continue;
         done.add(ck);
-        // A reached cell that's too thin stays up (it isn't in `fall`) but can't pass load further —
-        // so a sliver holds only itself, never the mass above/beside it.
-        if (!bears(ck)) continue;
-        const up = ck + DY;
-        if (this.byCell.has(up) && !done.has(up)) b.push(up); // cell resting on top: same overhang
-        if (o + 1 <= maxOverhang) {
+        // Only a cell that clears the mass floor can hold the STOREY DIRECTLY ABOVE it — this is what
+        // stops a whittled sliver from suspending a tower (minCellMass). But a thin cell STILL holds its
+        // lateral neighbours (attached structure — a wall corner, a 1-voxel edge slice at a cell boundary),
+        // so an intact building's boundary slivers don't false-fall.
+        if (anchored(ck)) {
+          const up = ck + DY;
+          if (this.byCell.has(up) && !done.has(up)) b.push(up); // cell resting on top: same overhang
+        }
+        if (o + 1 <= maxOverhang) {                             // lateral support from ANY reached cell, 1 overhang each
           let nb = buckets[o + 1];
           if (!nb) { nb = []; buckets[o + 1] = nb; }
           if (this.byCell.has(ck + 1) && !done.has(ck + 1)) nb.push(ck + 1);
@@ -156,7 +171,7 @@ export class VoxelGrid {
       }
     }
     const fall: number[] = [];
-    for (const ck of this.byCell.keys()) if (!done.has(ck)) fall.push(ck);
+    for (const ck of this.byCell.keys()) if (!done.has(ck) && !this.settledCells.has(ck)) fall.push(ck); // settled decor never "falls"
     return fall;
   }
 
@@ -223,19 +238,25 @@ export class VoxelGrid {
     return false;
   }
 
-  /** Voxel keys inside a 32³ collider chunk, gathered from the coarse cell index (32/8 = 4 cells per
-   *  axis). O(voxels present), not O(32768) — a carved/sparse chunk costs a handful of Set walks
-   *  instead of 32768 hash probes, which is the hot path of collider rebuilds during destruction. */
-  chunkVoxelKeys(cx: number, cy: number, cz: number): number[] {
-    const bx = cx * 4, by = cy * 4, bz = cz * 4;
+  /** Voxel keys inside a chunk, gathered from the coarse 8-voxel cell index (`cells` cells per axis).
+   *  Default 4 → a 32³ collider chunk (32/8); pass 8 for a 64³ render chunk (see meshChunkVoxelKeys).
+   *  O(voxels present), not O(chunk volume) — a carved/sparse chunk costs a handful of Set walks instead
+   *  of tens of thousands of hash probes, which is the hot path of rebuilds during destruction. */
+  chunkVoxelKeys(cx: number, cy: number, cz: number, cells = 4): number[] {
+    const bx = cx * cells, by = cy * cells, bz = cz * cells;
     const out: number[] = [];
-    for (let dx = 0; dx < 4; dx++)
-      for (let dy = 0; dy < 4; dy++)
-        for (let dz = 0; dz < 4; dz++) {
+    for (let dx = 0; dx < cells; dx++)
+      for (let dy = 0; dy < cells; dy++)
+        for (let dz = 0; dz < cells; dz++) {
           const s = this.byCell.get(cellOf(bx + dx, by + dy, bz + dz));
           if (s) for (const k of s) out.push(k);
         }
     return out;
+  }
+
+  /** Voxel keys inside a 64³ RENDER chunk (MESH_CHUNK/CCELL = 8 cells per axis). */
+  meshChunkVoxelKeys(cx: number, cy: number, cz: number): number[] {
+    return this.chunkVoxelKeys(cx, cy, cz, 8);
   }
 
   /** Adds one hit of bullet damage to a voxel and returns its new accumulated total. */
@@ -248,7 +269,8 @@ export class VoxelGrid {
 
   /** Marks a voxel as settled rubble (an anchor for support, like the ground). */
   markSettled(x: number, y: number, z: number): void {
-    this.settled.add(packKey(x, y, z));
+    const k = packKey(x, y, z);
+    if (!this.settled.has(k)) { this.settled.add(k); this.bumpSettledCell(cellKey(x, y, z), 1); }
   }
 
   isSettled(x: number, y: number, z: number): boolean {
@@ -278,6 +300,7 @@ export class VoxelGrid {
     this.cells.clear();
     this.damage.clear();
     this.settled.clear();
+    this.settledCells.clear();
     this.weakVoxels.clear();
     this.byCell.clear();
     this.massByCell.clear();

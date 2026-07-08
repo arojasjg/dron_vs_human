@@ -30,6 +30,15 @@ export const DEBRIS_SLEEP_DESPAWN = 1.4;
 export const AIR_DENSITY = 1.2;
 export const DEFAULT_WIND = { x: 1.0, y: 0, z: 0.5 };
 
+// Carve energy of the player's repeatable EXPLOSIVE weapons (grenade / grenade-launcher rocket /
+// sandbox cannon). This `power` feeds explode()→carveSphere, so it scales ONLY the STRUCTURAL
+// destruction (and the physics impulse) — the anti-PLAYER blast lethality scales with the blast
+// RADIUS (see game.ts explodeAt), NOT power. So WEAPON_BLAST_MUL tones down how fast weapons level
+// buildings while leaving them exactly as deadly to players. Mega-bomb / kamikaze / gas-tank blasts
+// call explodeAt directly with their own power and are deliberately NOT affected (they stay dramatic).
+export const BLAST_POWER = { grenade: 560, rocket: 760, cannon: 1000 } as const;
+export const WEAPON_BLAST_MUL = 0.55; // ~45% less structural destruction → buildings survive longer
+
 // Interactive "hero" debris: a rigid chunk only affects gameplay once its kinetic energy
 // (½·m·v²) clears this bar — so fast/heavy shrapnel hurts, slow rubble on the ground does not.
 export const DEBRIS_IMPACT_KE = 180;   // joules
