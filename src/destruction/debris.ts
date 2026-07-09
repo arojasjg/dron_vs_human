@@ -34,6 +34,10 @@ const DEBRIS_MAX_AGE = 7;
 export class DebrisSystem {
   private readonly pools = new Map<MaterialId, MatPool>();
   private readonly active: Debris[] = [];
+  // Reused per-frame scratch so impacts()/update() allocate NOTHING on the hot path — allocation churn
+  // during destruction was triggering GC pauses (perf.log: cpu worstMs 100-142ms unattributed to any phase).
+  private readonly _impacts: { x: number; y: number; z: number; ke: number }[] = [];
+  private readonly _dirtyPools = new Set<MatPool>();
   /** Max simultaneously active debris; lowered by the perf governor under load. */
   cap = MAX_DEBRIS;
 
@@ -51,7 +55,11 @@ export class DebrisSystem {
       });
       const mesh = new THREE.InstancedMesh(geo, mat, capacity);
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      mesh.castShadow = true;
+      // Debris does NOT cast shadows: 48 fast MOVING cubes would force the shadow map to re-render every
+      // frame during destruction (perf.log showed gpu 47-56ms / fps 30-40 while destroying). With static-
+      // only shadow casters the map refreshes on the throttled schedule instead. Rubble already does this;
+      // small tumbling cubes barely read as shadows anyway. Keep receiveShadow so they sit in the scene's.
+      mesh.castShadow = false;
       mesh.receiveShadow = true;
       mesh.frustumCulled = false;
       mesh.count = capacity;
@@ -71,13 +79,17 @@ export class DebrisSystem {
   /** Snapshot of each active chunk's world position and kinetic energy (½·m·v²) — fed to the
    *  interactive-impact resolver so fast/heavy chunks can hurt drones and set off gas tanks. */
   impacts(): { x: number; y: number; z: number; ke: number }[] {
-    const out: { x: number; y: number; z: number; ke: number }[] = [];
-    for (const d of this.active) {
+    const out = this._impacts;
+    out.length = this.active.length; // keep pooled objects at retained indices; only grow when debris count rises
+    for (let i = 0; i < this.active.length; i++) {
+      const d = this.active[i];
       const v = d.body.linvel();
       const t = d.body.translation();
       const size = d.half * 2;
       const mass = MATERIALS[d.material].density * size * size * size;
-      out.push({ x: t.x, y: t.y, z: t.z, ke: 0.5 * mass * (v.x * v.x + v.y * v.y + v.z * v.z) });
+      let o = out[i] as { x: number; y: number; z: number; ke: number } | undefined;
+      if (!o) { o = { x: 0, y: 0, z: 0, ke: 0 }; out[i] = o; }
+      o.x = t.x; o.y = t.y; o.z = t.z; o.ke = 0.5 * mass * (v.x * v.x + v.y * v.y + v.z * v.z);
     }
     return out;
   }
@@ -144,7 +156,7 @@ export class DebrisSystem {
   }
 
   update(dt: number): void {
-    const dirty = new Set<MatPool>();
+    const dirty = this._dirtyPools; dirty.clear(); // reused: no per-frame Set allocation
     for (let i = this.active.length - 1; i >= 0; i--) {
       const d = this.active[i];
       d.age += dt;

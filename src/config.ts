@@ -20,11 +20,13 @@ export function maxPhysicsSteps(lastPhysMs: number): number {
 // particle layer carries the fine dust/mass. These are the CEILING: the perf governor scales the live
 // cap by the frame-rate budget (debris.cap = MAX_DEBRIS × budget), so raising them makes destruction
 // look richer when there's headroom and still auto-throttles on a weak GPU — the 60fps floor holds.
-// 48→96 / 12→20: physics measured cheap (~1.2ms/frame for 54 bodies, no tunneling at these speeds) after
-// the collapse-solve cache + off-thread collider cook freed CPU — so more rigid rubble reads as richer
-// destruction, and the governor still scales the live cap down by fps so the 60fps floor holds.
-export const MAX_DEBRIS = 96;
-export const MAX_DEBRIS_PER_EVENT = 20;
+// 96→48 / 20→12: perf.log on the TRIPLED town showed world.step spiking to 25-48 ms while destroying
+// (phys worstMs, with 39-96 rigid bodies) — the old "96 = cheap" was measured on the small map before the
+// city grew (more building colliders for the debris to grind against). Halving the rigid ceiling + the
+// per-event spawn burst cuts the physics + spawn spikes; the GPU particle layer still carries the visual
+// mass, so destruction still reads rich. The governor scales the LIVE cap down further under load.
+export const MAX_DEBRIS = 48;
+export const MAX_DEBRIS_PER_EVENT = 12;
 export const DEBRIS_SLEEP_DESPAWN = 1.4;
 
 export const AIR_DENSITY = 1.2;

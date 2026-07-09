@@ -4,12 +4,17 @@
 // This is what keeps the "alto" look (IBL + shadows) near 60 fps without dropping the whole preset.
 // Pure so it unit-tests; the caller debounces the actual setPixelRatio (a drawing-buffer realloc).
 
-export const RES_MIN = 0.55; // never below 55% linear (≈30% of the pixels) — past this it's too soft
+export const RES_MIN = 0.42; // floor: 0.42 linear ≈ 18% of the pixels. Low enough that dynamic-res alone can
+// rescue a heavy GPU (fill ∝ scale²: a 90 ms frame × 0.42² ≈ 16 ms ≈ 60 fps) WITHOUT dropping shadows/IBL.
+// Blurry under extreme load, but the 60 fps floor is the priority; it grows back the moment there's headroom.
 export const RES_MAX = 1;
 
 // GPU-time controller targets (ms of real render time, from EXT_disjoint_timer_query):
-export const BUDGET_MS = 14;   // aim under this → ~60 fps with CPU headroom
-export const GROW_MS = 11;     // only grow resolution back when comfortably under budget
+export const BUDGET_MS = 12;   // aim GPU under this → holds 60fps with CPU headroom (perf.log showed the aerial
+                               // city view pinned at ~52fps with gpu 11-15ms and res only easing to ~0.7; a
+                               // tighter target trims resolution a touch sooner to reach 60 — recompile-free,
+                               // unlike a preset drop). Blurrier under a heavy aerial view, but 60 is the floor.
+export const GROW_MS = 10;     // only grow resolution back when comfortably under budget
 
 const clamp = (s: number) => Math.min(RES_MAX, Math.max(RES_MIN, +s.toFixed(3)));
 

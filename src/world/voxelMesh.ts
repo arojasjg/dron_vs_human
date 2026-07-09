@@ -67,13 +67,16 @@ export class VoxelMesher {
     this.detailUniform.value = on ? 1 : 0;
   }
 
+  /** Number of chunk InstancedMeshes currently in the scene (perf instrumentation). */
+  get meshCount(): number { return this.group.children.length; }
+
   /** Full rebuild — used at load time and after stamping prefabs. */
   rebuild(grid: VoxelGrid): void {
     for (const m of this.chunks.values()) for (const mesh of m.values()) this.disposeMesh(mesh);
     this.chunks.clear();
 
     const buckets = new Map<number, number[]>();
-    for (const key of grid.cells.keys()) {
+    for (const key of grid.keys()) {
       const [x, y, z] = unpackKey(key);
       const ck = packKey(meshChunkCoord(x), meshChunkCoord(y), meshChunkCoord(z));
       let b = buckets.get(ck);
@@ -91,7 +94,7 @@ export class VoxelMesher {
 
   private build(ck: number, grid: VoxelGrid, keys: number[]): void {
     const matIdx = new Uint8Array(keys.length);
-    for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(grid.cells.get(keys[i])!);
+    for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(grid.materialAt(keys[i])!);
     this.applyCooked(ck, cookMeshChunk(keys, matIdx)); // pure cook (the big part) → build the meshes
   }
 

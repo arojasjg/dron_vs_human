@@ -28,7 +28,7 @@ export class HeightField {
 
   rebuild(grid: VoxelGrid): void {
     this.data.fill(0);
-    for (const key of grid.cells.keys()) {
+    for (const key of grid.keys()) {
       const [x, y, z] = unpackKey(key);
       // mark every cell the voxel's full extent overlaps, so thin walls leave no gaps
       const cx0 = Math.floor((x * VOXEL - ORIGIN) / CELL);

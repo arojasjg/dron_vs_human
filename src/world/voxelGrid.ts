@@ -1,5 +1,5 @@
 import { VOXEL } from "../config";
-import type { MaterialId } from "./materials";
+import { MATERIAL_ORDER, type MaterialId } from "./materials";
 
 const BIAS = 512;
 const BITS = 10;
@@ -27,6 +27,18 @@ export function unpackKey(key: number): [number, number, number] {
   return [x, y, z];
 }
 
+// --- Chunked-dense storage. The world is 1024³ addressable but only ~0.1% filled, so instead of one Map
+// with a JS object per voxel (~75 MB for cells + byCell + weakVoxels — the dominant heap cost, which set
+// the length of every GC pause), voxels live in a Uint8Array per non-empty 32³ chunk (~10-16 MB total).
+// Byte = 0 (empty) | (materialIndex+1) in bits 0‑6 | weak in bit 7. `>> 5` is the arithmetic shift form of
+// Math.floor(v/32) (works for negatives); `& 31` is the matching local coordinate. ---
+const SC = 32;                 // voxels per storage-chunk axis
+const SC3 = SC * SC * SC;      // 32768
+const scKeyOf = (x: number, y: number, z: number) => packKey(x >> 5, y >> 5, z >> 5);
+const localIdx = (x: number, y: number, z: number) => (x & 31) | ((y & 31) << 5) | ((z & 31) << 10);
+const MAT_BYTE = new Map<MaterialId, number>(MATERIAL_ORDER.map((m, i) => [m, i + 1])); // 1..N; 0 = empty
+const WEAK = 0x80;
+
 export interface RayHit {
   /** Voxel that was hit. */
   vx: number;
@@ -41,7 +53,16 @@ export interface RayHit {
 }
 
 export class VoxelGrid {
-  readonly cells = new Map<number, MaterialId>();
+  /** Material bytes, one Uint8Array(32768) per non-empty 32³ storage chunk. Freed when a chunk empties. */
+  private readonly chunks = new Map<number, Uint8Array>();
+  /** Voxel count per storage chunk — lets a chunk be dropped the moment it empties (destroying a building
+   *  reclaims its memory) and makes chunkNonEmpty O(1). */
+  private readonly chunkFill = new Map<number, number>();
+  /** Voxel count per coarse 8³ cell. Replaces the old `byCell` Map<Set> (which held all 1.4M voxel refs,
+   *  ~30 MB) for the has()/keys() membership the collapse solver needs; the actual voxel keys of a cell are
+   *  recovered by scanning that cell's 512 bytes on demand (cellVoxelKeys). */
+  private readonly cellFill = new Map<number, number>();
+  private voxelCount = 0;
   /** Accumulated bullet damage per voxel; an entry only exists once a voxel is chipped. */
   private readonly damage = new Map<number, number>();
   /** Voxels deposited by settled rubble; they act as anchors so a debris pile is stable. */
@@ -50,14 +71,9 @@ export class VoxelGrid {
    *  (like the ground) so small non-structural decor — trees, lampposts, bins, litter — never registers
    *  as a "floating" cell just because it holds fewer voxels than the load-bearing mass threshold. */
   private readonly settledCells = new Map<number, number>();
-  /** Non-load-bearing voxels (bolted-on fire-escapes): supported BY the building but never a ground
-   *  ANCHOR themselves, so a thin fire-escape can't float a building whose real structure is gone. */
-  private readonly weakVoxels = new Set<number>();
-  /** 3D cell index (coarse cell → voxel keys) for fast regional collection. */
-  private readonly byCell = new Map<number, Set<number>>();
   /** Cached structural (non-weak) voxel count per cell — maintained incrementally at every mutation so
    *  the collapse solver reads it in O(1) instead of re-summing every city voxel each re-solve (the
-   *  dominant cost of a big collapse). Invariant: massByCell[ck] == |byCell[ck] \ weakVoxels|. */
+   *  dominant cost of a big collapse). */
   private readonly massByCell = new Map<number, number>();
   /** Keys of voxels DESTROYED since the last world-gen baseline — the compact "destruction diff" a late
    *  joiner needs to reconcile its pristine (seed-built) world with the room's current state. Reset by
@@ -65,36 +81,85 @@ export class VoxelGrid {
   readonly removedSinceGen = new Set<number>();
 
   get(x: number, y: number, z: number): MaterialId | undefined {
-    return this.cells.get(packKey(x, y, z));
+    const c = this.chunks.get(scKeyOf(x, y, z));
+    if (c === undefined) return undefined;
+    const b = c[localIdx(x, y, z)];
+    return b === 0 ? undefined : MATERIAL_ORDER[(b & 0x7f) - 1];
   }
 
   has(x: number, y: number, z: number): boolean {
-    return this.cells.has(packKey(x, y, z));
+    const c = this.chunks.get(scKeyOf(x, y, z));
+    return c !== undefined && c[localIdx(x, y, z)] !== 0;
+  }
+
+  // --- Storage-neutral read API. External code (cook/mesh/collider/heightField/game/tests) goes through
+  // these instead of touching the backing store directly, so the storage layer stays swappable. ---
+
+  /** Iterates the packed key of every solid voxel (full scan; used by load/save/full-rebuild, not per-frame). */
+  *keys(): IterableIterator<number> {
+    for (const [sk, c] of this.chunks) {
+      const [scx, scy, scz] = unpackKey(sk);
+      const ox = scx * SC, oy = scy * SC, oz = scz * SC;
+      for (let li = 0; li < SC3; li++) {
+        if (c[li] !== 0) yield packKey(ox + (li & 31), oy + ((li >> 5) & 31), oz + (li >> 10));
+      }
+    }
+  }
+
+  /** Iterates [packedKey, material] for every solid voxel. */
+  *entries(): IterableIterator<[number, MaterialId]> {
+    for (const [sk, c] of this.chunks) {
+      const [scx, scy, scz] = unpackKey(sk);
+      const ox = scx * SC, oy = scy * SC, oz = scz * SC;
+      for (let li = 0; li < SC3; li++) {
+        const b = c[li];
+        if (b !== 0) yield [packKey(ox + (li & 31), oy + ((li >> 5) & 31), oz + (li >> 10)), MATERIAL_ORDER[(b & 0x7f) - 1]];
+      }
+    }
+  }
+
+  /** Material of a voxel by its packed key (undefined if empty). */
+  materialAt(key: number): MaterialId | undefined {
+    const [x, y, z] = unpackKey(key);
+    return this.get(x, y, z);
   }
 
   set(x: number, y: number, z: number, material: MaterialId): void {
-    const k = packKey(x, y, z);
-    const isNew = !this.cells.has(k);
-    this.cells.set(k, material);
-    const ck = cellKey(x, y, z);
-    let s = this.byCell.get(ck);
-    if (!s) { s = new Set(); this.byCell.set(ck, s); }
-    s.add(k);
-    if (isNew && !this.weakVoxels.has(k)) this.bumpMass(ck, 1); // a new structural voxel adds cell mass
+    const sk = scKeyOf(x, y, z);
+    let c = this.chunks.get(sk);
+    if (c === undefined) { c = new Uint8Array(SC3); this.chunks.set(sk, c); }
+    const li = localIdx(x, y, z);
+    const prev = c[li];
+    c[li] = MAT_BYTE.get(material)! | (prev & WEAK); // overwrite material, keep any weak flag (set never touched weakness)
+    if (prev === 0) { // a brand-new voxel
+      this.voxelCount++;
+      this.chunkFill.set(sk, (this.chunkFill.get(sk) ?? 0) + 1);
+      const ck = cellKey(x, y, z);
+      this.cellFill.set(ck, (this.cellFill.get(ck) ?? 0) + 1);
+      this.bumpMass(ck, 1); // a new (structural — new voxels are never weak) voxel adds cell mass
+    }
   }
 
   remove(x: number, y: number, z: number): boolean {
+    const sk = scKeyOf(x, y, z);
+    const c = this.chunks.get(sk);
+    if (c === undefined) return false;
+    const li = localIdx(x, y, z);
+    const b = c[li];
+    if (b === 0) return false;
     const k = packKey(x, y, z);
     const ck = cellKey(x, y, z);
-    if (this.cells.has(k) && !this.weakVoxels.has(k)) this.bumpMass(ck, -1); // structural voxel leaves
+    if ((b & WEAK) === 0) this.bumpMass(ck, -1); // structural voxel leaves
     this.damage.delete(k);
     if (this.settled.delete(k)) this.bumpSettledCell(ck, -1);
-    this.weakVoxels.delete(k);
-    const s = this.byCell.get(ck);
-    if (s) { s.delete(k); if (s.size === 0) this.byCell.delete(ck); }
-    const existed = this.cells.delete(k);
-    if (existed) this.removedSinceGen.add(k); // record the destruction for late-join reconciliation
-    return existed;
+    c[li] = 0;
+    this.voxelCount--;
+    const cf = (this.cellFill.get(ck) ?? 1) - 1;
+    if (cf <= 0) this.cellFill.delete(ck); else this.cellFill.set(ck, cf);
+    const kf = (this.chunkFill.get(sk) ?? 1) - 1;
+    if (kf <= 0) { this.chunkFill.delete(sk); this.chunks.delete(sk); } else this.chunkFill.set(sk, kf);
+    this.removedSinceGen.add(k); // record the destruction for late-join reconciliation
+    return true;
   }
 
   /** Marks the current grid as the world-gen baseline: forget window/door cuts so removedSinceGen
@@ -114,7 +179,6 @@ export class VoxelGrid {
   /** Cached structural voxel count of a coarse cell (non-weak voxels). O(1). */
   cellMass(ck: number): number { return this.massByCell.get(ck) ?? 0; }
 
-  /** Collects solid voxels inside the box [x0,x1]×[y0,y1]×[z0,z1]. */
   /**
    * COARSE STRUCTURAL SOLVE over the cell graph: support starts at ground cells (cy 0) and travels
    * up (weight 0) and sideways (weight 1, up to maxOverhang cells). Returns the keys of every solid
@@ -139,7 +203,7 @@ export class VoxelGrid {
     const anchored = (ck: number) => this.settledCells.has(ck) || bears(ck);
 
     const buckets: number[][] = [[]];
-    for (const [ck] of this.byCell) {
+    for (const ck of this.cellFill.keys()) {
       const cy = Math.floor(ck / CELL_SPAN) % CELL_SPAN - CELL_BIAS;
       if (cy !== 0) continue;
       if (anchored(ck)) buckets[0].push(ck); // ground-level anchor (load-bearing mass OR settled decor)
@@ -158,20 +222,20 @@ export class VoxelGrid {
         // so an intact building's boundary slivers don't false-fall.
         if (anchored(ck)) {
           const up = ck + DY;
-          if (this.byCell.has(up) && !done.has(up)) b.push(up); // cell resting on top: same overhang
+          if (this.cellFill.has(up) && !done.has(up)) b.push(up); // cell resting on top: same overhang
         }
         if (o + 1 <= maxOverhang) {                             // lateral support from ANY reached cell, 1 overhang each
           let nb = buckets[o + 1];
           if (!nb) { nb = []; buckets[o + 1] = nb; }
-          if (this.byCell.has(ck + 1) && !done.has(ck + 1)) nb.push(ck + 1);
-          if (this.byCell.has(ck - 1) && !done.has(ck - 1)) nb.push(ck - 1);
-          if (this.byCell.has(ck + DZ) && !done.has(ck + DZ)) nb.push(ck + DZ);
-          if (this.byCell.has(ck - DZ) && !done.has(ck - DZ)) nb.push(ck - DZ);
+          if (this.cellFill.has(ck + 1) && !done.has(ck + 1)) nb.push(ck + 1);
+          if (this.cellFill.has(ck - 1) && !done.has(ck - 1)) nb.push(ck - 1);
+          if (this.cellFill.has(ck + DZ) && !done.has(ck + DZ)) nb.push(ck + DZ);
+          if (this.cellFill.has(ck - DZ) && !done.has(ck - DZ)) nb.push(ck - DZ);
         }
       }
     }
     const fall: number[] = [];
-    for (const ck of this.byCell.keys()) if (!done.has(ck) && !this.settledCells.has(ck)) fall.push(ck); // settled decor never "falls"
+    for (const ck of this.cellFill.keys()) if (!done.has(ck) && !this.settledCells.has(ck)) fall.push(ck); // settled decor never "falls"
     return fall;
   }
 
@@ -194,7 +258,7 @@ export class VoxelGrid {
     const NB = [1, -1, DY, -DY, DZ, -DZ];
     const seen = new Set<number>();
     const out: number[] = [];
-    for (const start of this.byCell.keys()) {
+    for (const start of this.cellFill.keys()) {
       if (seen.has(start)) continue;
       // flood one building (connected island of cells)
       const comp: number[] = [];
@@ -202,7 +266,7 @@ export class VoxelGrid {
       while (stack.length) {
         const ck = stack.pop()!;
         comp.push(ck);
-        for (const d of NB) { const nk = ck + d; if (this.byCell.has(nk) && !seen.has(nk)) { seen.add(nk); stack.push(nk); } }
+        for (const d of NB) { const nk = ck + d; if (this.cellFill.has(nk) && !seen.has(nk)) { seen.add(nk); stack.push(nk); } }
       }
       // bearing cross-section per level
       const area = new Map<number, number>();
@@ -222,34 +286,52 @@ export class VoxelGrid {
     return out;
   }
 
-  /** Snapshot of the voxel keys inside a coarse cell (so they can be removed while iterating). */
-  cellVoxelKeys(cellKey: number): number[] {
-    const s = this.byCell.get(cellKey);
-    return s ? [...s] : [];
-  }
-
-  /** Cheap test of whether a 32³ collider chunk holds any voxel (32/8 = 4 cells per axis). */
-  chunkNonEmpty(cx: number, cy: number, cz: number): boolean {
-    const bx = cx * 4, by = cy * 4, bz = cz * 4;
-    for (let dx = 0; dx < 4; dx++)
-      for (let dy = 0; dy < 4; dy++)
-        for (let dz = 0; dz < 4; dz++)
-          if (this.byCell.has(cellOf(bx + dx, by + dy, bz + dz))) return true;
-    return false;
-  }
-
-  /** Voxel keys inside a chunk, gathered from the coarse 8-voxel cell index (`cells` cells per axis).
-   *  Default 4 → a 32³ collider chunk (32/8); pass 8 for a 64³ render chunk (see meshChunkVoxelKeys).
-   *  O(voxels present), not O(chunk volume) — a carved/sparse chunk costs a handful of Set walks instead
-   *  of tens of thousands of hash probes, which is the hot path of rebuilds during destruction. */
-  chunkVoxelKeys(cx: number, cy: number, cz: number, cells = 4): number[] {
-    const bx = cx * cells, by = cy * cells, bz = cz * cells;
+  /** Voxel keys inside a coarse 8³ cell (so they can be removed while iterating). Scans the cell's 512
+   *  bytes — the whole cell lies inside one 32³ storage chunk (8 divides 32, both grids are aligned). */
+  cellVoxelKeys(ck: number): number[] {
+    const cx = (ck % CELL_SPAN) - CELL_BIAS;
+    const cy = (Math.floor(ck / CELL_SPAN) % CELL_SPAN) - CELL_BIAS;
+    const cz = Math.floor(ck / (CELL_SPAN * CELL_SPAN)) - CELL_BIAS;
+    const bx = cx * CCELL, by = cy * CCELL, bz = cz * CCELL;
+    const c = this.chunks.get(packKey(bx >> 5, by >> 5, bz >> 5));
+    if (c === undefined) return [];
     const out: number[] = [];
-    for (let dx = 0; dx < cells; dx++)
-      for (let dy = 0; dy < cells; dy++)
-        for (let dz = 0; dz < cells; dz++) {
-          const s = this.byCell.get(cellOf(bx + dx, by + dy, bz + dz));
-          if (s) for (const k of s) out.push(k);
+    for (let dz = 0; dz < CCELL; dz++)
+      for (let dy = 0; dy < CCELL; dy++)
+        for (let dx = 0; dx < CCELL; dx++) {
+          const x = bx + dx, y = by + dy, z = bz + dz;
+          if (c[localIdx(x, y, z)] !== 0) out.push(packKey(x, y, z));
+        }
+    return out;
+  }
+
+  /** Cheap test of whether a 32³ collider chunk holds any voxel. A collider chunk IS one storage chunk
+   *  (both 32³, 32‑aligned), and empty chunks are dropped, so presence ⟺ non-empty. O(1). */
+  chunkNonEmpty(cx: number, cy: number, cz: number): boolean {
+    return this.chunks.has(packKey(cx, cy, cz));
+  }
+
+  /** Voxel keys inside a chunk. `cells` = coarse 8³ cells per axis: 4 → a 32³ collider chunk (one storage
+   *  chunk), 8 → a 64³ render chunk (2×2×2 storage chunks). Scans only the storage chunks that overlap the
+   *  region (absent ones skipped), reconstructing keys from non-zero bytes — a cache-friendly Uint8Array
+   *  walk instead of pointer-chasing Sets. */
+  chunkVoxelKeys(cx: number, cy: number, cz: number, cells = 4): number[] {
+    const n = (cells * CCELL) / SC; // storage chunks per axis: 1 (collider) or 2 (mesh)
+    const out: number[] = [];
+    for (let az = 0; az < n; az++)
+      for (let ay = 0; ay < n; ay++)
+        for (let ax = 0; ax < n; ax++) {
+          const scx = cx * n + ax, scy = cy * n + ay, scz = cz * n + az;
+          const c = this.chunks.get(packKey(scx, scy, scz));
+          if (c === undefined) continue;
+          const ox = scx * SC, oy = scy * SC, oz = scz * SC;
+          for (let lz = 0; lz < SC; lz++) {
+            const zk = oz + lz, zi = lz << 10;
+            for (let ly = 0; ly < SC; ly++) {
+              const yk = oy + ly, yi = (ly << 5) | zi;
+              for (let lx = 0; lx < SC; lx++) if (c[lx | yi] !== 0) out.push(packKey(ox + lx, yk, zk));
+            }
+          }
         }
     return out;
   }
@@ -282,27 +364,45 @@ export class VoxelGrid {
   }
 
   get size(): number {
-    return this.cells.size;
+    return this.voxelCount;
   }
 
-  /** Marks every voxel in the box as NON-STRUCTURAL (a bolted-on element, e.g. an external fire-escape):
-   *  it can be held up by the building, but its own cells will not anchor the structure to the ground. */
+  /** Sizes of the internal bookkeeping structures — logged to perf.log. `weak` is 0 now (folded into the
+   *  material byte); `cell` is the lightweight per-cell fill count (the ~30 MB byCell Map<Set> is gone). */
+  get stats(): { vox: number; rem: number; set: number; setC: number; weak: number; dmg: number; cell: number; mass: number } {
+    return {
+      vox: this.voxelCount, rem: this.removedSinceGen.size, set: this.settled.size,
+      setC: this.settledCells.size, weak: 0, dmg: this.damage.size,
+      cell: this.cellFill.size, mass: this.massByCell.size,
+    };
+  }
+
+  /** Marks every EXISTING voxel in the box as NON-STRUCTURAL (a bolted-on element, e.g. an external
+   *  fire-escape): it can be held up by the building, but its own cells will not anchor the structure to
+   *  the ground. Called during world-gen AFTER the element's voxels are placed (the box is a generous
+   *  bound over exterior air; only real voxels carry the flag). */
   markWeakBox(x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): void {
-    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) {
-      const k = packKey(x, y, z);
-      // an existing structural voxel becoming weak loses its cell mass
-      if (this.cells.has(k) && !this.weakVoxels.has(k)) this.bumpMass(cellKey(x, y, z), -1);
-      this.weakVoxels.add(k);
-    }
+    for (let x = x0; x <= x1; x++)
+      for (let y = y0; y <= y1; y++)
+        for (let z = z0; z <= z1; z++) {
+          const c = this.chunks.get(scKeyOf(x, y, z));
+          if (c === undefined) continue;
+          const li = localIdx(x, y, z);
+          const b = c[li];
+          if (b === 0 || (b & WEAK) !== 0) continue; // no voxel, or already weak
+          c[li] = b | WEAK;
+          this.bumpMass(cellKey(x, y, z), -1); // a structural voxel becoming weak loses its cell mass
+        }
   }
 
   clear(): void {
-    this.cells.clear();
+    this.chunks.clear();
+    this.chunkFill.clear();
+    this.cellFill.clear();
+    this.voxelCount = 0;
     this.damage.clear();
     this.settled.clear();
     this.settledCells.clear();
-    this.weakVoxels.clear();
-    this.byCell.clear();
     this.massByCell.clear();
     this.removedSinceGen.clear();
   }

@@ -48,7 +48,7 @@ describe("structural collapse", () => {
     // deterministic: same seed → identical decorated building
     setWorldSeed(9); const a = new VoxelGrid(); buildBuilding(a, 0, 0, { W: 50, D: 50, FLOORS: 4 });
     setWorldSeed(9); const b = new VoxelGrid(); buildBuilding(b, 0, 0, { W: 50, D: 50, FLOORS: 4 });
-    expect(a.cells.size).toBe(b.cells.size);
+    expect(a.size).toBe(b.size);
   });
 
   it("the fix: a wide cantilever that the OLD budget (6) kept floating now falls at 2", () => {
@@ -176,10 +176,10 @@ describe("collapseTick — pure headless collapse (fixed-tick / harness-ready)",
 
   it("fully settles a gutted building to a stable grid (nothing left unsupported)", () => {
     setWorldSeed(7); const g = new VoxelGrid(); buildBuilding(g, 0, 0, { W: 44, D: 44, FLOORS: 5 });
-    const before = g.cells.size;
+    const before = g.size;
     for (let x = -4; x <= 22; x++) for (let y = 0; y <= 18; y++) for (let z = -4; z <= 48; z++) g.remove(x, y, z); // gut ~half the ground storey
     settle(g);
-    expect(g.cells.size).toBeLessThan(before);        // floors came down
+    expect(g.size).toBeLessThan(before);        // floors came down
     expect(g.fallenCells(2, 12)).toHaveLength(0);      // fully settled — nothing unsupported remains
     expect(g.pancakeCells(12, 0.5)).toHaveLength(0);   // and no pancake pinch remains
   });
@@ -189,7 +189,7 @@ describe("collapseTick — pure headless collapse (fixed-tick / harness-ready)",
     setWorldSeed(7); const a = new VoxelGrid(); buildBuilding(a, 0, 0, { W: 44, D: 44, FLOORS: 5 }); damage(a);
     setWorldSeed(7); const b = new VoxelGrid(); buildBuilding(b, 0, 0, { W: 44, D: 44, FLOORS: 5 }); damage(b);
     settle(a, 99); settle(b, 99);
-    expect(b.cells.size).toBe(a.cells.size);
-    expect([...b.cells.keys()].sort((p, q) => p - q)).toEqual([...a.cells.keys()].sort((p, q) => p - q));
+    expect(b.size).toBe(a.size);
+    expect([...b.keys()].sort((p, q) => p - q)).toEqual([...a.keys()].sort((p, q) => p - q));
   });
 });

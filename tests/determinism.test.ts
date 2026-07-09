@@ -44,7 +44,7 @@ function makeSim(roomSeed: number) {
       // path (fallen cells + seeded collapse debris) end-to-end, not just the initial carve.
       collapseTick(grid, pending, roomSeed, (x, y, z, mat, vx, vy, vz, rng) => debris.spawn(x, y, z, mat, vx, vy, vz, VOXEL / 2, rng), () => {}, () => {});
     },
-    initialCells: grid.cells.size,
+    initialCells: grid.size,
   };
 }
 
@@ -55,9 +55,9 @@ type Sim = ReturnType<typeof makeSim>;
 function hash(sim: Sim, includeDebris = true): number {
   let h = 0x811c9dc5 >>> 0;
   const mix = (v: number) => { h ^= v | 0; h = Math.imul(h, 0x01000193); };
-  const keys = [...sim.grid.cells.keys()].sort((a, b) => a - b);
+  const keys = [...sim.grid.keys()].sort((a, b) => a - b);
   mix(keys.length);
-  for (const k of keys) { mix(k); mix(MATERIAL_ORDER.indexOf(sim.grid.cells.get(k)!)); }
+  for (const k of keys) { mix(k); mix(MATERIAL_ORDER.indexOf(sim.grid.materialAt(k)!)); }
   if (includeDebris) {
     const rows = sim.debris.snapshot().map((d) => [
       MATERIAL_ORDER.indexOf(d.material),
@@ -84,7 +84,7 @@ describe("M0 — deterministic destruction core (divergence hash)", () => {
     const a = makeSim(1234); const b = makeSim(1234);
     runScript(a); runScript(b);
     // the scenario is non-trivial (it actually carved and threw debris)
-    expect(a.grid.cells.size).toBeLessThan(a.initialCells);
+    expect(a.grid.size).toBeLessThan(a.initialCells);
     expect(a.debrisSpawned).toBeGreaterThan(0);
     // and both worlds match exactly — grid AND live debris transforms
     expect(hash(b)).toBe(hash(a));

@@ -8,6 +8,11 @@ export class Rng {
   private s: number;
   constructor(seed: number) { this.s = (seed >>> 0) || 0x9e3779b9; }
 
+  /** Re-point this instance at a fresh seed (identical to constructing a new Rng with `seed`, since each
+   *  seed fully determines the state). Lets a hot loop reuse ONE Rng across thousands of per-voxel events
+   *  instead of allocating one each — the per-voxel draw sequence is byte-identical, just no GC churn. */
+  reseed(seed: number): this { this.s = (seed >>> 0) || 0x9e3779b9; return this; }
+
   /** Next float in [0,1). mulberry32 — identical math to build/prefabs.ts rand(). */
   next(): number {
     this.s = (this.s + 0x6d2b79f5) | 0;

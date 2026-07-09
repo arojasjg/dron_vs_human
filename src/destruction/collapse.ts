@@ -7,7 +7,11 @@ import { Rng, mix32, EVT } from "../engine/rng";
 export const CELL_OVERHANG = 2;    // lateral cantilever budget (2m cells) — an intact city stands at 2
 export const CELL_MIN_MASS = 12;   // a cell bears load only with ≥ this many structural voxels (sliver floor)
 export const PANCAKE_FRAC = 0.5;   // a storey with section < frac × mass-above pancakes the floors above
-export const COLLAPSE_BUDGET = 48; // cells drained per tick — spreads a building-wide collapse over frames
+export const COLLAPSE_BUDGET = 16; // cells drained per tick — spreads a building-wide collapse over frames.
+// Lowered 48→24: each drained cell dirties mesh chunks, so a big per-tick drain SPIKED both the collapse
+// step AND the following mesh rebuild in the same frame (measured in perf.log: collapse ~30ms + rebuild
+// ~14ms during destruction). Half the cells/tick halves both spikes and spreads the collapse over 2× the
+// frames (imperceptible slow-mo). Deterministic: same cells in the same sorted order, just fewer per tick.
 
 /** Called with a fallen voxel BEFORE it leaves the grid (game clears its impact decal + marks the chunk). */
 export type OnRemoved = (k: number, x: number, y: number, z: number) => void;
@@ -43,6 +47,7 @@ export function collapseTick(
     pendingFall.push(...fall);
   }
   const matCount = new Map<MaterialId, number>();
+  const cr = new Rng(0); // reseeded per voxel below — one instance instead of thousands of allocations (GC)
   let sx = 0, sy = 0, sz = 0, nn = 0, cubes = 0;
   const limit = Math.min(pendingFall.length, COLLAPSE_BUDGET);
   for (let ci = 0; ci < limit; ci++) {
@@ -57,7 +62,7 @@ export function collapseTick(
       // a few pooled CPU cubes (sparse) for close-up rubble; GPU debris carries the mass
       if (cubes < MAX_DEBRIS_PER_EVENT && ((x + y + z) & 7) === 0) {
         const c = VoxelGrid.center(x, y, z);
-        const cr = new Rng(mix32(worldSeed, EVT.COLLAPSE, k)); // per-voxel-key → deterministic rubble
+        cr.reseed(mix32(worldSeed, EVT.COLLAPSE, k)); // per-voxel-key → deterministic rubble
         if (spawnDebris(c.x, c.y, c.z, mat, cr.centered(0.8), -0.2, cr.centered(0.8), cr)) cubes++;
       }
     }

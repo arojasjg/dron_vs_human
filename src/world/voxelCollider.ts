@@ -30,7 +30,7 @@ export class VoxelCollider {
     this.bodies.clear();
 
     const buckets = new Map<number, number[]>();
-    for (const key of grid.cells.keys()) {
+    for (const key of grid.keys()) {
       const [x, y, z] = unpackKey(key);
       const ck = packKey(chunkCoord(x), chunkCoord(y), chunkCoord(z));
       let b = buckets.get(ck);
@@ -49,6 +49,10 @@ export class VoxelCollider {
   builtChunks(): IterableIterator<number> {
     return this.bodies.keys();
   }
+
+  /** How many collider chunks (static building bodies) are currently streamed in — perf instrumentation:
+   *  this is the static broadphase load that costs physics time even with no debris (moving-drone hitch). */
+  get chunkCount(): number { return this.bodies.size; }
 
   /** Removes one chunk's collider body (it's out of collision range). */
   removeChunk(cx: number, cy: number, cz: number): void {

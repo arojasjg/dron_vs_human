@@ -81,7 +81,7 @@ export function greedyBoxesFromKeys(keys: Iterable<number>): Box[] {
 
 /** Whole-grid greedy meshing (used by tests and the perf harness). */
 export function greedyBoxes(grid: VoxelGrid): Box[] {
-  return greedyBoxesFromKeys(grid.cells.keys());
+  return greedyBoxesFromKeys(grid.keys());
 }
 
 /**

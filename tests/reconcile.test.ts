@@ -16,11 +16,11 @@ describe("late-join grid reconciliation (removedSinceGen diff)", () => {
     // Late joiner: same seed → identical pristine world, then apply the peer's diff.
     setWorldSeed(12345);
     const joiner = new VoxelGrid(); buildDefaultScene(joiner); joiner.baselineGen();
-    expect(joiner.cells.size).toBeGreaterThan(played.cells.size); // starts pristine → MORE voxels (the desync)
+    expect(joiner.size).toBeGreaterThan(played.size); // starts pristine → MORE voxels (the desync)
     for (const k of played.removedSinceGen) { const [x, y, z] = unpackKey(k); joiner.remove(x, y, z); }
 
-    expect(joiner.cells.size).toBe(played.cells.size);
-    expect([...joiner.cells.keys()].sort((p, q) => p - q)).toEqual([...played.cells.keys()].sort((p, q) => p - q));
+    expect(joiner.size).toBe(played.size);
+    expect([...joiner.keys()].sort((p, q) => p - q)).toEqual([...played.keys()].sort((p, q) => p - q));
   });
 
   it("baselineGen() excludes world-gen window/door cuts from the diff", () => {
@@ -28,7 +28,7 @@ describe("late-join grid reconciliation (removedSinceGen diff)", () => {
     const g = new VoxelGrid(); buildDefaultScene(g); // cuts windows/doors via remove()
     g.baselineGen();
     expect(g.removedSinceGen.size).toBe(0); // gen cuts are forgotten → not synced as "destruction"
-    const first = g.cells.keys().next().value as number;
+    const first = g.keys().next().value as number;
     const [x, y, z] = unpackKey(first);
     g.remove(x, y, z);
     expect(g.removedSinceGen.size).toBe(1); // only real post-baseline destruction is tracked

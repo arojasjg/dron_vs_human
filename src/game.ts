@@ -99,6 +99,7 @@ export class Game {
   private lowFpsSec = 0;          // seconds of sustained low fps → triggers an adaptive quality drop
   private resScale = 1;           // current dynamic-resolution scale (fill-rate lever)
   private resTimer = 0;           // debounce so the drawing-buffer realloc doesn't thrash
+  private lastResChange = 0;      // time of the last render-scale realloc — rate-limits the drawing-buffer stall
   private gpuTimer!: GpuTimer;    // real GPU-ms of the render (drives dynamic resolution); set in ctor
   private shadowSince = 99;       // frames since the last shadow-map refresh (starts high → refresh frame 1)
   private readonly lastShadowPos = new THREE.Vector3(); // camera pos at the last refresh (movement gate)
@@ -147,7 +148,13 @@ export class Game {
   // collision LOD: only the building chunks within this many CHUNKs of the player carry physics
   // colliders. Keeps the active collider count (and the broadphase cost) independent of building
   // size — the static world doesn't all live in the physics engine at once.
-  private static readonly COLLIDER_RADIUS = 2;
+  // Radius 1 (was 2): perf.log showed that flying the DENSE tripled city put up to 78 chunks / 3474
+  // static colliders in the broadphase, and each streamed chunk forced Rapier to re-optimise it →
+  // phys worstMs 20-27 ms *with zero debris* (the "tirón al moverse"). A CHUNK is 32·VOXEL = 8 m, so
+  // radius 1 still always keeps the player's own chunk + one ring built (≥8 m of collider in every
+  // direction — a drone would need >500 m/s to out-run it), while cutting the collider cube 125→27
+  // chunks (~4.6×): fewer colliders in the broadphase AND far cheaper re-opts as chunks stream.
+  private static readonly COLLIDER_RADIUS = 1;
 
   // Four spread spawn points across the ground-floor lobby (the 4 quadrants), clear of the NW
   // stairwell and the NE gas tank. Players are assigned one by their network id. World coords.
@@ -161,8 +168,11 @@ export class Game {
   // renderMax/renderTotal are CPU SUBMIT time only (GPU work is async) — do NOT read them as GPU cost.
   // drawCalls/triangles + framesRendered are the honest signals: framesRendered===0 means the tab is
   // hidden (render skipped, worker-driven at 62Hz) so every fps/timing number is meaningless.
-  private prof = { settleMax: 0, settleTotal: 0, settleN: 0, spawnMax: 0, rebuildMax: 0, rebuildTotal: 0, physicsMax: 0, physicsTotal: 0, gpuMax: 0, gpuTotal: 0, renderMax: 0, renderTotal: 0, drawCalls: 0, triangles: 0, framesRendered: 0, framesSimulated: 0 };
-  private profZero(): typeof this.prof { return { settleMax: 0, settleTotal: 0, settleN: 0, spawnMax: 0, rebuildMax: 0, rebuildTotal: 0, physicsMax: 0, physicsTotal: 0, gpuMax: 0, gpuTotal: 0, renderMax: 0, renderTotal: 0, drawCalls: 0, triangles: 0, framesRendered: 0, framesSimulated: 0 }; }
+  private prof = { settleMax: 0, settleTotal: 0, settleN: 0, spawnMax: 0, rebuildMax: 0, rebuildTotal: 0, physicsMax: 0, physicsTotal: 0, gpuMax: 0, gpuTotal: 0, renderMax: 0, renderTotal: 0, colTotal: 0, colMax: 0, ctrlTotal: 0, ctrlMax: 0, projTotal: 0, projMax: 0, debrisTotal: 0, debrisMax: 0, fxTotal: 0, fxMax: 0, cpuTotal: 0, cpuMax: 0, frameTotal: 0, frameMax: 0, fpsMin: 999, drawCalls: 0, triangles: 0, framesRendered: 0, framesSimulated: 0 };
+  private profZero(): typeof this.prof { return { settleMax: 0, settleTotal: 0, settleN: 0, spawnMax: 0, rebuildMax: 0, rebuildTotal: 0, physicsMax: 0, physicsTotal: 0, gpuMax: 0, gpuTotal: 0, renderMax: 0, renderTotal: 0, colTotal: 0, colMax: 0, ctrlTotal: 0, ctrlMax: 0, projTotal: 0, projMax: 0, debrisTotal: 0, debrisMax: 0, fxTotal: 0, fxMax: 0, cpuTotal: 0, cpuMax: 0, frameTotal: 0, frameMax: 0, fpsMin: 999, drawCalls: 0, triangles: 0, framesRendered: 0, framesSimulated: 0 }; }
+  private perfLogT = 0;   // window timer for the per-second [PERF] console dump
+  private lastHeapMB = -1; // previous window's JS heap, to log the per-window growth (allocation-rate/GC proxy)
+  private readonly _dropScratch: number[] = []; // reused by streamColliders (every-frame) — no per-frame array alloc
 
   private time = 0;
   private acc = 0;
@@ -580,8 +590,15 @@ export class Game {
   private adaptiveQuality(dt: number): void {
     // Accumulate sustained-low time only while a lever remains (not yet fully floored at bajo + no detail).
     const flooredOut = this.quality === "bajo" && !this.voxelDetailOn;
-    if (this.fps < LOW_FPS && !flooredOut) this.lowFpsSec += dt;
-    else this.lowFpsSec = Math.max(0, this.lowFpsSec - dt);
+    // TRANSIENT destruction lag (the collapse solve, debris physics, a particle burst) must NOT trip the
+    // preset auto-downgrade: that permanently drops the user's visuals AND swaps materials, which forces
+    // three.js to RECOMPILE every shader — a ~1 s freeze — for a spike that passes in a second (measured
+    // in perf.log: a preset swap mid-collapse = a 1229 ms render frame). So only sustained low fps in a
+    // QUIET scene accumulates; the recompile-free resolution lever (dynamic-res, every 0.4 s) still
+    // defends the frame during destruction. Decays fast so a brief quiet dip doesn't creep toward a drop.
+    const busy = this.structureDirty || this.debris.count > 0 || this.pendingFall.length > 0;
+    if (this.fps < LOW_FPS && !flooredOut && !busy) this.lowFpsSec += dt;
+    else this.lowFpsSec = Math.max(0, this.lowFpsSec - dt * 2);
 
     const lever = nextPerfLever({
       fps: this.fps,
@@ -612,7 +629,7 @@ export class Game {
   }
 
   /** Interior-light budget by graphics preset (bajo → none, so weak GPUs aren't taxed by extra lights). */
-  private interiorLightBudget(): number { return this.quality === "bajo" ? 0 : this.quality === "medio" ? 4 : 8; }
+  private interiorLightBudget(): number { return this.quality === "bajo" ? 0 : this.quality === "medio" ? 2 : 8; }
 
   /** Creates the flashlight ONCE at intensity 0 (like the flash pool) so toggling it never changes the
    *  scene's light count → no one-time material recompile hitch. */
@@ -972,23 +989,29 @@ export class Game {
     const [pvx, pvy, pvz] = VoxelGrid.worldToVoxel(p.x, p.y, p.z);
     const pcx = chunkCoord(pvx), pcy = chunkCoord(pvy), pcz = chunkCoord(pvz);
     const R = Game.COLLIDER_RADIUS;
-    // TIME-budget the collider builds: each dense chunk's Rapier cuboids cost a few ms, so building a
-    // fixed 3/frame spikes when you fly into a NEW area ("jalón al cruzar esquinas"). Cap the per-frame
-    // collider work instead (less under governor load) → it streams over several frames, no hitch.
+    // Build AT MOST ONE collider chunk per frame while streaming (the initial full build is exempt).
+    // Adding a chunk's colliders forces Rapier to re-optimise the static broadphase on the NEXT world.step,
+    // and that cost scales with how many were added in the SAME step (the game measured 1 chunk ≈ no churn,
+    // 4 ≈ +14ms, 8 ≈ +25ms). Several-in-one-frame is exactly the "jalón al moverse" (perf.log: phys worstMs
+    // ~20ms with debris 0). One per frame keeps every re-opt tiny; the 16 m collider radius gives ample lead
+    // time to fill the bubble as the player crosses chunk boundaries.
     const _cs0 = performance.now();
-    const colMs = 2 * this.governor.budgetScale;
-
+    let built = 0;
     build:
     for (let cx = pcx - R; cx <= pcx + R; cx++)
       for (let cy = pcy - R; cy <= pcy + R; cy++)
         for (let cz = pcz - R; cz <= pcz + R; cz++) {
           if (this.collider.hasChunk(cx, cy, cz) || !this.grid.chunkNonEmpty(cx, cy, cz)) continue;
-          if (!initial && performance.now() - _cs0 > colMs) break build; // only time-check when about to build
+          if (!initial && built >= 1) break build; // one chunk/frame → the broadphase re-opt stays tiny
           this.collider.rebuildChunk(this.grid, cx, cy, cz);
+          built++;
         }
 
-    const far = R + 2; // hysteresis so chunks at the edge don't thrash in/out
-    const drop: number[] = [];
+    const far = R + 1; // hysteresis so chunks at the edge don't thrash in/out. R+1 (was R+2): perf.log showed
+    // the R+2 ring retained ~42 chunks / 2145 colliders even at R=1 (a 7³ region) — that big static set kept
+    // phys worstMs at 12-20 ms AND churned GC as chunks streamed. R+1 halves the retained set; one CHUNK (8 m)
+    // of hysteresis is ample to stop boundary thrash at drone speed.
+    const drop = this._dropScratch; drop.length = 0; // reused: streamColliders runs every frame → no per-frame array alloc
     for (const ck of this.collider.builtChunks()) {
       const [cx, cy, cz] = unpackKey(ck);
       if (Math.abs(cx - pcx) > far || Math.abs(cy - pcy) > far || Math.abs(cz - pcz) > far) drop.push(ck);
@@ -997,6 +1020,8 @@ export class Game {
       const [cx, cy, cz] = unpackKey(ck);
       this.collider.removeChunk(cx, cy, cz);
     }
+    const _cd = performance.now() - _cs0;
+    this.prof.colTotal += _cd; if (_cd > this.prof.colMax) this.prof.colMax = _cd;
   }
 
   private explodeAt(x: number, y: number, z: number, radius: number, power: number, broadcast = false, by = 0): void {
@@ -1074,7 +1099,7 @@ export class Game {
   /** Re-scans the grid for gas-tank clusters (call after building/loading). */
   private rebuildGasTanks(): void {
     const tankVox: Voxel[] = [];
-    for (const [key, mat] of this.grid.cells) if (mat === "gastank") tankVox.push(unpackKey(key));
+    for (const [key, mat] of this.grid.entries()) if (mat === "gastank") tankVox.push(unpackKey(key));
     this.gasTanks = connectedComponents(tankVox).map((vox) => {
       let sx = 0, sy = 0, sz = 0;
       for (const [x, y, z] of vox) { sx += x; sy += y; sz += z; }
@@ -1590,7 +1615,7 @@ export class Game {
 
   private save(): void {
     const arr: [number, number, number, string][] = [];
-    for (const [key, mat] of this.grid.cells) {
+    for (const [key, mat] of this.grid.entries()) {
       const [x, y, z] = unpackKey(key);
       arr.push([x, y, z, mat]);
     }
@@ -1616,11 +1641,17 @@ export class Game {
 
   private frame(): void {
     const now = performance.now();
-    let dt = (now - this.last) / 1000;
+    const rawDt = (now - this.last) / 1000; // TRUE frame time (unclamped) — the honest hitch size
+    let dt = rawDt;
     this.last = now;
     if (dt > 0.05) dt = 0.05;
     this.fps += ((1 / Math.max(dt, 1e-4)) - this.fps) * 0.1;
     this.time += dt;
+    // per-frame instrumentation for the [PERF] dump: real frame ms (avg + worst = the tirón) and the
+    // worst instantaneous fps in the window (a single 100 ms stall reads as fps 10 here, not the smoothed 58).
+    const _fms = rawDt * 1000;
+    this.prof.frameTotal += _fms; if (_fms > this.prof.frameMax) this.prof.frameMax = _fms;
+    const _ifps = 1 / Math.max(rawDt, 1e-4); if (_ifps < this.prof.fpsMin) this.prof.fpsMin = _ifps;
 
     this.acc += dt;
     let steps = 0;
@@ -1640,7 +1671,8 @@ export class Game {
     // Better to run slightly slow-mo for a frame than to freeze.
     if (this.acc > FIXED_DT) this.acc = 0;
 
-    this.player.update(dt, this.input);
+    const _tctrl = performance.now();
+    this.player.update(dt, this.input); // player controller — the drone's KinematicCharacterController queries the building colliders
     if (this.firing && this.input.locked) this.autoFire(); // hold LMB → machine-gun the primary weapon
     // fall damage (human, >1 storey) always — a human only exists in the combat modes anyway. Drone
     // ram-impact (fast into a wall) only in combat, so the sandbox doesn't punish flying/building.
@@ -1652,14 +1684,22 @@ export class Game {
       const dmg = droneImpactDamage(imp.speed, imp.blocked);
       if (dmg > 0) { this.damageDrone(dmg); this.hud.flash(`Impacto: ${dmg}`); }
     }
+    { const _cd = performance.now() - _tctrl; this.prof.ctrlTotal += _cd; if (_cd > this.prof.ctrlMax) this.prof.ctrlMax = _cd; }
     this.netUpdate(dt);
     if (this.mode === "dvh") this.checkMatchWin(); // detect an objective destroyed this frame
     this.streamColliders(); // keep building colliders only near the player (collision LOD)
     this.updateTankChain(dt);
+    // A projectile detonating in here calls explodeAt → carve + debris spawn + FX synchronously, so this is
+    // where the blast-FRAME hitch lives (perf.log showed cpu worstMs 85-290ms hidden inside "misc"). Timed
+    // separately so a spike is attributed to the blast rather than lumped as GC/untimed.
+    const _tpr = performance.now();
     this.projectiles.update(dt);
+    { const _pj = performance.now() - _tpr; this.prof.projTotal += _pj; if (_pj > this.prof.projMax) this.prof.projMax = _pj; }
     this.collapseStep(); // re-solve coarse support + drop a budget of fallen cells (progressive)
+    const _tdb = performance.now();
     this.debris.update(dt);
     this.applyDebrisImpacts(); // fast flying rubble hurts drones and sets off gas tanks
+    { const _db = performance.now() - _tdb; this.prof.debrisTotal += _db; if (_db > this.prof.debrisMax) this.prof.debrisMax = _db; }
     const _tg = performance.now();
     if (this.gpu) this.gpu.update(dt, this.time, this.physics.wind);
     else this.particles.update(dt, this.physics.wind);
@@ -1681,13 +1721,24 @@ export class Game {
       this.resTimer = 0;
       const gpuMs = this.gpuTimer.latest();
       const rs = gpuMs != null ? nextResScaleGpu(gpuMs, this.resScale) : nextResScaleFps(this.fps, this.resScale);
-      if (rs !== this.resScale) { this.resScale = rs; this.renderer.setRenderScale(rs); }
+      // A scale change reallocs the drawing buffer — a real GPU stall (perf.log: render worstMs up to 266 ms
+      // while the scale HUNTED 0.60↔0.77 every second under a wobbling GPU load). Rate-limit the realloc to at
+      // most ~1 / 1.5 s for small nudges, but let a big emergency drop (a sudden GPU spike) through at once so
+      // the 60 fps floor is still protected. Kills the periodic realloc stutter while flying.
+      const big = Math.abs(rs - this.resScale) >= 0.15;
+      if (rs !== this.resScale && (big || this.time - this.lastResChange >= 1.5)) {
+        this.resScale = rs; this.renderer.setRenderScale(rs); this.lastResChange = this.time;
+      }
     }
     const _tr = performance.now();
     this.rebuildDirty();
     const _rd = performance.now() - _tr;
     this.prof.rebuildTotal += _rd; if (_rd > this.prof.rebuildMax) this.prof.rebuildMax = _rd;
 
+    // The untimed FX/HUD/combat/audio tail — historically lumped into "misc". Timed as `fx` because a
+    // cpu-worstMs spike (perf.log: 90 ms with every OTHER phase low) had to be hiding here or in GC; the
+    // fx-max pins which. Includes the HUD DOM writes (setStats), a known reflow-stall suspect.
+    const _tfx = performance.now();
     this.combatFrame(dt); // team weapons: base recharge, drone battery, HUD panels
     this.ammoFrame();     // soldier ammo-crate pickups on the streets + crate respawns
     this.audioFrame();
@@ -1708,6 +1759,7 @@ export class Game {
       this.hud.setStats(this.fps, this.debris.count, Math.hypot(this.physics.wind.x, this.physics.wind.z),
         this.renderer.renderer.info.render.calls, gpuMs ?? -1);
     }
+    { const _fd = performance.now() - _tfx; this.prof.fxTotal += _fd; if (_fd > this.prof.fxMax) this.prof.fxMax = _fd; }
     this.prof.framesSimulated++;
     const _trn = performance.now();
     const cp = this.player.camera.position;
@@ -1746,6 +1798,60 @@ export class Game {
     }
     const _rn = performance.now() - _trn;
     this.prof.renderTotal += _rn; if (_rn > this.prof.renderMax) this.prof.renderMax = _rn;
+    // TOTAL cpu work this frame (frame() start → here). frame − cpu = the GPU/vsync WAIT: if it's big the
+    // frame is GPU-bound; if cpu ≈ frame the CPU is the wall. cpu − (the timed phases) = untimed "misc" sim.
+    const _cpu = performance.now() - now;
+    this.prof.cpuTotal += _cpu; if (_cpu > this.prof.cpuMax) this.prof.cpuMax = _cpu;
+    this.perfLog(dt);
+  }
+
+  /**
+   * Always-on per-second performance dump to the console (prefix "[PERF]"), so the real bottleneck can be
+   * READ from the logs instead of guessed. Everything the frame does is here: true frame time (avg + the
+   * WORST frame = the tirón), the smoothed + worst-instant fps, the REAL GPU-ms (timer query — the only
+   * honest GPU signal), draw calls/triangles, the per-phase CPU breakdown (physics/render-submit/mesh &
+   * collider rebuild/collapse/GPU-particles/collider-streaming), the live resolution scale + quality
+   * preset, JS heap, and object counts. gpu "n/a" or framesRendered 0 ⇒ the tab is backgrounded (render
+   * skipped) so the numbers are meaningless — bring the game to the foreground to read real values.
+   */
+  private perfLog(dt: number): void {
+    this.perfLogT += dt;
+    if (this.perfLogT < 1) return;
+    const p = this.prof;
+    const f = Math.max(1, p.framesSimulated);
+    const gpu = this.gpuTimer.latest();
+    const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+    const heap = mem ? (mem.usedJSHeapSize / 1048576) | 0 : -1;
+    const dHeap = this.lastHeapMB >= 0 && heap >= 0 ? heap - this.lastHeapMB : 0; // per-window heap growth: high + = allocation churn → GC pressure
+    this.lastHeapMB = heap;
+    const a = (t: number) => (t / f).toFixed(2);
+    const frameAvg = p.frameTotal / f, cpuAvg = p.cpuTotal / f;
+    const known = (p.physicsTotal + p.ctrlTotal + p.renderTotal + p.colTotal + p.settleTotal + p.gpuTotal + p.rebuildTotal + p.projTotal + p.debrisTotal + p.fxTotal) / f;
+    const misc = Math.max(0, cpuAvg - known);        // untimed remainder: netUpdate + syncProps + governor (blast/debris/fx now timed)
+    const gpuWait = Math.max(0, frameAvg - cpuAvg);   // frame time NOT spent on CPU = waiting for the GPU / vsync (GPU-bound signal)
+    const gs = this.grid.stats;
+    const world = this.physics.world;
+    const line =
+      `[PERF] fps ${this.fps.toFixed(0)} min ${p.fpsMin < 999 ? p.fpsMin.toFixed(0) : "-"} | ` +
+      `frame avg ${a(p.frameTotal)} max ${p.frameMax.toFixed(1)}ms | ` +
+      `gpu ${gpu != null ? gpu.toFixed(1) + "ms" : "n/a"} gpuWait ${gpuWait.toFixed(2)} | draws ${p.drawCalls} tris ${(p.triangles / 1000) | 0}k | ` +
+      `cpu ${cpuAvg.toFixed(2)}ms = phys ${a(p.physicsTotal)} ctrl ${a(p.ctrlTotal)} render ${a(p.renderTotal)} rebuild ${a(p.rebuildTotal)} ` +
+      `collapse ${a(p.settleTotal)} blast ${a(p.projTotal)} debris ${a(p.debrisTotal)} fx ${a(p.fxTotal)} gpuPart ${a(p.gpuTotal)} colStream ${a(p.colTotal)} misc ${misc.toFixed(2)} | ` +
+      // WORST single-frame cost of each phase in the window — pins a tirón: on a hitch second the culprit
+      // phase's max is high; if ALL maxes are low but frame max is high, it's GC/external (watch heap swing).
+      `worstMs: cpu ${p.cpuMax.toFixed(1)} render ${p.renderMax.toFixed(1)} phys ${p.physicsMax.toFixed(1)} ctrl ${p.ctrlMax.toFixed(1)} ` +
+      `rebuild ${p.rebuildMax.toFixed(1)} collapse ${p.settleMax.toFixed(1)} blast ${p.projMax.toFixed(1)} debris ${p.debrisMax.toFixed(1)} fx ${p.fxMax.toFixed(1)} col ${p.colMax.toFixed(1)} gpuPart ${p.gpuMax.toFixed(1)} | ` +
+      `res ${this.resScale.toFixed(2)} q ${this.quality} | heap ${heap}MB dHeap ${dHeap >= 0 ? "+" : ""}${dHeap} | ` +
+      // heap breakdown: which structure is growing (traces a session-long heap climb to the exact map) + the
+      // static physics load (colChunks/bodies/cols = broadphase cost that hits phys-ms even with debris 0).
+      `mem: vox ${gs.vox} rem ${gs.rem} set ${gs.set} weak ${gs.weak} dmg ${gs.dmg} cell ${gs.cell} | ` +
+      `colChunks ${this.collider.chunkCount} bodies ${world.bodies.len()} cols ${world.colliders.len()} | ` +
+      `meshes ${this.mesher.meshCount} debris ${this.debris.count} | mode ${this.mode} hidden ${this.hidden()} | frames ${f} rendered ${p.framesRendered}`;
+    console.log(line);
+    // Ship it to the dev-server perf sink (→ perf.log on disk) so it can be read WITHOUT the console.
+    if (typeof fetch !== "undefined") fetch("/__perf", { method: "POST", body: line, keepalive: true }).catch(() => { /* prod/no-sink: ignore */ });
+    this.prof = this.profZero();
+    this.perfLogT = 0;
   }
 
   /** Rebuilds only the geometry/colliders that changed this frame. */
@@ -1783,7 +1889,7 @@ export class Game {
         this.dirtyChunks.delete(ck);
         const keys = this.grid.meshChunkVoxelKeys(cx, cy, cz);
         const matIdx = new Uint8Array(keys.length);
-        for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(this.grid.cells.get(keys[i])!);
+        for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(this.grid.materialAt(keys[i])!);
         this.cookService.requestMesh(ck, Int32Array.from(keys), matIdx);
         if (performance.now() - _rt0 > meshBudget) break;
       }
@@ -1821,6 +1927,12 @@ export class Game {
 
   private syncProps(): void {
     for (const p of this.props) {
+      // Skip asleep props (parked cars, crates, gas tanks — the majority). Rapier's translation()/rotation()
+      // each ALLOCATE a {x,y,z} object, so re-syncing every resting prop every frame was a top GC source while
+      // flying (perf.log proved the residual tirón is GC: all phases low + heap drops on the spike frames). A
+      // sleeping body hasn't moved since we last synced it, so its mesh is already correct; isSleeping() is a
+      // cheap bool with no allocation. When it's hit and wakes, it syncs again.
+      if (p.body.isSleeping()) continue;
       const t = p.body.translation();
       const r = p.body.rotation();
       p.mesh.position.set(t.x, t.y, t.z);

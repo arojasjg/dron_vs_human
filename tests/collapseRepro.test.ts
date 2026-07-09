@@ -15,7 +15,7 @@ function settle(grid: VoxelGrid): void {
 }
 function voxelsAbove(grid: VoxelGrid, y0: number): number {
   let n = 0;
-  for (const k of grid.cells.keys()) if (unpackKey(k)[1] >= y0) n++;
+  for (const k of grid.keys()) if (unpackKey(k)[1] >= y0) n++;
   return n;
 }
 

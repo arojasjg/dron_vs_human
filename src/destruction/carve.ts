@@ -49,6 +49,7 @@ export function carveSphere(
   let removed = 0;
   let spawned = 0;
   const matCount = new Map<MaterialId, number>();
+  const vr = new Rng(0); // one instance reseeded per voxel below — avoids thousands of Rng allocations per blast (GC)
 
   for (let x = vx0; x <= vx1; x++) {
     for (let y = vy0; y <= vy1; y++) {
@@ -78,7 +79,7 @@ export function carveSphere(
 
         // Per-voxel-key RNG (not one sequential stream): identical on every client regardless of the
         // scan/iteration order, so debris launched from the same event/voxel matches everywhere.
-        const vr = new Rng(mix32(seed, packKey(x, y, z)));
+        vr.reseed(mix32(seed, packKey(x, y, z)));
         const out = velScale * (0.45 + vr.next() * 0.55);
         const vxv = dx * inv * out + vr.centered(out * 0.4);
         const vyv = dy * inv * out + out * 0.35 + vr.centered(out * 0.4);

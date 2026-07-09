@@ -3,6 +3,8 @@ import { carveSphere, type CarveTargets } from "./carve";
 
 export type FlashFn = (x: number, y: number, z: number, radius: number) => void;
 
+const _impulse = { x: 0, y: 0, z: 0 }; // reused blast-impulse vector — Rapier copies it, so no per-body alloc
+
 /** Spherical crater + radial impulse to every nearby dynamic body + smoke/dust/flash. */
 export function explode(
   physics: Physics,
@@ -26,10 +28,8 @@ export function explode(
     const d = Math.sqrt(d2) || 1e-3;
     const falloff = 1 - d / blastR;
     const j = power * 0.06 * falloff;
-    b.applyImpulse(
-      { x: (dx / d) * j, y: (dy / d) * j + j * 0.4, z: (dz / d) * j },
-      true,
-    );
+    _impulse.x = (dx / d) * j; _impulse.y = (dy / d) * j + j * 0.4; _impulse.z = (dz / d) * j;
+    b.applyImpulse(_impulse, true);
   });
 
   // Debris is ONLY the rigid pieces carved from real voxels above — no synthetic

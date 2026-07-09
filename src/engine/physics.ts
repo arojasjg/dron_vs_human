@@ -23,6 +23,8 @@ export class Physics {
   readonly world: RAPIER.World;
   readonly wind = { x: DEFAULT_WIND.x, y: DEFAULT_WIND.y, z: DEFAULT_WIND.z };
   windStrength = 1;
+  private readonly _imp = { x: 0, y: 0, z: 0 }; // reused impulse vector — no per-body allocation each step (GC)
+  private readonly _v = { x: 0, y: 0, z: 0 };   // reused vector for the velocity clamp below
 
   constructor() {
     this.world = new RAPIER.World({ x: 0, y: GRAVITY, z: 0 });
@@ -32,7 +34,38 @@ export class Physics {
 
   step(time: number): void {
     this.applyAir(time);
+    this.sanitize();   // clamp/repair velocities BEFORE stepping — a divergent body traps world.step()
     this.world.step();
+  }
+
+  /**
+   * Guards world.step() against a numerical blow-up. Extreme destruction can pile several blast impulses
+   * onto one body in a single frame (chained gas tanks + a rocket cook-off), and a CCD projectile taking
+   * a huge impulse can reach a velocity the solver can't integrate — Rapier then hits a Rust `unreachable`
+   * trap INSIDE step(), which unwinds without releasing its borrow, poisoning the whole world so every
+   * later physics call throws "recursive use of an object" and the game freezes for good (seen in perf.log).
+   * Resetting non-finite velocities and capping the magnitude makes that state unreachable. Deterministic
+   * (a pure function of each body's velocity), so it can't desync lockstep clients.
+   */
+  private sanitize(): void {
+    const MAX = 300, MAX2 = MAX * MAX; // m/s — far above any real projectile/debris; only catches runaways
+    this.world.forEachActiveRigidBody((b) => {
+      if (!b.isDynamic()) return;
+      const v = b.linvel();
+      const bad = !(Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z));
+      const s2 = v.x * v.x + v.y * v.y + v.z * v.z;
+      if (bad) {
+        this._v.x = 0; this._v.y = 0; this._v.z = 0; b.setLinvel(this._v, false);
+        b.setAngvel(this._v, false);
+      } else if (s2 > MAX2) {
+        const k = MAX / Math.sqrt(s2);
+        this._v.x = v.x * k; this._v.y = v.y * k; this._v.z = v.z * k; b.setLinvel(this._v, false);
+      }
+      const w = b.angvel();
+      if (!(Number.isFinite(w.x) && Number.isFinite(w.y) && Number.isFinite(w.z))) {
+        this._v.x = 0; this._v.y = 0; this._v.z = 0; b.setAngvel(this._v, false);
+      }
+    });
   }
 
   /** Gust-modulated wind + quadratic drag, applied as a per-step impulse so it never accumulates. */
@@ -55,7 +88,8 @@ export class Physics {
       const area = ud?.area ?? 0.06;
       const cd = ud?.cd ?? 1.05;
       const k = 0.5 * AIR_DENSITY * cd * area * speed * FIXED_DT;
-      b.applyImpulse({ x: -k * rx, y: -k * ry, z: -k * rz }, false);
+      this._imp.x = -k * rx; this._imp.y = -k * ry; this._imp.z = -k * rz; // reuse (Rapier copies into WASM)
+      b.applyImpulse(this._imp, false);
     });
   }
 }

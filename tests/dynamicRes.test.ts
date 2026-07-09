@@ -13,7 +13,7 @@ describe("dynamic resolution — GPU-time controller (the reliable signal)", () 
 
   it("grows back only with real headroom, and holds in the band (no vsync oscillation)", () => {
     expect(nextResScaleGpu(8, 0.7)).toBeCloseTo(0.75); // well under budget → grow
-    expect(nextResScaleGpu(13, 0.8)).toBe(0.8);        // in [GROW_MS, BUDGET_MS] → hold
+    expect(nextResScaleGpu(11, 0.8)).toBe(0.8);        // in [GROW_MS, BUDGET_MS] → hold
   });
 
   it("clamps to [RES_MIN, RES_MAX]", () => {
