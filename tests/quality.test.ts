@@ -7,23 +7,24 @@ describe("graphics quality presets", () => {
     for (let i = 1; i < c.length; i++) {
       expect(c[i].shadow).toBeGreaterThanOrEqual(c[i - 1].shadow);
       expect(c[i].pixelRatio).toBeGreaterThanOrEqual(c[i - 1].pixelRatio);
-      expect(Number(c[i].ibl)).toBeGreaterThanOrEqual(Number(c[i - 1].ibl));
       expect(Number(c[i].voxelDetail)).toBeGreaterThanOrEqual(Number(c[i - 1].voxelDetail)); // detail scales too
     }
   });
 
-  it("bajo turns off the expensive fragment work (IBL, shadows, mortar detail, MSAA, full res)", () => {
+  it("no preset uses image-based lighting — IBL was removed (it alone capped weak GPUs to ~50fps)", () => {
+    for (const q of QUALITY_ORDER) expect("ibl" in qualityConfig(q, 2)).toBe(false);
+  });
+
+  it("bajo turns off the expensive fragment work (shadows, mortar detail, MSAA, full res)", () => {
     const c = qualityConfig("bajo", 2);
-    expect(c.ibl).toBe(false);
     expect(c.shadow).toBe(0);
     expect(c.pixelRatio).toBeLessThan(1);
     expect(c.voxelDetail).toBe(false); // the ~4ms fwidth mortar shader is gone at the floor
     expect(qualityAA("bajo")).toBe(false);
   });
 
-  it("alto keeps them on and caps the pixel ratio", () => {
+  it("alto keeps shadows + detail on and caps the pixel ratio", () => {
     expect(qualityConfig("alto", 3).pixelRatio).toBe(1.5); // capped below the device ratio (high-DPI fill-rate save)
-    expect(qualityConfig("alto", 2).ibl).toBe(true);
     expect(qualityConfig("alto", 2).shadow).toBe(1024); // 1024 (was 2048): a tight sun frustum looks the same, ~3ms cheaper
     expect(qualityConfig("alto", 2).voxelDetail).toBe(true); // full masonry detail on the top preset
     expect(qualityAA("alto")).toBe(true);

@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { VOXEL } from "../config";
 import { MATERIALS, MATERIAL_ORDER, type MaterialId } from "./materials";
 import { packKey, unpackKey, type VoxelGrid } from "./voxelGrid";
-import { meshChunkCoord, cookMeshChunk, NEUTRAL_WEATHER, type CookedMeshPart } from "./cook";
+import { meshChunkCoord, MESH_CHUNK, cookMeshChunk, NEUTRAL_WEATHER, type CookedMeshPart } from "./cook";
 
 // Voxel-pitch surface detail injected into MeshStandardMaterial: darken thin (fwidth-AA'd) mortar/plank
 // seams at each VOXEL boundary on the two axes tangent to the face, plus per-voxel albedo/roughness
@@ -69,6 +69,36 @@ export class VoxelMesher {
 
   /** Number of chunk InstancedMeshes currently in the scene (perf instrumentation). */
   get meshCount(): number { return this.group.children.length; }
+
+  /** Whether a render chunk currently has built meshes (mesh streaming). */
+  hasChunk(ck: number): boolean { return this.chunks.has(ck); }
+
+  /** Render-chunk keys that currently have meshes (for streaming out the far ones). */
+  builtChunks(): IterableIterator<number> { return this.chunks.keys(); }
+
+  /** Frees one render chunk's meshes — it's out of the render bubble. Rebuilt from the grid on return.
+   *  This is what caps the LIVE mesh-object count (memory + GC-marking) to the bubble instead of the whole
+   *  city, so the world can scale (5× buildings) without the object graph growing with it. */
+  disposeChunk(ck: number): void {
+    const m = this.chunks.get(ck);
+    if (m) { for (const mesh of m.values()) this.disposeMesh(mesh); this.chunks.delete(ck); }
+  }
+
+  /** Distance culling — the "view bubble". A chunk whose horizontal centre is farther than sqrt(maxDistSq)
+   *  from the camera is hidden: `.visible=false` costs it ZERO draw calls and triangles AND drops it out of
+   *  the shadow pass, so rendered cost tracks the bubble, not the city size (5× buildings render like 1×).
+   *  Fog (renderer.ts) fully hides the scene before the cut → no pop. Cheap: a few ops per chunk, no allocs,
+   *  and `.visible` is independent of the frozen instance matrices. Call once per frame. */
+  updateVisibility(camX: number, camZ: number, maxDistSq: number): void {
+    const HALF = (MESH_CHUNK / 2) * VOXEL;
+    for (const [ck, mats] of this.chunks) {
+      const [mcx, , mcz] = unpackKey(ck);
+      const dx = mcx * MESH_CHUNK * VOXEL + HALF - camX;
+      const dz = mcz * MESH_CHUNK * VOXEL + HALF - camZ;
+      const vis = dx * dx + dz * dz <= maxDistSq;
+      for (const mesh of mats.values()) mesh.visible = vis;
+    }
+  }
 
   /** Full rebuild — used at load time and after stamping prefabs. */
   rebuild(grid: VoxelGrid): void {

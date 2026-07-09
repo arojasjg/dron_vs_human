@@ -95,27 +95,34 @@ export class VoxelGrid {
   // --- Storage-neutral read API. External code (cook/mesh/collider/heightField/game/tests) goes through
   // these instead of touching the backing store directly, so the storage layer stays swappable. ---
 
-  /** Iterates the packed key of every solid voxel (full scan; used by load/save/full-rebuild, not per-frame). */
-  *keys(): IterableIterator<number> {
+  /** Packed key of every solid voxel (full scan; used by load/save/full-rebuild, NOT per-frame). Builds an
+   *  array with a tight loop and returns its NATIVE iterator — NOT a generator: a generator's per-yield
+   *  suspend/resume made a full mesher.rebuild() over ~1.5M voxels ~7× slower (perf.log: rebuild worstMs
+   *  717 ms + a transient heap spike). The array's own iterator keeps `.next()` for callers that use it. */
+  keys(): IterableIterator<number> {
+    const out: number[] = [];
     for (const [sk, c] of this.chunks) {
       const [scx, scy, scz] = unpackKey(sk);
       const ox = scx * SC, oy = scy * SC, oz = scz * SC;
       for (let li = 0; li < SC3; li++) {
-        if (c[li] !== 0) yield packKey(ox + (li & 31), oy + ((li >> 5) & 31), oz + (li >> 10));
+        if (c[li] !== 0) out.push(packKey(ox + (li & 31), oy + ((li >> 5) & 31), oz + (li >> 10)));
       }
     }
+    return out.values();
   }
 
-  /** Iterates [packedKey, material] for every solid voxel. */
-  *entries(): IterableIterator<[number, MaterialId]> {
+  /** [packedKey, material] for every solid voxel (array-backed native iterator, see keys()). */
+  entries(): IterableIterator<[number, MaterialId]> {
+    const out: [number, MaterialId][] = [];
     for (const [sk, c] of this.chunks) {
       const [scx, scy, scz] = unpackKey(sk);
       const ox = scx * SC, oy = scy * SC, oz = scz * SC;
       for (let li = 0; li < SC3; li++) {
         const b = c[li];
-        if (b !== 0) yield [packKey(ox + (li & 31), oy + ((li >> 5) & 31), oz + (li >> 10)), MATERIAL_ORDER[(b & 0x7f) - 1]];
+        if (b !== 0) out.push([packKey(ox + (li & 31), oy + ((li >> 5) & 31), oz + (li >> 10)), MATERIAL_ORDER[(b & 0x7f) - 1]]);
       }
     }
+    return out.values();
   }
 
   /** Material of a voxel by its packed key (undefined if empty). */

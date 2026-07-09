@@ -9,30 +9,29 @@ const base = (o: Partial<Parameters<typeof nextPerfLever>[0]> = {}) => ({
 describe("nextPerfLever — the 60fps-floor ladder", () => {
   it("does nothing while fps is healthy or the drop is only momentary", () => {
     expect(nextPerfLever(base({ fps: 60 }))).toBe("none");
-    expect(nextPerfLever(base({ fps: 44, sustainedLowSec: 1 }))).toBe("none"); // <4s → not sustained
+    expect(nextPerfLever(base({ fps: 44, sustainedLowSec: 1 }))).toBe("none"); // <2.5s → not sustained
   });
 
-  it("trims resolution FIRST (non-destructive) before touching any visual", () => {
-    expect(nextPerfLever(base({ resAtFloor: false }))).toBe("shrinkRes");
+  it("engages in the 50-58 STRUGGLE band (target is 60), not only on a hard crash", () => {
+    expect(nextPerfLever(base({ fps: 55, sustainedLowSec: 3 }))).not.toBe("none"); // 55 < LOW_FPS(57) sustained
   });
 
-  it("once resolution is floored, drops the mortar detail before the preset", () => {
-    expect(nextPerfLever(base({ resAtFloor: true, detailOn: true }))).toBe("dropDetail");
+  it("drops the ~4ms mortar detail FIRST — bigger GPU win, less visual harm than blurring via res", () => {
+    // even with res NOT floored, detail goes first (the old res-first gate stranded weak GPUs on the shader)
+    expect(nextPerfLever(base({ detailOn: true, resAtFloor: false }))).toBe("dropDetail");
+    expect(nextPerfLever(base({ detailOn: true, resAtFloor: true }))).toBe("dropDetail");
   });
 
-  it("with detail already off, steps the preset down (alto→…→bajo)", () => {
-    expect(nextPerfLever(base({ detailOn: false, quality: "alto" }))).toBe("dropPreset");
-    expect(nextPerfLever(base({ detailOn: false, quality: "medio" }))).toBe("dropPreset");
+  it("with detail off, trims resolution before touching the preset", () => {
+    expect(nextPerfLever(base({ detailOn: false, resAtFloor: false }))).toBe("shrinkRes");
+  });
+
+  it("with detail off and res floored, steps the preset down (alto→…→bajo)", () => {
+    expect(nextPerfLever(base({ detailOn: false, resAtFloor: true, quality: "alto" }))).toBe("dropPreset");
+    expect(nextPerfLever(base({ detailOn: false, resAtFloor: true, quality: "medio" }))).toBe("dropPreset");
   });
 
   it("at the floor (bajo + detail off) there is nothing left to pull", () => {
-    expect(nextPerfLever(base({ detailOn: false, quality: "bajo" }))).toBe("none");
-  });
-
-  it("obeys strict rung order and never skips a rung", () => {
-    // res not floored wins even if detail is on and the preset is droppable
-    expect(nextPerfLever(base({ resAtFloor: false, detailOn: true, quality: "alto" }))).toBe("shrinkRes");
-    // res floored + detail on → detail, not preset
-    expect(nextPerfLever(base({ resAtFloor: true, detailOn: true, quality: "alto" }))).toBe("dropDetail");
+    expect(nextPerfLever(base({ detailOn: false, resAtFloor: true, quality: "bajo" }))).toBe("none");
   });
 });

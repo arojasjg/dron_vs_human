@@ -1,20 +1,22 @@
 // Continuous dynamic-resolution controller. Fill rate (pixels shaded) is the #1 GPU cost on this game
 // (measured fill-rate bound), so when the GPU can't hold the frame budget we render at a lower internal
 // resolution (a scale multiplied into the renderer's pixel ratio) and restore it when there's headroom.
-// This is what keeps the "alto" look (IBL + shadows) near 60 fps without dropping the whole preset.
+// This is what keeps the "alto" look (shadows + mortar detail) near 60 fps without dropping the whole preset.
 // Pure so it unit-tests; the caller debounces the actual setPixelRatio (a drawing-buffer realloc).
 
 export const RES_MIN = 0.42; // floor: 0.42 linear ≈ 18% of the pixels. Low enough that dynamic-res alone can
-// rescue a heavy GPU (fill ∝ scale²: a 90 ms frame × 0.42² ≈ 16 ms ≈ 60 fps) WITHOUT dropping shadows/IBL.
+// rescue a heavy GPU (fill ∝ scale²: a 90 ms frame × 0.42² ≈ 16 ms ≈ 60 fps) WITHOUT dropping shadows/detail.
 // Blurry under extreme load, but the 60 fps floor is the priority; it grows back the moment there's headroom.
 export const RES_MAX = 1;
 
-// GPU-time controller targets (ms of real render time, from EXT_disjoint_timer_query):
-export const BUDGET_MS = 12;   // aim GPU under this → holds 60fps with CPU headroom (perf.log showed the aerial
-                               // city view pinned at ~52fps with gpu 11-15ms and res only easing to ~0.7; a
-                               // tighter target trims resolution a touch sooner to reach 60 — recompile-free,
-                               // unlike a preset drop). Blurrier under a heavy aerial view, but 60 is the floor.
-export const GROW_MS = 10;     // only grow resolution back when comfortably under budget
+// GPU-time controller targets (ms of real render time, from EXT_disjoint_timer_query). The band
+// [GROW_MS, BUDGET_MS] is a HOLD zone — no resolution change while gpuMs sits inside it. It MUST bracket
+// the normal moving-through-the-city cost (perf.log: gpu 10-15 ms), or the controller shrinks-then-grows
+// every ~second, and each change resizes the WebGL drawing buffer — a ~40 ms render STALL on the next
+// frame (perf.log: render worstMs 39.7 ms while just moving = the tirón). A wide band keeps res steady so
+// reallocs happen only on real view transitions (open field ↔ dense city), not continuously.
+export const BUDGET_MS = 15;   // shrink only when the GPU is genuinely over ~66fps of work (heavy destruction)
+export const GROW_MS = 9;      // grow back only with real headroom (open view), so the city's ~15ms just holds
 
 const clamp = (s: number) => Math.min(RES_MAX, Math.max(RES_MIN, +s.toFixed(3)));
 

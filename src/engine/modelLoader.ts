@@ -41,9 +41,6 @@ export async function instanceModel(url: string): Promise<ModelInstance | null> 
     o.castShadow = true;
     o.receiveShadow = true; // so a soldier standing in building shade is grounded, not pasted on
     o.frustumCulled = false;
-    // full sky IBL over-brightens skinned models; ease it so they sit in the scene's light
-    const mat = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | THREE.MeshStandardMaterial[];
-    for (const m of Array.isArray(mat) ? mat : [mat]) if (m && "envMapIntensity" in m) m.envMapIntensity = 0.7;
   });
   const mixer = new THREE.AnimationMixer(scene);
   const actions = new Map<string, THREE.AnimationAction>();

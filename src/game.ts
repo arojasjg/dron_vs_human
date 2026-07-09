@@ -1,6 +1,6 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
-import { DEBRIS_HIT_DRONE_R, DEBRIS_HIT_TANK_R, DEBRIS_IMPACT_KE, FIXED_DT, MAX_DEBRIS, VOXEL, maxPhysicsSteps } from "./config";
+import { DEBRIS_HIT_DRONE_R, DEBRIS_HIT_TANK_R, DEBRIS_IMPACT_KE, FIXED_DT, MAX_DEBRIS, RENDER_DIST, VOXEL, maxPhysicsSteps } from "./config";
 import { Player } from "./engine/player";
 import { Walker } from "./engine/walker";
 import { Input } from "./engine/input";
@@ -43,7 +43,7 @@ import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/obje
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, VoxelGrid, type RayHit } from "./world/voxelGrid";
 import { chunkCoord, VoxelCollider } from "./world/voxelCollider";
-import { MESH_CHUNK_RATIO } from "./world/cook";
+import { MESH_CHUNK, MESH_CHUNK_RATIO } from "./world/cook";
 import { VoxelMesher } from "./world/voxelMesh";
 import { connectedComponents, type Voxel } from "./world/structuralIntegrity";
 
@@ -173,6 +173,12 @@ export class Game {
   private perfLogT = 0;   // window timer for the per-second [PERF] console dump
   private lastHeapMB = -1; // previous window's JS heap, to log the per-window growth (allocation-rate/GC proxy)
   private readonly _dropScratch: number[] = []; // reused by streamColliders (every-frame) — no per-frame array alloc
+  // Mesh streaming (Stage 2 of the render-scale plan): only the render chunks near the player are built as
+  // Three.js meshes; far ones are disposed and rebuilt on return. Caps the LIVE mesh-object count (memory +
+  // GC-marking) to the view bubble so the world can grow (5× buildings) at a flat object graph.
+  private meshChunks = new Set<number>();      // keys of every non-empty RENDER chunk (the streaming universe)
+  private readonly meshInFlight = new Set<number>(); // requested off-thread but not yet applied → don't re-request
+  private readonly _meshDrop: number[] = [];   // reused far-chunk list (no per-frame alloc)
 
   private time = 0;
   private acc = 0;
@@ -215,7 +221,7 @@ export class Game {
     // turns cooked boxes into Rapier bodies. ?cook=sync forces the inline path (for A/B verification).
     this.cookService = new CookService(typeof location !== "undefined" && new URLSearchParams(location.search).get("cook") === "sync");
     this.cookService.onColliderCooked = (ck, boxes) => this.collider.applyBoxes(ck, boxes);
-    this.cookService.onMeshCooked = (ck, parts) => this.mesher.applyCooked(ck, parts);
+    this.cookService.onMeshCooked = (ck, parts) => { this.meshInFlight.delete(ck); this.mesher.applyCooked(ck, parts); };
     this.debris = new DebrisSystem(this.physics, this.renderer.scene);
     this.rubble = new RubbleField(this.renderer.scene);
     this.debris.onSettle = (x, y, z, qx, qy, qz, qw, mat) => this.rubble.deposit(x, y, z, qx, qy, qz, qw, mat);
@@ -236,7 +242,7 @@ export class Game {
     this.impactMarks = new ImpactMarks(this.renderer.scene);
 
     // graphics quality: the user's saved choice, else auto-detected from the GPU (software → Bajo,
-    // everything else → the safe middle with no IBL). Cycle live with K.
+    // everything else → the safe middle). Cycle live with K.
     const savedQ = (typeof localStorage !== "undefined" ? localStorage.getItem("quality") : null) as Quality | null;
     this.quality = savedQ && QUALITY_ORDER.includes(savedQ) ? savedQ : autoQuality(this.gpuName());
     // persist the resolved preset so MSAA (decided at renderer creation from this key) matches it next load
@@ -255,7 +261,7 @@ export class Game {
     this.ammoCrates = new AmmoCrates(this.renderer.scene); // soldier ammo pickups (populated per world)
     this.initFlashes();
     buildDefaultScene(this.grid);
-    this.mesher.rebuild(this.grid);
+    this.mesher.rebuild(this.grid); this.seedMeshChunks();
     this.heightField.rebuild(this.grid);
     this.gpu?.setHeightField(this.heightField.texture, this.heightField.origin, this.heightField.size);
     this.rebuildGasTanks();
@@ -565,7 +571,7 @@ export class Game {
   }
 
   /** Applies the current preset across every subsystem it drives (renderer, mortar detail, audio). One
-   *  place so IBL/shadows/pixels/detail/audio can never drift apart. voxelDetail follows the preset here
+   *  place so shadows/pixels/detail/audio can never drift apart. voxelDetail follows the preset here
    *  (the baseline); the auto-scaler can still drop detail INDEPENDENTLY below that to hold 60 fps. */
   private applyQualityPreset(): void {
     const cfg = qualityConfig(this.quality, window.devicePixelRatio || 1);
@@ -789,7 +795,7 @@ export class Game {
   /** Times the heavy per-event operations on the current grid (perf diagnosis). */
   debugProfile(): Record<string, number> {
     const t0 = performance.now();
-    this.mesher.rebuild(this.grid);
+    this.mesher.rebuild(this.grid); this.seedMeshChunks();
     const meshMs = performance.now() - t0;
     const t1 = performance.now();
     this.collider.rebuildAll(this.grid);
@@ -899,7 +905,7 @@ export class Game {
     }
     (this.interiorLights ??= new InteriorLights(this.renderer.scene)).build(placedBuildings(), this.interiorLightBudget());
     this.ensureFlashlight(); // pre-create at intensity 0 so the first F toggle causes no light-count recompile
-    this.mesher.rebuild(this.grid);
+    this.mesher.rebuild(this.grid); this.seedMeshChunks();
     this.heightField.rebuild(this.grid);
     this.gpu?.setHeightField(this.heightField.texture, this.heightField.origin, this.heightField.size);
     this.rebuildGasTanks();
@@ -1022,6 +1028,53 @@ export class Game {
     }
     const _cd = performance.now() - _cs0;
     this.prof.colTotal += _cd; if (_cd > this.prof.colMax) this.prof.colMax = _cd;
+  }
+
+  /** After a FULL mesh rebuild (everything built), the mesher's built chunks ARE every non-empty render
+   *  chunk — snapshot them as the streaming universe. streamMeshes then trims to the bubble over the next
+   *  frames and rebuilds chunks on return. Cheap: iterates built chunks (hundreds), not the grid. */
+  private seedMeshChunks(): void {
+    this.meshChunks = new Set(this.mesher.builtChunks());
+  }
+
+  /**
+   * Mesh LOD / streaming: keep Three.js meshes only for render chunks within RENDER_DIST of the player;
+   * dispose the far ones. Rendered geometry AND the live mesh-object count then track the ~190 m bubble,
+   * not the city size — so 5× buildings / 50× trees cost the same object graph as 1× (the grid, which is
+   * always current, drives destruction; a far chunk's mesh is just rebuilt fresh from it on return). Mirrors
+   * streamColliders: build a small budget/frame, drop with a one-chunk hysteresis. Render-only → never
+   * touches the grid or determinism.
+   */
+  private streamMeshes(): void {
+    const p = this.player.camera.position;
+    const HALF = (MESH_CHUNK / 2) * VOXEL;
+    const R2 = RENDER_DIST * RENDER_DIST;
+    const dropR = RENDER_DIST + MESH_CHUNK * VOXEL;         // +1 render chunk (16 m) of hysteresis
+    const dropR2 = dropR * dropR;
+    // BUILD near non-empty chunks that aren't built and aren't already cooking (off-thread → tiny main-thread cost)
+    let built = 0;
+    for (const ck of this.meshChunks) {
+      if (this.mesher.hasChunk(ck) || this.meshInFlight.has(ck)) continue;
+      const [mcx, mcy, mcz] = unpackKey(ck);
+      const dx = mcx * MESH_CHUNK * VOXEL + HALF - p.x, dz = mcz * MESH_CHUNK * VOXEL + HALF - p.z;
+      if (dx * dx + dz * dz > R2) continue;
+      const keys = this.grid.meshChunkVoxelKeys(mcx, mcy, mcz);
+      if (keys.length === 0) continue;                     // chunk carved to nothing → nothing to build
+      const matIdx = new Uint8Array(keys.length);
+      for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(this.grid.materialAt(keys[i])!);
+      this.meshInFlight.add(ck);
+      this.cookService.requestMesh(ck, Int32Array.from(keys), matIdx);
+      if (++built >= 3) break;                             // budget: ≤3 requests/frame so a fast crossing never stalls
+    }
+    // DISPOSE far built chunks (collect then remove — don't mutate the Map mid-iteration). Budget the drop so
+    // the one-time post-load trim (everything built → bubble) spreads over frames instead of a dispose hitch.
+    const drop = this._meshDrop; drop.length = 0;
+    for (const ck of this.mesher.builtChunks()) {
+      const [mcx, , mcz] = unpackKey(ck);
+      const dx = mcx * MESH_CHUNK * VOXEL + HALF - p.x, dz = mcz * MESH_CHUNK * VOXEL + HALF - p.z;
+      if (dx * dx + dz * dz > dropR2) { drop.push(ck); if (drop.length >= 12) break; }
+    }
+    for (const ck of drop) this.mesher.disposeChunk(ck);
   }
 
   private explodeAt(x: number, y: number, z: number, radius: number, power: number, broadcast = false, by = 0): void {
@@ -1688,6 +1741,7 @@ export class Game {
     this.netUpdate(dt);
     if (this.mode === "dvh") this.checkMatchWin(); // detect an objective destroyed this frame
     this.streamColliders(); // keep building colliders only near the player (collision LOD)
+    this.streamMeshes();    // keep Three.js meshes only near the player (render LOD) → world scales flat
     this.updateTankChain(dt);
     // A projectile detonating in here calls explodeAt → carve + debris spawn + FX synchronously, so this is
     // where the blast-FRAME hitch lives (perf.log showed cpu worstMs 85-290ms hidden inside "misc"). Timed
@@ -1709,8 +1763,9 @@ export class Game {
     this.updateFlashes(dt);
     this.trauma = decayTrauma(this.trauma, dt); // screen shake bleeds off toward rest
     // one budget scale drives BOTH the rigid-debris cap and the GPU particle emission, so under
-    // load the whole spectacle throttles together (compatibility on weak/integrated GPUs).
-    const budget = this.governor.update(this.fps);
+    // load the whole spectacle throttles together (compatibility on weak/integrated GPUs). Driven by the
+    // MEASURED GPU-ms (not just smoothed fps) so it engages on the geometry-bound destruction frames.
+    const budget = this.governor.update(this.fps, this.gpuTimer.latest());
     this.debris.cap = Math.round(MAX_DEBRIS * budget);
     if (this.gpu) this.gpu.emissionScale = budget;
     this.adaptiveQuality(dt); // sustained low fps → drop a preset (last resort, only once res is floored)
@@ -1766,6 +1821,9 @@ export class Game {
     if (!this.hidden()) { // the sim runs while hidden (Web Worker), but there's no point rendering a hidden tab
       const info = this.renderer.renderer.info;
       info.reset(); // autoReset is off (see Renderer ctor) → this frame's calls now include shadow + GPGPU passes
+      // View-bubble distance culling: hide mesh chunks beyond RENDER_DIST so draws/triangles/shadow-casters
+      // track the ~190m around the camera, not the whole city — the key to scaling the world (config.ts).
+      this.mesher.updateVisibility(cp.x, cp.z, RENDER_DIST * RENDER_DIST);
       // Refresh the shadow map at ~30Hz WHILE anything casts a moving shadow (player moves, geometry is
       // carved, debris/peers move) — but skip the pass ENTIRELY when the scene is static (stationary
       // player, no debris, clean grid), since the sun follows the player so the stale map stays valid.
@@ -1858,7 +1916,7 @@ export class Game {
   private rebuildDirty(): void {
     if (this.rebuildAllColliders) {
       this.collider.clear();           // drop all colliders…
-      this.mesher.rebuild(this.grid);
+      this.mesher.rebuild(this.grid); this.seedMeshChunks();
       this.heightField.rebuild(this.grid);
       this.streamColliders(true);      // …then re-stream only the ones near the player
       this.dirtyChunks.clear();
@@ -1887,6 +1945,11 @@ export class Game {
       for (const ck of this.dirtyChunks) {
         const [cx, cy, cz] = unpackKey(ck);
         this.dirtyChunks.delete(ck);
+        // Only re-cook chunks that are CURRENTLY built (in the render bubble). A carve far from the player
+        // updates the grid but not a mesh that doesn't exist — streamMeshes rebuilds it fresh from the grid
+        // when the player returns (mirrors the collider dirty logic). Its universe already knows the chunk.
+        this.meshChunks.add(ck);
+        if (!this.mesher.hasChunk(ck)) continue;
         const keys = this.grid.meshChunkVoxelKeys(cx, cy, cz);
         const matIdx = new Uint8Array(keys.length);
         for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(this.grid.materialAt(keys[i])!);
