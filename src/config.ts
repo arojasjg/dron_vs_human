@@ -2,9 +2,11 @@ export const VOXEL = 0.25;
 
 // Render view-bubble radius (metres, horizontal). Mesh chunks whose centre is beyond this are distance-CULLED
 // (0 draws/triangles, out of the shadow pass too), so rendered cost depends on the bubble, not the city size
-// — this is what lets the world scale (5× buildings, 50× trees) at a flat frame cost. The FOG fully hides the
-// scene BEFORE this radius (see renderer.ts) so there's no visible pop at the cut.
-export const RENDER_DIST = 130;
+// — this is what lets the world scale (more buildings, houses, a forest wall, 50× trees) at a flat frame cost.
+// Tightened 130→100: the indestructible forest wall now rings the map, so you can never see past ~the city
+// edge anyway — a 41% smaller bubble (100²/130²) is a direct fps win with nothing new made visible. The FOG
+// reaches full opacity BEFORE this radius (see renderer.ts) so there's no visible pop at the cut.
+export const RENDER_DIST = 100;
 
 export const GRAVITY = -9.81;
 export const FIXED_DT = 1 / 60;

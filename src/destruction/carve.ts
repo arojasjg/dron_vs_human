@@ -6,7 +6,7 @@ import { MATERIALS, type MaterialId } from "../world/materials";
 export const DEBRIS_CT: Record<MaterialId, number> = {
   concrete: 0.61, brick: 0.65, wood: 0.69, metal: 0.73, glass: 0.77, gastank: 0.73,
   wall_slate: 0.65, wall_moss: 0.65, wall_clay: 0.65, wall_navy: 0.65,
-  car_red: 0.73, car_blue: 0.73, car_teal: 0.73, tire: 0.61, leaves: 0.69,
+  car_red: 0.73, car_blue: 0.73, car_teal: 0.73, tire: 0.61, leaves: 0.69, leaves_pine: 0.69,
 };
 import { VoxelGrid, packKey } from "../world/voxelGrid";
 import { Rng, mix32 } from "../engine/rng";
@@ -56,6 +56,7 @@ export function carveSphere(
       for (let z = vz0; z <= vz1; z++) {
         const mat = t.grid.get(x, y, z);
         if (mat === undefined) continue;
+        if (t.grid.isIndestructible(x, y, z)) continue; // forest wall / gate vehicles: blasts never carve them
         const wx = (x + 0.5) * VOXEL, wy = (y + 0.5) * VOXEL, wz = (z + 0.5) * VOXEL;
         const dx = wx - cx, dy = wy - cy, dz = wz - cz;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);

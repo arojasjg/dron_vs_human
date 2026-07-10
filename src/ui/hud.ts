@@ -1,9 +1,21 @@
 import { MATERIALS, type MaterialId } from "../world/materials";
 import type { Role } from "../net/roles";
 import { WEAPONS, roleLoadout, type Weapon, type Ammo } from "../net/weapons";
+import type { Quality } from "../engine/quality";
+import type { VisualSettings } from "../engine/settings";
 
 export type Tool = "shoot" | "grenade" | "cannon" | "missile" | "build" | "erase";
 export type Mode = "free" | "vs" | "dvh";
+
+/** Callbacks the settings menu invokes on the game. `auto` returns the detected settings so the menu can
+ *  repaint its controls to match. */
+export interface SettingsCallbacks {
+  setQuality: (q: Quality) => void;
+  setResAuto: (on: boolean) => void;
+  setResScale: (scale: number) => void;
+  setViewDist: (metres: number) => void;
+  auto: () => VisualSettings;
+}
 
 const TOOL_NAMES: Record<Tool, string> = {
   shoot: "Disparar (daña bloques)",
@@ -24,7 +36,7 @@ const HELP = `
 <b>1</b> Disparar &nbsp; <b>2</b> Granada &nbsp; <b>3</b> Cañón &nbsp; <b>4</b> Construir &nbsp; <b>5</b> Borrar &nbsp; <b>6</b> Misil
 <b>Q/E</b> material (incluye 🛢 tambo de gas — explota en cadena)
 <b>N</b> edificio &nbsp; <b>G</b> casa &nbsp; <b>U</b> muro &nbsp; <b>T</b> torre &nbsp; <b>V</b> auto &nbsp; <b>R</b> escena &nbsp; <b>X</b> vaciar
-<b>B</b> 💣 MEGA BOMBA (apuntá y explotá) &nbsp; <b>P</b> guardar &nbsp; <b>L</b> cargar &nbsp; <b>J</b> caja &nbsp; <b>K</b> calidad &nbsp; <b>M</b> silencio &nbsp; <b>H</b> ayuda
+<b>B</b> 💣 MEGA BOMBA (apuntá y explotá) &nbsp; <b>P</b> guardar &nbsp; <b>L</b> cargar &nbsp; <b>J</b> caja &nbsp; <b>K</b> calidad &nbsp; <b>O</b> ⚙ ajustes &nbsp; <b>M</b> silencio &nbsp; <b>H</b> ayuda
 `;
 
 export class Hud {
@@ -205,6 +217,46 @@ export class Hud {
     document.getElementById("hud-btn-dvh")!.onclick = () => pick("dvh");
   }
 
+  /** Wires the always-visible gear button (opens the settings panel). Called once by the game. */
+  onGear(open: () => void): void {
+    (document.getElementById("hud-gear") as HTMLButtonElement).onclick = open;
+  }
+
+  /** Opens the visual-settings panel, populates it from `s`, and wires each control to `cb`. Live: every
+   *  change applies immediately (and persists in the game). The AUTO button repaints from the detected result. */
+  showSettings(s: VisualSettings, cb: SettingsCallbacks): void {
+    const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+    const qbtns = Array.from(document.querySelectorAll("#set-quality button")) as HTMLButtonElement[];
+    const auto = $<HTMLInputElement>("set-res-auto");
+    const res = $<HTMLInputElement>("set-res");
+    const resVal = $<HTMLElement>("set-res-val");
+    const view = $<HTMLInputElement>("set-view");
+    const viewVal = $<HTMLElement>("set-view-val");
+
+    const paintQ = (q: string) => qbtns.forEach((b) => b.classList.toggle("on", b.dataset.q === q));
+    const paintRes = () => { res.disabled = auto.checked; resVal.textContent = auto.checked ? "Auto" : `${res.value}%`; };
+    const paintView = () => { viewVal.textContent = `${view.value} m`; };
+    const paintAll = (v: VisualSettings) => {
+      paintQ(v.quality);
+      auto.checked = v.resAuto;
+      res.value = String(Math.round(v.resScale * 100));
+      view.value = String(v.viewDist);
+      paintRes(); paintView();
+    };
+    paintAll(s);
+
+    qbtns.forEach((b) => { b.onclick = () => { const q = b.dataset.q as Quality; cb.setQuality(q); paintQ(q); }; });
+    auto.onchange = () => { cb.setResAuto(auto.checked); paintRes(); };
+    res.oninput = () => { auto.checked = false; cb.setResScale(+res.value / 100); paintRes(); };
+    view.oninput = () => { cb.setViewDist(+view.value); paintView(); };
+    $<HTMLButtonElement>("set-auto").onclick = () => paintAll(cb.auto());
+    $<HTMLButtonElement>("set-close").onclick = () => this.hideSettings();
+    $<HTMLElement>("hud-settings").style.display = "flex";
+  }
+
+  hideSettings(): void { (document.getElementById("hud-settings") as HTMLElement).style.display = "none"; }
+  settingsOpen(): boolean { return (document.getElementById("hud-settings") as HTMLElement).style.display === "flex"; }
+
   setTool(tool: Tool): void {
     this.tool.textContent = TOOL_NAMES[tool];
   }
@@ -325,6 +377,28 @@ function inject(): void {
     #hud-menu .room { display: flex; gap: 8px; align-items: center; justify-content: center; font-size: 12px; color: #9fb3c8; }
     #hud-room { pointer-events: auto; background: rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.15);
       border-radius: 7px; padding: 6px 9px; color: #eef2f6; font-size: 13px; width: 130px; }
+    #hud-gear { position: absolute; top: 12px; right: 150px; pointer-events: auto; cursor: pointer; width: 34px; height: 34px;
+      border-radius: 9px; border: 1px solid rgba(255,255,255,.14); background: rgba(12,16,22,.62); color: #cfe0f2;
+      font-size: 17px; line-height: 1; backdrop-filter: blur(6px); }
+    #hud-gear:hover { background: rgba(40,52,68,.9); }
+    #hud-settings { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+      pointer-events: auto; background: rgba(6,9,14,.72); backdrop-filter: blur(3px); }
+    #hud-settings .scard { background: rgba(16,22,30,.97); border: 1px solid rgba(255,255,255,.1);
+      border-radius: 14px; padding: 22px 26px; width: 340px; }
+    #hud-settings h2 { margin: 0 0 14px; font-size: 18px; }
+    #hud-settings .srow { display: flex; align-items: center; justify-content: space-between; margin: 14px 0 6px; font-size: 13px; }
+    #hud-settings .slabel { color: #cfe0f2; } #hud-settings .slabel b { color: #9fd0ff; font-variant-numeric: tabular-nums; }
+    #hud-settings .sbtns { display: flex; gap: 6px; }
+    #hud-settings .sbtns button { pointer-events: auto; cursor: pointer; border: 1px solid rgba(255,255,255,.14);
+      border-radius: 8px; padding: 6px 12px; font-size: 13px; color: #eef2f6; background: rgba(40,52,68,.7); }
+    #hud-settings .sbtns button.on { background: rgba(90,150,255,.3); border-color: rgba(120,180,255,.75); }
+    #hud-settings .schk { display: flex; align-items: center; gap: 5px; color: #9fb3c8; cursor: pointer; }
+    #hud-settings .srange { width: 100%; margin: 2px 0 4px; accent-color: #5a96ff; cursor: pointer; }
+    #hud-settings .srange:disabled { opacity: .4; }
+    #hud-settings .sactions { display: flex; gap: 10px; margin-top: 20px; }
+    #hud-settings .sactions button { pointer-events: auto; cursor: pointer; flex: 1; border: 1px solid rgba(255,255,255,.15);
+      border-radius: 10px; padding: 11px; font-size: 14px; color: #eef2f6; background: rgba(40,52,68,.9); }
+    #hud-settings .sprimary { background: rgba(30,48,80,.9); border-color: rgba(90,150,255,.5); }
   `;
   document.head.appendChild(style);
 
@@ -361,6 +435,27 @@ function inject(): void {
           <button id="hud-btn-dvh"><b>🤖 vs 🧍</b><small>Drones vs Humanos</small></button>
         </div>
         <div class="room">Sala <input id="hud-room" maxlength="32" /> <span>(comparte el código)</span></div>
+      </div>
+    </div>
+    <button id="hud-gear" title="Ajustes visuales (O)">⚙</button>
+    <div id="hud-settings">
+      <div class="scard">
+        <h2>⚙ Ajustes visuales</h2>
+        <div class="srow"><span class="slabel">Calidad</span>
+          <div class="sbtns" id="set-quality">
+            <button data-q="bajo">Bajo</button><button data-q="medio">Medio</button><button data-q="alto">Alto</button>
+          </div>
+        </div>
+        <div class="srow"><span class="slabel">Resolución <b id="set-res-val"></b></span>
+          <label class="schk"><input type="checkbox" id="set-res-auto"> Auto</label>
+        </div>
+        <input type="range" id="set-res" class="srange" min="50" max="100" step="5" />
+        <div class="srow"><span class="slabel">Distancia de vista <b id="set-view-val"></b></span></div>
+        <input type="range" id="set-view" class="srange" min="50" max="160" step="10" />
+        <div class="sactions">
+          <button id="set-auto" class="sprimary">🔍 Automático</button>
+          <button id="set-close">Cerrar</button>
+        </div>
       </div>
     </div>
     <div id="hud-win"></div>

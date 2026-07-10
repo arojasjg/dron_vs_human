@@ -1,4 +1,8 @@
 import * as THREE from "three";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RENDER_DIST } from "../config";
 import type { QualityConfig } from "./quality";
 
@@ -30,7 +34,7 @@ export class Renderer {
     // Fog reaches FULL opacity a touch before the RENDER_DIST cull (config.ts), so chunks are already
     // dissolved into the sky by the time they're distance-culled → the cut is invisible. Matching the fog to
     // the cull radius is what makes the culling free of pop.
-    this.scene.fog = new THREE.Fog(SKY.horizon, 55, RENDER_DIST - 15);
+    this.scene.fog = new THREE.Fog(SKY.horizon, 45, RENDER_DIST - 12);
 
     // No image-based lighting (IBL/PMREM): on the target GPUs, sampling the sky cubemap per PBR pixel was
     // the single dominant cost — it capped the frame to ~50fps even inside a 4-wall room, while dropping it
@@ -71,6 +75,13 @@ export class Renderer {
   private baseRatio = 1;   // the active preset's pixel ratio
   private dynScale = 1;    // fps-driven dynamic-resolution multiplier on top of it (dynamicRes.ts)
 
+  // ALTO-only bloom post-processing. Built LAZILY the first time bloom turns on, so medio/bajo (and any
+  // machine that never reaches ALTO) allocate none of its render targets. When off, render() takes the
+  // direct path and the composer costs nothing.
+  private composer: EffectComposer | null = null;
+  private renderPass: RenderPass | null = null;
+  private bloomOn = false;
+
   /** Dynamic-resolution multiplier on top of the preset pixel ratio — the fill-rate lever that keeps a
    *  weak GPU at 60 fps. A change reallocs the drawing buffer, so the caller debounces it. */
   setRenderScale(scale: number): void {
@@ -78,6 +89,43 @@ export class Renderer {
     this.dynScale = scale;
     this.renderer.setPixelRatio(this.baseRatio * scale);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.syncComposerSize();
+  }
+
+  /** Enables the ALTO-only bloom pass (bright emissives, explosions, muzzle, sun). Off → render() uses the
+   *  direct path so medio/bajo pay nothing. Lazily builds the composer the first time it's switched on. */
+  setBloom(on: boolean): void {
+    this.bloomOn = on;
+  }
+
+  /** Live view-distance change (settings menu): slide the fog so the mesh distance-cull edge (game.ts, at the
+   *  same radius) stays hidden — near/far scale with the radius so the haze ramp looks the same at any range. */
+  setViewDistance(d: number): void {
+    const fog = this.scene.fog as THREE.Fog;
+    if (!fog) return;
+    fog.near = Math.round(d * 0.45);
+    fog.far = d - 12;
+  }
+
+  private syncComposerSize(): void {
+    if (!this.composer) return;
+    this.composer.setPixelRatio(this.baseRatio * this.dynScale);
+    this.composer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  private ensureComposer(camera: THREE.Camera): void {
+    if (this.composer) { this.renderPass!.camera = camera; return; }
+    const composer = new EffectComposer(this.renderer); // HalfFloat targets by default → bloom sees HDR values
+    const rp = new RenderPass(this.scene, camera);
+    // strength, radius, THRESHOLD — a high threshold keeps the glow off ordinary surfaces and lets only the
+    // bright things (explosion/muzzle particles, hot emissives, the sun-lit sky) bloom. Tunable by eye.
+    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.45, 0.82);
+    composer.addPass(rp);
+    composer.addPass(bloom);
+    composer.addPass(new OutputPass()); // final tone-map (ACES) + sRGB; the RenderPass/bloom chain works in linear
+    this.composer = composer;
+    this.renderPass = rp;
+    this.syncComposerSize();
   }
 
   /** Resizes the shadow map (cost ∝ area). Realloc happens on the next frame. */
@@ -88,13 +136,15 @@ export class Renderer {
     if (this.sun.shadow.map) { this.sun.shadow.map.dispose(); this.sun.shadow.map = null; } // realloc next frame
   }
 
-  /** Applies a graphics-quality preset live: shadow map, render resolution. */
+  /** Applies a graphics-quality preset live: shadow map, render resolution, ALTO-only bloom. */
   applyQuality(cfg: QualityConfig): void {
     this.renderer.shadowMap.enabled = cfg.shadow > 0;
     if (cfg.shadow > 0) this.setShadowMapSize(cfg.shadow);
     this.baseRatio = cfg.pixelRatio;
     this.renderer.setPixelRatio(this.baseRatio * this.dynScale); // keep any active dynamic-res scale
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.setBloom(cfg.bloom);
+    this.syncComposerSize();
   }
 
   /** Requests one shadow-map re-render on the next render() (autoUpdate is off). Call together with
@@ -112,10 +162,16 @@ export class Renderer {
 
   private onResize(): void {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.syncComposerSize();
   }
 
   render(camera: THREE.Camera): void {
-    this.renderer.render(this.scene, camera);
+    if (this.bloomOn) {
+      this.ensureComposer(camera); // builds on first use; refreshes the pass camera thereafter
+      this.composer!.render();
+    } else {
+      this.renderer.render(this.scene, camera);
+    }
   }
 }
 
@@ -135,18 +191,20 @@ function makeSky(): THREE.Texture {
   const ctx = c.getContext("2d")!;
   const hex = (n: number) => "#" + n.toString(16).padStart(6, "0");
   const g = ctx.createLinearGradient(0, 0, 0, 512);
-  g.addColorStop(0.0, hex(SKY.zenith));
-  g.addColorStop(0.55, "#8fbadf");
-  g.addColorStop(0.82, "#c3d2dc");
+  g.addColorStop(0.0, "#2b5fb0");        // deeper, richer blue overhead
+  g.addColorStop(0.35, hex(SKY.zenith));
+  g.addColorStop(0.62, "#8fbadf");
+  g.addColorStop(0.86, "#c3d2dc");
   g.addColorStop(1.0, hex(SKY.horizon)); // meets the fog colour at the horizon
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 2, 512);
-  // a soft warm glow band near the horizon on the sun side (adds depth to the backdrop)
-  const glow = ctx.createLinearGradient(0, 300, 0, 470);
+  // a broad, warm sun-glow band swelling into the horizon (a golden-hour cue that adds depth to the backdrop)
+  const glow = ctx.createLinearGradient(0, 250, 0, 500);
   glow.addColorStop(0, "rgba(255,241,220,0)");
-  glow.addColorStop(1, "rgba(255,238,205,0.35)");
+  glow.addColorStop(0.7, "rgba(255,236,198,0.28)");
+  glow.addColorStop(1.0, "rgba(255,224,175,0.5)");
   ctx.fillStyle = glow;
-  ctx.fillRect(0, 300, 2, 170);
+  ctx.fillRect(0, 250, 2, 250);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;

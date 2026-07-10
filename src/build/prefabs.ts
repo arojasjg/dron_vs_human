@@ -121,18 +121,58 @@ export function placeGasTank(grid: VoxelGrid, x: number, y: number, z: number): 
 
 // ---- Street dressing: small destructible voxel props (all markSettled → non-structural) -------------
 
-/** A destructible tree: a wood trunk with a roughly-spherical leaves canopy. The canopy is weak
- *  foliage (shatters), so a single hit knocks it apart. Height varies by position (deterministic). */
-export function buildTree(grid: VoxelGrid, ox: number, oz: number): void {
-  const h = 5 + (mix32(ox, oz) % 3);                        // trunk height 5..7, hashed by position
+export type TreeKind = "oak" | "pine" | "bush";
+/** A destructible tree in one of three seeded shapes (canopy is weak foliage → a single hit knocks it
+ *  apart): OAK (round broadleaf, the original), PINE (tall conifer with a stacked conical dark-needle
+ *  canopy), BUSH (low leafy shrub). `kind` defaults to a position hash so a street/forest gets natural
+ *  variety with no extra caller work; all shapes are markSettled (non-structural). Deterministic. */
+export function buildTree(grid: VoxelGrid, ox: number, oz: number, kind?: TreeKind, indestructible = false): void {
+  const hsh = mix32(ox, oz);
+  const k: TreeKind = kind ?? (["oak", "pine", "oak", "bush", "pine"] as const)[hsh % 5]; // oak/pine common, bush rarer
+  // A tree is DECORATION, not structure: mark its bound BOTH weak (dropped from the collapse/pancake mass
+  // solve — a dense row of trees, e.g. a boulevard median or the forest wall, must never register as a
+  // load-bearing storey and false-pancake) and settled (anchored, so it never counts as a floating cell).
+  // Forest-wall trees additionally take the INDESTRUCTIBLE flag (immune to every weapon).
+  const mark = (x0: number, x1: number, y1: number, z0: number, z1: number): void => {
+    grid.markWeakBox(x0, x1, 0, y1, z0, z1);
+    markSettledBox(grid, x0, x1, 0, y1, z0, z1);
+    if (indestructible) grid.markIndestructibleBox(x0, x1, 0, y1, z0, z1);
+  };
+
+  if (k === "bush") {                                        // low leafy shrub — a short stem + small blob
+    grid.set(ox, 0, oz, "wood");
+    const R = 1, cy = 1;
+    for (let dx = -R; dx <= R; dx++)
+      for (let dy = 0; dy <= R + 1; dy++)
+        for (let dz = -R; dz <= R; dz++)
+          if (dx * dx + (dy - 1) * (dy - 1) + dz * dz <= R * R + 1) grid.set(ox + dx, cy + dy, oz + dz, "leaves");
+    mark(ox - R, ox + R, cy + R + 1, oz - R, oz + R);
+    return;
+  }
+
+  if (k === "pine") {                                        // tall conifer — narrowing conical needle canopy
+    const h = 6 + (hsh % 4);                                 // trunk 6..9
+    for (let y = 0; y < h; y++) grid.set(ox, y, oz, "wood");
+    let R = 3;
+    for (let y = h; y <= h + 6 && R >= 0; y++) {
+      for (let dx = -R; dx <= R; dx++)
+        for (let dz = -R; dz <= R; dz++)
+          if (dx * dx + dz * dz <= R * R + 1) grid.set(ox + dx, y, oz + dz, "leaves_pine");
+      if ((y - h) % 2 === 1) R--;                            // shrink every other ring → a point at the top
+    }
+    mark(ox - 3, ox + 3, h + 6, oz - 3, oz + 3);
+    return;
+  }
+
+  const h = 5 + (hsh % 3);                                   // OAK: trunk height 5..7, hashed by position
   for (let y = 0; y < h; y++) grid.set(ox, y, oz, "wood");
-  grid.set(ox, h, oz, "leaves");                            // neck: canopy sits on the trunk top
+  grid.set(ox, h, oz, "leaves");                             // neck: canopy sits on the trunk top
   const cy = h + 1, R = 2;
   for (let dx = -R; dx <= R; dx++)
     for (let dy = -R; dy <= R; dy++)
       for (let dz = -R; dz <= R; dz++)
         if (dx * dx + dy * dy + dz * dz <= R * R + 1) grid.set(ox + dx, cy + dy, oz + dz, "leaves");
-  markSettledBox(grid, ox - R, ox + R, 0, cy + R, oz - R, oz + R);
+  mark(ox - R, ox + R, cy + R, oz - R, oz + R);
 }
 
 /** A street lamp: a metal pole with a short arm and a glowing glass lamp head. */
@@ -485,6 +525,41 @@ export function buildBuilding(grid: VoxelGrid, ox = 0, oz = 0, spec: BuildSpec =
   buildStairwell(grid, stairX0, stairX1, stairZ0, spec);
   buildExternalStairs(grid, ox, oz, spec); // fire-escape up the east wall to the roof
   decorateBuilding(grid, ox, oz, spec); // subtle exterior character (parapet, cornices, sign, balconies)
+  furnishBuilding(grid, ox, oz, spec);  // light interior dressing (crates/desks + upper-floor gas-tank hazards)
+}
+
+/** Light interior dressing, seeded → identical per client: a few crates/desks in the ground-floor lobby and
+ *  extra gas-tank hazards on some upper floors. Every piece is placed ONLY on a cell that is empty AND has a
+ *  solid floor directly below (so it never overwrites a column/wall/slab and never floats over a double-height
+ *  void), and is markSettled (non-structural) → it can't perturb the collapse solver or the structural tests. */
+function furnishBuilding(grid: VoxelGrid, ox: number, oz: number, spec: BuildSpec): void {
+  const { W, D, FLOORS } = spec;
+  const canPlace = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): boolean => {
+    for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) if (!grid.has(x, y0 - 1, z)) return false; // solid floor below
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) if (grid.has(x, y, z)) return false; // clear
+    return true;
+  };
+  // A furnishing is NON-STRUCTURAL — markWeakBox drops it from the collapse/pancake mass solve (so a gas tank
+  // on an upper slab can't be mistaken for load-bearing section and false-pancake). It is deliberately NOT
+  // markSettled: settling would ground-ANCHOR the cell permanently, so a tank on an upper floor would float
+  // when the storeys below are destroyed. Left un-anchored, it rests on its slab (canPlace guarantees one
+  // directly below → the cell bears via that slab) while intact, and falls with the building when gutted.
+  const prop = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number, mat: MaterialId): void => {
+    fillBox(grid, x0, x1, y0, y1, z0, z1, mat);
+    grid.markWeakBox(x0, x1, y0, y1, z0, z1);
+  };
+  const nProps = 1 + Math.floor(rand() * 3); // crates + low desks across the ground lobby (light — every building pays)
+  for (let i = 0; i < nProps; i++) {
+    const fx = ox + 10 + Math.floor(rand() * Math.max(1, W - 22));
+    const fz = oz + 10 + Math.floor(rand() * Math.max(1, D - 22));
+    if (rand() < 0.5) { if (canPlace(fx, fx + 1, 1, 2, fz, fz + 1)) prop(fx, fx + 1, 1, 2, fz, fz + 1, "wood"); }      // crate
+    else { if (canPlace(fx, fx + 2, 1, 1, fz, fz + 1)) prop(fx, fx + 2, 1, 1, fz, fz + 1, "wood"); }                  // low desk
+  }
+  for (let s = 1; s < FLOORS; s++) // extra gas-tank hazards on some upper floors (something to shoot inside)
+    if (rand() < 0.3) {
+      const gx = ox + 6 + Math.floor(rand() * Math.max(1, W - 14)), gz = oz + 6 + Math.floor(rand() * Math.max(1, D - 14)), gy = s * STRIDE + 1;
+      if (canPlace(gx, gx + 1, gy, gy + 4, gz, gz + 1)) prop(gx, gx + 1, gy, gy + 4, gz, gz + 1, "gastank");
+    }
 }
 
 const SIGN_MATS: MaterialId[] = ["glass", "metal", "wall_navy", "wall_clay"];
@@ -541,8 +616,21 @@ const PLAZA_PX0 = 3, PLAZA_PX1 = 5, PLAZA_PZ0 = 4, PLAZA_PZ1 = 6;
 const inPlaza = (px: number, pz: number): boolean =>
   px >= PLAZA_PX0 && px <= PLAZA_PX1 && pz >= PLAZA_PZ0 && pz <= PLAZA_PZ1;
 
+// Grand boulevards: a CROSS of two wide avenues down the central plot column (N-S) + row (E-O), meeting at
+// the plaza. Their plot column/row carries NO building; groundClass paints the corridor as asphalt with a
+// thin concrete median down the centre. AVENUE_HALF is the half-width of the asphalt in voxels (~4.25 m/side).
+const AVENUE_PX = 4, AVENUE_PZ = 5;
+const AVENUE_HALF = 17;
+const onAvenuePlot = (px: number, pz: number): boolean => px === AVENUE_PX || pz === AVENUE_PZ;
+
+// Residential suburbs: the top + bottom plot rows are low-rise houses (a cluster per plot) instead of towers,
+// so the tall core is ringed by a distinct neighbourhood. These plots hold no OBJECTIVE-eligible building.
+const isResidential = (pz: number): boolean => pz === 0 || pz === PLOTS_Z - 1;
+
 /** City ground extent in VOXELS (the plot grid buildDefaultScene fills). */
 export const CITY_VOX = { x1: PLOTS_X * PLOT_W, z1: PLOTS_Z * PLOT_D };
+// Voxel-space centre lines of the two boulevards (used by groundClass painting + the median dressing).
+const AVENUE_VX = (AVENUE_PX + 0.5) * PLOT_W, AVENUE_VZ = (AVENUE_PZ + 0.5) * PLOT_D;
 
 /** Classifies a voxel-space XZ column under the city so the ground can be painted as a real city floor:
  *  'street' (a plot-boundary gap → asphalt), 'plot' (under/around a building → concrete apron), or
@@ -550,6 +638,9 @@ export const CITY_VOX = { x1: PLOTS_X * PLOT_W, z1: PLOTS_Z * PLOT_D };
 export function groundClass(vx: number, vz: number): "street" | "plot" | "outside" {
   const m = 6; // pavement extends a little past the outer plots
   if (vx < -m || vz < -m || vx > CITY_VOX.x1 + m || vz > CITY_VOX.z1 + m) return "outside";
+  // the grand-boulevard cross: a wide asphalt corridor with a thin concrete median down each centre line
+  if (Math.abs(vx - AVENUE_VX) <= AVENUE_HALF || Math.abs(vz - AVENUE_VZ) <= AVENUE_HALF)
+    return (Math.abs(vx - AVENUE_VX) <= 2 || Math.abs(vz - AVENUE_VZ) <= 2) ? "plot" : "street";
   const nearBoundary = (v: number, period: number) => {
     const r = ((v % period) + period) % period;
     return r < STREET / 2 || r > period - STREET / 2; // within half a street-width of a plot boundary
@@ -605,7 +696,61 @@ function buildPlaza(grid: VoxelGrid): void {
   }
 }
 
-/** A mini-town: ~90 buildings on a 9×11 plot grid with a central plaza and wide streets between them —
+// Static forest wall around the whole city: an INDESTRUCTIBLE treeline (plus a continuous low hedge that
+// actually blocks passage at ground level) sealing every edge, with ONE gate at the south end of the N-S
+// boulevard — itself plugged by indestructible trucks. Nothing here can be shot, blown up or knocked down.
+const FOREST_MARGIN = 6, FOREST_DEPTH = 24, FOREST_SPACING = 11; // 11 (was 7): ~½ the trees; the hedge is the real barrier, trees are decor
+const GATE_HALF = AVENUE_HALF + 3;
+
+/** Builds the forest wall + the sealed gate. All voxels are weak+settled (non-structural, anchored → never
+ *  enter the collapse solver) and INDESTRUCTIBLE. Deterministic (position-hashed, no rand()) so it's byte-
+ *  identical on every client and never perturbs the city's rand() stream. */
+function buildForestRing(grid: VoxelGrid): void {
+  const ix0 = -FOREST_MARGIN, ix1 = CITY_VOX.x1 + FOREST_MARGIN, iz0 = -FOREST_MARGIN, iz1 = CITY_VOX.z1 + FOREST_MARGIN;
+  const ox0 = ix0 - FOREST_DEPTH, ox1 = ix1 + FOREST_DEPTH, oz0 = iz0 - FOREST_DEPTH, oz1 = iz1 + FOREST_DEPTH;
+  const gateX = Math.round(AVENUE_VX);
+  const atGate = (vx: number, vz: number): boolean => Math.abs(vx - gateX) <= GATE_HALF && vz < iz0; // the south gate opening
+  // scattered indestructible trees filling the ring band (skip the city interior and the gate mouth)
+  for (let vx = ox0; vx <= ox1; vx += FOREST_SPACING)
+    for (let vz = oz0; vz <= oz1; vz += FOREST_SPACING) {
+      if (vx > ix0 && vx < ix1 && vz > iz0 && vz < iz1) continue; // inside the city → no forest
+      if (atGate(vx, vz)) continue;
+      buildTree(grid, vx + (mix32(vx, vz) % 3) - 1, vz + (mix32(vz, vx, 7) % 3) - 1, undefined, true);
+    }
+  // a continuous low hedge along the inner edge — the real ground-level barrier (4 tall → past the autostep)
+  const hedge = (x0: number, x1: number, z0: number, z1: number): void => {
+    if (x1 < x0 || z1 < z0) return;
+    fillBox(grid, x0, x1, 0, 3, z0, z1, "leaves");
+    grid.markWeakBox(x0, x1, 0, 3, z0, z1);
+    markSettledBox(grid, x0, x1, 0, 3, z0, z1);
+    grid.markIndestructibleBox(x0, x1, 0, 3, z0, z1);
+  };
+  hedge(ix0 - 1, ix1 + 1, iz1, iz1 + 1);                          // north edge
+  hedge(ix0 - 1, ix0, iz0 - 1, iz1 + 1);                          // west edge
+  hedge(ix1, ix1 + 1, iz0 - 1, iz1 + 1);                          // east edge
+  hedge(ix0 - 1, gateX - GATE_HALF - 1, iz0 - 1, iz0);            // south edge, left of the gate
+  hedge(gateX + GATE_HALF + 1, ix1 + 1, iz0 - 1, iz0);           // south edge, right of the gate
+  // SEAL the gate: a row of indestructible trucks straddling the boulevard exit
+  for (let i = -1; i <= 1; i++) {
+    const tx = gateX + i * 15 - 9, tz = iz0 - 8;
+    buildTruck(grid, tx, tz, "metal");
+    grid.markIndestructibleBox(tx - 1, tx + 20, 0, 10, tz - 1, tz + 9);
+  }
+}
+
+/** A suburban plot: a seeded cluster of 2-4 small brick houses inset from the plot edges (so the streets
+ *  around it stay clear) plus a yard tree. Houses are ordinary destructible structures, grounded from y=0. */
+function buildHouseCluster(grid: VoxelGrid, px: number, pz: number): void {
+  const bx = px * PLOT_W, bz = pz * PLOT_D;
+  const spots = [[8, 6], [34, 6], [8, 32], [34, 32]] as const; // a 2×2 layout, each inset ≥6 from the plot edges
+  const order = [0, 1, 2, 3];
+  for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  const n = 2 + Math.floor(rand() * 3); // 2-4 houses
+  for (let k = 0; k < n; k++) { const [dx, dz] = spots[order[k]]; buildHouse(grid, bx + dx, bz + dz); }
+  if (rand() < 0.85) buildTree(grid, bx + 26, bz + 26); // a yard tree in the central gap
+}
+
+/** A mini-town: a tall core ringed by suburbs on a 9×11 plot grid with a central plaza, a boulevard cross,
  *  some "equal" (a fixed uniform size), some tall landmarks, the rest randomised — plus destructible
  *  street dressing (trees, lampposts, bins, litter) and parked vehicles. Seeded rand() → every client
  *  generates the IDENTICAL town (destruction sync). */
@@ -614,11 +759,17 @@ export function buildDefaultScene(grid: VoxelGrid): void {
   _placed = [];
   for (let px = 0; px < PLOTS_X; px++)
     for (let pz = 0; pz < PLOTS_Z; pz++) {
-      if (inPlaza(px, pz)) continue;                                                            // the central plaza carries no building
+      if (inPlaza(px, pz) || onAvenuePlot(px, pz)) continue;                                    // plaza + boulevard corridors carry no building
+      if (isResidential(pz)) { buildHouseCluster(grid, px, pz); continue; }                      // suburb ring: houses, not a tower
       const i = px * PLOTS_Z + pz;
       let W: number, D: number, FLOORS: number;
+      const roll = rand();
       if (i % 7 === 0) {                                                                        // rare taller landmark
-        W = PLOT_W - STREET; D = PLOT_D - STREET; FLOORS = 5 + Math.floor(rand() * 2);
+        W = PLOT_W - STREET; D = PLOT_D - STREET; FLOORS = 5 + Math.floor(rand() * 3);          // 5-7 storeys
+      } else if (roll < 0.3) {                                                                  // a mid-rise: bigger footprint, 3-4 storeys
+        W = Math.max(34, Math.round((0.7 + rand() * 0.25) * (PLOT_W - STREET)));
+        D = Math.max(34, Math.round((0.7 + rand() * 0.25) * (PLOT_D - STREET)));
+        FLOORS = 3 + Math.floor(rand() * 2);
       } else {                                                                                  // the majority: small & low
         W = Math.max(34, Math.round((0.55 + rand() * 0.4) * (PLOT_W - STREET)));
         D = Math.max(34, Math.round((0.55 + rand() * 0.4) * (PLOT_D - STREET)));
@@ -660,6 +811,22 @@ export function buildDefaultScene(grid: VoxelGrid): void {
       if (rand() < 0.4) buildLitter(grid, xl + sideA, zc + 3);
     }
   }
+  // Grand-boulevard median: alternating trees + lampposts down each centre line, plus lane traffic. Skips a
+  // band around the plaza/intersection so the crossing stays open. Seeded rand() → identical per client.
+  // Median is CENTRAL (always on-screen), so it's kept light: sparse (every 28 vox), mostly cheap lampposts
+  // over dense tree canopies, and only occasional lane traffic — this is a hot spot for draws/fill.
+  const avX = Math.round(AVENUE_VX), avZ = Math.round(AVENUE_VZ);
+  for (let vz = 8; vz < CITY_VOX.z1 - 8; vz += 28) {
+    if (Math.abs(vz - avZ) <= AVENUE_HALF + 6) continue;              // keep the crossing/plaza open
+    if (rand() < 0.35) buildTree(grid, avX, vz); else buildLamppost(grid, avX - 1, vz);
+    if (rand() < 0.3) park(avX - 13, vz - 3);                        // occasional vehicle in the west lane
+  }
+  for (let vx = 8; vx < CITY_VOX.x1 - 8; vx += 28) {
+    if (Math.abs(vx - avX) <= AVENUE_HALF + 6) continue;
+    if (rand() < 0.35) buildTree(grid, vx, avZ); else buildLamppost(grid, vx, avZ - 1);
+    if (rand() < 0.3) park(vx - 3, avZ - 13);                        // occasional vehicle in the north lane
+  }
+  buildForestRing(grid); // the indestructible treeline that walls the whole map in (one sealed gate)
 }
 
 // Drones-vs-Humans bases (destructible objectives). Each carries the voxel bounds + its built voxel

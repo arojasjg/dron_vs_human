@@ -13,6 +13,8 @@ class MockGrid {
   get(x: number, y: number, z: number) { return this.m.get(this.k(x, y, z)); }
   markSettled() {}
   markWeakBox() {}
+  markIndestructibleBox() {}
+  isIndestructible() { return false; }
   clear() { this.m.clear(); }
   cells(): Voxel[] {
     const out: Voxel[] = [];
@@ -24,12 +26,32 @@ const grounded = (g: MockGrid) => findFloatingVoxels(g.cells(), (x, y, z) => g.h
 const count = (g: MockGrid, mat: string) => { let n = 0; for (const m of g.m.values()) if (m === mat) n++; return n; };
 
 describe("street props — destructible voxel models", () => {
-  it("buildTree: wood trunk + leaves canopy, grounded (nothing floats)", () => {
-    const g = new MockGrid();
-    buildTree(g as any, 10, 10);
-    expect(count(g, "wood")).toBeGreaterThan(0);     // trunk
-    expect(count(g, "leaves")).toBeGreaterThan(0);   // canopy
-    expect(grounded(g)).toBe(0);                      // trunk reaches the ground, canopy connects to it
+  it("buildTree: every kind (oak/pine/bush) has a stem + canopy and stays grounded (nothing floats)", () => {
+    for (const kind of ["oak", "pine", "bush"] as const) {
+      const g = new MockGrid();
+      buildTree(g as any, 10, 10, kind);
+      expect(count(g, "wood")).toBeGreaterThan(0);                            // stem/trunk
+      expect(count(g, "leaves") + count(g, "leaves_pine")).toBeGreaterThan(0); // canopy (broadleaf or needles)
+      expect(grounded(g)).toBe(0);                                            // connects to the ground
+    }
+  });
+
+  it("pine uses the dark conifer needles; oak uses broadleaf foliage", () => {
+    const pine = new MockGrid(); buildTree(pine as any, 1, 1, "pine");
+    expect(count(pine, "leaves_pine")).toBeGreaterThan(0);
+    const oak = new MockGrid(); buildTree(oak as any, 1, 1, "oak");
+    expect(count(oak, "leaves_pine")).toBe(0);
+    expect(count(oak, "leaves")).toBeGreaterThan(0);
+  });
+
+  it("default kind varies by position → a mixed treeline (still deterministic)", () => {
+    let pine = 0, broad = 0;
+    for (let i = 0; i < 24; i++) {
+      const g = new MockGrid(); buildTree(g as any, i * 7 + 1, i * 5 + 2);
+      if (count(g, "leaves_pine") > 0) pine++; else broad++;
+    }
+    expect(pine).toBeGreaterThan(0);  // some conifers appear
+    expect(broad).toBeGreaterThan(0); // …alongside broadleaf/bush
   });
 
   it("lamppost / trashcan / litter place voxels and sit on the ground", () => {

@@ -9,18 +9,20 @@ export interface QualityConfig {
   shadow: number;       // shadow-map resolution; 0 = shadows off
   pixelRatio: number;   // render resolution multiplier
   voxelDetail: boolean; // per-voxel mortar-seam fragment detail (the ~4ms fwidth cost); off = flat masonry
+  bloom: boolean;       // ALTO-only additive glow on bright emissives/explosions/muzzle/sun (a post pass, ~2-4ms)
 }
 
 export function qualityConfig(q: Quality, dpr: number): QualityConfig {
   switch (q) {
     // pixelRatio is capped BELOW the device ratio: on a high-DPI panel (Retina Mac, dpr 2) rendering at
     // the full physical resolution is a 4× fill-rate cost a fast-moving game doesn't need. 1.5 keeps it
-    // crisp at ~half the pixels; the dynamic-res controller trims further under load.
-    case "alto": return { shadow: 1024, pixelRatio: Math.min(dpr, 1.5), voxelDetail: true };
-    case "medio": return { shadow: 1024, pixelRatio: Math.min(dpr, 1), voxelDetail: true };
+    // crisp at ~half the pixels; the dynamic-res controller trims further under load. Bloom rides ONLY the
+    // top preset (the headroom freed by dropping IBL) and the auto-ladder disables it the moment it steps down.
+    case "alto": return { shadow: 1024, pixelRatio: Math.min(dpr, 1.25), voxelDetail: true, bloom: true };
+    case "medio": return { shadow: 1024, pixelRatio: Math.min(dpr, 1), voxelDetail: true, bloom: false };
     // bajo is the FLOOR: the mortar detail shader (~4ms) and shadows are off too. This is what removes the
     // last of the dominant per-pixel cost so a weak GPU can hold 60 fps with headroom to spare.
-    case "bajo": return { shadow: 0, pixelRatio: 0.75, voxelDetail: false };
+    case "bajo": return { shadow: 0, pixelRatio: 0.75, voxelDetail: false, bloom: false };
   }
 }
 

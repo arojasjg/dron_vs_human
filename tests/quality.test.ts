@@ -8,6 +8,7 @@ describe("graphics quality presets", () => {
       expect(c[i].shadow).toBeGreaterThanOrEqual(c[i - 1].shadow);
       expect(c[i].pixelRatio).toBeGreaterThanOrEqual(c[i - 1].pixelRatio);
       expect(Number(c[i].voxelDetail)).toBeGreaterThanOrEqual(Number(c[i - 1].voxelDetail)); // detail scales too
+      expect(Number(c[i].bloom)).toBeGreaterThanOrEqual(Number(c[i - 1].bloom));               // bloom rides the top only
     }
   });
 
@@ -20,13 +21,16 @@ describe("graphics quality presets", () => {
     expect(c.shadow).toBe(0);
     expect(c.pixelRatio).toBeLessThan(1);
     expect(c.voxelDetail).toBe(false); // the ~4ms fwidth mortar shader is gone at the floor
+    expect(c.bloom).toBe(false);
     expect(qualityAA("bajo")).toBe(false);
   });
 
-  it("alto keeps shadows + detail on and caps the pixel ratio", () => {
-    expect(qualityConfig("alto", 3).pixelRatio).toBe(1.5); // capped below the device ratio (high-DPI fill-rate save)
+  it("alto keeps shadows + detail on, caps the pixel ratio, and is the ONLY preset with bloom", () => {
+    expect(qualityConfig("alto", 3).pixelRatio).toBe(1.25); // capped well below the device ratio (1.5→1.25: 2.25×→1.56× the MEDIO pixels; bloom + full 1.5 was too heavy)
     expect(qualityConfig("alto", 2).shadow).toBe(1024); // 1024 (was 2048): a tight sun frustum looks the same, ~3ms cheaper
     expect(qualityConfig("alto", 2).voxelDetail).toBe(true); // full masonry detail on the top preset
+    expect(qualityConfig("alto", 2).bloom).toBe(true);   // bloom only on top (rides the IBL headroom)
+    expect(qualityConfig("medio", 2).bloom).toBe(false); // …never on medio/bajo
     expect(qualityAA("alto")).toBe(true);
   });
 

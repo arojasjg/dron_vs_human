@@ -5,8 +5,9 @@ import { packKey, unpackKey, type VoxelGrid } from "./voxelGrid";
 import { meshChunkCoord, MESH_CHUNK, cookMeshChunk, NEUTRAL_WEATHER, type CookedMeshPart } from "./cook";
 
 // Voxel-pitch surface detail injected into MeshStandardMaterial: darken thin (fwidth-AA'd) mortar/plank
-// seams at each VOXEL boundary on the two axes tangent to the face, plus per-voxel albedo/roughness
-// jitter. Shared function reference across all masonry mats → three compiles ONE program variant.
+// seams at each VOXEL boundary on the two axes tangent to the face, a soft ambient-occlusion recess toward
+// those same edges (cheap fake AO — makes a greedy-merged slab read as stacked 3D blocks, not one flat box),
+// plus per-voxel albedo/roughness jitter. Shared function reference across all masonry mats → ONE program.
 // Injects at documented #include anchors (r0.18x); a unit test asserts the anchors exist.
 //
 // The whole block is gated behind a shared `uDetail` uniform (uniform control flow → coherent across the
@@ -26,7 +27,7 @@ function makeVoxelDetailPatch(detailUniform: DetailUniform): THREE.MeshStandardM
     // (no transcendental sin, which is costly per-fragment) drives both the albedo jitter and roughness.
     shader.fragmentShader = "varying vec3 vVoxPos;\nvarying vec3 vVoxNrm;\nuniform float uDetail;\n" + shader.fragmentShader
       .replace("#include <roughnessmap_fragment>",
-        "#include <roughnessmap_fragment>\n  if (uDetail > 0.5) {\n    vec3 gv = vVoxPos / " + VX + ";\n    vec3 gf = abs(fract(gv) - 0.5);\n    vec3 gw = fwidth(gv) * 1.5 + 1e-4;\n    vec3 seam = smoothstep(vec3(0.5), vec3(0.5) - gw, gf);\n    vec3 nn = abs(normalize(vVoxNrm));\n    float mortar = max(max(seam.x*(1.0-nn.x), seam.y*(1.0-nn.y)), seam.z*(1.0-nn.z));\n    vec3 c = floor(gv); float hsh = fract((c.x*0.13 + c.y*0.71 + c.z*0.31) * 43.75);\n    diffuseColor.rgb *= mix(1.0, 0.66, mortar * 0.7) * (0.95 + hsh * 0.09);\n    roughnessFactor = clamp(roughnessFactor + (hsh - 0.5) * 0.16, 0.04, 1.0);\n  }");
+        "#include <roughnessmap_fragment>\n  if (uDetail > 0.5) {\n    vec3 gv = vVoxPos / " + VX + ";\n    vec3 gf = abs(fract(gv) - 0.5);\n    vec3 gw = fwidth(gv) * 1.5 + 1e-4;\n    vec3 seam = smoothstep(vec3(0.5), vec3(0.5) - gw, gf);\n    vec3 nn = abs(normalize(vVoxNrm));\n    float mortar = max(max(seam.x*(1.0-nn.x), seam.y*(1.0-nn.y)), seam.z*(1.0-nn.z));\n    float ao = max(max(smoothstep(0.30, 0.5, gf.x)*(1.0-nn.x), smoothstep(0.30, 0.5, gf.y)*(1.0-nn.y)), smoothstep(0.30, 0.5, gf.z)*(1.0-nn.z));\n    vec3 c = floor(gv); float hsh = fract((c.x*0.13 + c.y*0.71 + c.z*0.31) * 43.75);\n    diffuseColor.rgb *= mix(1.0, 0.66, mortar * 0.7) * mix(1.0, 0.80, ao * 0.55) * (0.95 + hsh * 0.09);\n    roughnessFactor = clamp(roughnessFactor + (hsh - 0.5) * 0.16, 0.04, 1.0);\n  }");
   };
 }
 
@@ -52,6 +53,7 @@ export class VoxelMesher {
       const mat = new THREE.MeshStandardMaterial({
         color: def.color, roughness: def.roughness, metalness: def.metalness,
         transparent: def.opacity < 1, opacity: def.opacity,
+        emissive: def.emissive ?? 0x000000, emissiveIntensity: def.emissiveIntensity ?? 1,
       });
       // Masonry (not glass/painted metal) gets voxel-pitch surface detail so a greedy-merged slab
       // visually re-subdivides into coursing at the destruction granularity — kills the "flat box" look.

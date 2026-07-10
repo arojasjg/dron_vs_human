@@ -5,7 +5,8 @@ import { Player } from "./engine/player";
 import { Walker } from "./engine/walker";
 import { Input } from "./engine/input";
 import { PerfGovernor } from "./engine/perfGovernor";
-import { autoQuality, qualityConfig, QUALITY_ORDER, lowerQuality, LOW_FPS, type Quality } from "./engine/quality";
+import { qualityConfig, QUALITY_ORDER, lowerQuality, LOW_FPS, type Quality } from "./engine/quality";
+import { loadSettings, saveSettings, autoSettings, clampViewDist, clampResScale, type VisualSettings } from "./engine/settings";
 import { nextResScaleGpu, nextResScaleFps, RES_MIN } from "./engine/dynamicRes";
 import { shouldRefreshShadows, SHADOW_MOVE_SQ } from "./engine/shadowPolicy";
 import { nextPerfLever } from "./engine/perfLever";
@@ -98,6 +99,8 @@ export class Game {
   private readonly governor = new PerfGovernor();
   private lowFpsSec = 0;          // seconds of sustained low fps → triggers an adaptive quality drop
   private resScale = 1;           // current dynamic-resolution scale (fill-rate lever)
+  private settings!: VisualSettings; // player's visual settings (quality/resolution/view distance); set in ctor
+  private renderDist = RENDER_DIST;  // live view-bubble radius (metres); from settings, adjustable in the menu
   private resTimer = 0;           // debounce so the drawing-buffer realloc doesn't thrash
   private lastResChange = 0;      // time of the last render-scale realloc — rate-limits the drawing-buffer stall
   private gpuTimer!: GpuTimer;    // real GPU-ms of the render (drives dynamic resolution); set in ctor
@@ -241,13 +244,19 @@ export class Game {
     if (gpu) this.particles.points.visible = false;
     this.impactMarks = new ImpactMarks(this.renderer.scene);
 
-    // graphics quality: the user's saved choice, else auto-detected from the GPU (software → Bajo,
-    // everything else → the safe middle). Cycle live with K.
-    const savedQ = (typeof localStorage !== "undefined" ? localStorage.getItem("quality") : null) as Quality | null;
-    this.quality = savedQ && QUALITY_ORDER.includes(savedQ) ? savedQ : autoQuality(this.gpuName());
-    // persist the resolved preset so MSAA (decided at renderer creation from this key) matches it next load
-    if (typeof localStorage !== "undefined") localStorage.setItem("quality", this.quality);
+    // Visual settings (quality preset, resolution mode, view distance): the player's saved choice, else
+    // GPU-auto-detected on first run. All render-only. The menu (O / gear) edits these live; K still cycles
+    // quality. Persist so MSAA (decided at renderer creation from the "quality" key) matches next load.
+    const hasSaved = typeof localStorage !== "undefined" &&
+      (localStorage.getItem("visualSettings") !== null || localStorage.getItem("quality") !== null);
+    this.settings = hasSaved ? loadSettings() : autoSettings(this.gpuName());
+    this.quality = this.settings.quality;
+    this.renderDist = this.settings.viewDist;
+    this.resScale = this.settings.resAuto ? 1 : this.settings.resScale;
+    saveSettings(this.settings);
     this.applyQualityPreset();
+    this.renderer.setViewDistance(this.renderDist);
+    if (!this.settings.resAuto) this.renderer.setRenderScale(this.resScale);
 
     this.targets = { grid: this.grid, debris: this.debris, particles: this.sink };
     this.projectiles = new Projectiles(
@@ -276,6 +285,7 @@ export class Game {
 
     this.hud.setTool(this.tool);
     this.hud.setMaterial(MATERIAL_ORDER[this.matIndex]);
+    this.hud.onGear(() => this.openSettings()); // gear button ≡ the O key
 
     this.input.onMouseDown = (b) => this.onMouseDown(b);
     this.input.onMouseUp = (b) => { if (b === 0) this.firing = false; }; // release LMB → stop auto-fire
@@ -581,19 +591,81 @@ export class Game {
     this.audio.setLowAudio(this.quality === "bajo"); // drop the reverb convolver on the lightest preset
   }
 
-  /** Cycles the graphics-quality preset live (Bajo → Medio → Alto) and persists the choice. */
-  private cycleQuality(): void {
-    this.quality = QUALITY_ORDER[(QUALITY_ORDER.indexOf(this.quality) + 1) % QUALITY_ORDER.length];
-    if (typeof localStorage !== "undefined") localStorage.setItem("quality", this.quality);
+  /** Sets the graphics-quality preset live (menu or K), applies it across subsystems, and persists. */
+  private setQuality(q: Quality): void {
+    this.quality = q;
+    this.settings.quality = q;
+    saveSettings(this.settings); // syncs both "visualSettings" and the legacy "quality" key (renderer AA)
     this.applyQualityPreset();
     this.interiorLights?.build(placedBuildings(), this.interiorLightBudget()); // re-scale interior lights to the preset
-    this.hud.flash(`Calidad: ${this.quality.toUpperCase()}${this.quality === "bajo" ? " · recargá para quitar el suavizado" : ""}`);
+    this.hud.flash(`Calidad: ${q.toUpperCase()}${q === "bajo" ? " · recargá para quitar el suavizado" : ""}`);
+  }
+
+  /** Cycles Bajo → Medio → Alto (the K key). */
+  private cycleQuality(): void {
+    this.setQuality(QUALITY_ORDER[(QUALITY_ORDER.indexOf(this.quality) + 1) % QUALITY_ORDER.length]);
+  }
+
+  /** Sets the live view-bubble radius (settings menu) and persists it. */
+  private setViewDist(d: number): void {
+    this.renderDist = clampViewDist(d);
+    this.renderer.setViewDistance(this.renderDist);
+    this.settings.viewDist = this.renderDist;
+    saveSettings(this.settings);
+  }
+
+  /** Auto resolution ON → the dynamic-res controller + quality ladder manage performance (hold 60 fps). OFF →
+   *  the player fixes resolution + quality; neither auto-system touches them. Freezes res at the current scale. */
+  private setResAuto(on: boolean): void {
+    this.settings.resAuto = on;
+    if (!on) { this.settings.resScale = this.resScale; this.renderer.setRenderScale(this.resScale); }
+    saveSettings(this.settings);
+  }
+
+  /** Manual resolution (menu slider): turns Auto OFF and fixes the render scale at `s`. */
+  private setResScale(s: number): void {
+    this.settings.resAuto = false;
+    this.resScale = clampResScale(s);
+    this.settings.resScale = this.resScale;
+    this.renderer.setRenderScale(this.resScale);
+    saveSettings(this.settings);
+  }
+
+  /** The "Automático" button: detect the safe preset from the GPU, hand resolution + quality back to the live
+   *  auto-systems (Auto), reset the view distance to default — then dynamic-res + the ladder fine-tune in play. */
+  private autoDetect(): VisualSettings {
+    this.settings = autoSettings(this.gpuName());
+    this.quality = this.settings.quality;
+    this.renderDist = this.settings.viewDist;
+    this.resScale = 1;
+    saveSettings(this.settings);
+    this.applyQualityPreset();
+    this.interiorLights?.build(placedBuildings(), this.interiorLightBudget());
+    this.renderer.setViewDistance(this.renderDist);
+    this.renderer.setRenderScale(1);
+    this.hud.flash(`Automático: ${this.quality.toUpperCase()} · resolución auto · vista ${this.renderDist}m`);
+    return this.settings;
+  }
+
+  /** Opens the visual-settings panel (O key or gear). Releases the pointer lock so the cursor drives the UI. */
+  private openSettings(): void {
+    if (typeof document !== "undefined" && document.pointerLockElement) document.exitPointerLock();
+    this.hud.showSettings(this.settings, {
+      setQuality: (q) => this.setQuality(q),
+      setResAuto: (b) => this.setResAuto(b),
+      setResScale: (s) => this.setResScale(s),
+      setViewDist: (d) => this.setViewDist(d),
+      auto: () => this.autoDetect(),
+    });
   }
 
   /** Defends the 60fps floor when the frame rate stays low for a sustained window. Pulls ONE lever at a
    *  time, cheapest-visual-first (dynamic-res → mortar detail → preset), so a weak machine keeps playing
    *  at 60 without manual tuning and gives up the least visual it has to. One-way (bump back with K). */
   private adaptiveQuality(dt: number): void {
+    // Only the "Auto" performance mode adapts the preset. If the player has taken manual resolution control,
+    // they own quality too — never auto-drop their chosen preset.
+    if (!this.settings.resAuto) { this.lowFpsSec = 0; return; }
     // Accumulate sustained-low time only while a lever remains (not yet fully floored at bajo + no detail).
     const flooredOut = this.quality === "bajo" && !this.voxelDetailOn;
     // TRANSIENT destruction lag (the collapse solve, debris physics, a particle burst) must NOT trip the
@@ -1048,8 +1120,8 @@ export class Game {
   private streamMeshes(): void {
     const p = this.player.camera.position;
     const HALF = (MESH_CHUNK / 2) * VOXEL;
-    const R2 = RENDER_DIST * RENDER_DIST;
-    const dropR = RENDER_DIST + MESH_CHUNK * VOXEL;         // +1 render chunk (16 m) of hysteresis
+    const R2 = this.renderDist * this.renderDist;
+    const dropR = this.renderDist + MESH_CHUNK * VOXEL;     // +1 render chunk (16 m) of hysteresis
     const dropR2 = dropR * dropR;
     // BUILD near non-empty chunks that aren't built and aren't already cooking (off-thread → tiny main-thread cost)
     let built = 0;
@@ -1499,8 +1571,17 @@ export class Game {
   ): void {
     const mat = this.grid.get(vx, vy, vz);
     if (mat === undefined) return; // already gone on this client
-    if (mat === "gastank") { this.detonateTankAt(vx, vy, vz); return; } // deterministic chain (not broadcast)
     const pp = this.player.camera.position;
+    if (this.grid.isIndestructible(vx, vy, vz)) {
+      // forest wall / gate vehicles: the round sparks off but never damages them (nada se rompe)
+      this.audio.impact(mat, Math.hypot(pp.x - px, pp.y - py, pp.z - pz));
+      this.sink.burst(px, py, pz, {
+        count: 3, color: 0xffe9b0, speed: 2.5, size: 3, life: 0.12,
+        buoyancy: 0, windCoupling: 0.1, kind: "spark", strength: 0.006,
+      });
+      return;
+    }
+    if (mat === "gastank") { this.detonateTankAt(vx, vy, vz); return; } // deterministic chain (not broadcast)
     this.audio.impact(mat, Math.hypot(pp.x - px, pp.y - py, pp.z - pz)); // material-specific hit, attenuated by distance
     const dmg = this.grid.addDamage(vx, vy, vz);
     if (dmg < MATERIALS[mat].hp) {
@@ -1608,6 +1689,7 @@ export class Game {
   }
 
   private onKey(code: string): void {
+    if (code === "keyo") { this.openSettings(); return; } // visual settings panel (all modes)
     if (code === "keyk") { this.cycleQuality(); return; } // graphics quality (all modes)
     if (code === "keym") { this.hud.flash(this.audio.toggleMute() ? "🔇 Silencio" : "🔊 Sonido"); return; } // mute toggle
     if (code === "keyf") { this.toggleFlashlight(); return; } // flashlight (all modes/roles)
@@ -1772,7 +1854,7 @@ export class Game {
     // Dynamic resolution: hold ~60fps by nudging the render scale (debounced). Prefer the REAL GPU-ms from
     // the timer query (proportional → converges in ~1 tick); fall back to fps where the ext is unavailable.
     this.resTimer += dt;
-    if (this.resTimer >= 0.4) {
+    if (this.settings.resAuto && this.resTimer >= 0.4) { // manual resolution → the player owns the scale, don't touch it
       this.resTimer = 0;
       const gpuMs = this.gpuTimer.latest();
       const rs = gpuMs != null ? nextResScaleGpu(gpuMs, this.resScale) : nextResScaleFps(this.fps, this.resScale);
@@ -1821,9 +1903,9 @@ export class Game {
     if (!this.hidden()) { // the sim runs while hidden (Web Worker), but there's no point rendering a hidden tab
       const info = this.renderer.renderer.info;
       info.reset(); // autoReset is off (see Renderer ctor) → this frame's calls now include shadow + GPGPU passes
-      // View-bubble distance culling: hide mesh chunks beyond RENDER_DIST so draws/triangles/shadow-casters
-      // track the ~190m around the camera, not the whole city — the key to scaling the world (config.ts).
-      this.mesher.updateVisibility(cp.x, cp.z, RENDER_DIST * RENDER_DIST);
+      // View-bubble distance culling: hide mesh chunks beyond the (live, menu-adjustable) view distance so
+      // draws/triangles/shadow-casters track the bubble around the camera, not the whole city (config.ts).
+      this.mesher.updateVisibility(cp.x, cp.z, this.renderDist * this.renderDist);
       // Refresh the shadow map at ~30Hz WHILE anything casts a moving shadow (player moves, geometry is
       // carved, debris/peers move) — but skip the pass ENTIRELY when the scene is static (stationary
       // player, no debris, clean grid), since the sun follows the player so the stale map stays valid.

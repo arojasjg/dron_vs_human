@@ -10,13 +10,14 @@ export const RES_MIN = 0.42; // floor: 0.42 linear ≈ 18% of the pixels. Low en
 export const RES_MAX = 1;
 
 // GPU-time controller targets (ms of real render time, from EXT_disjoint_timer_query). The band
-// [GROW_MS, BUDGET_MS] is a HOLD zone — no resolution change while gpuMs sits inside it. It MUST bracket
-// the normal moving-through-the-city cost (perf.log: gpu 10-15 ms), or the controller shrinks-then-grows
-// every ~second, and each change resizes the WebGL drawing buffer — a ~40 ms render STALL on the next
-// frame (perf.log: render worstMs 39.7 ms while just moving = the tirón). A wide band keeps res steady so
-// reallocs happen only on real view transitions (open field ↔ dense city), not continuously.
-export const BUDGET_MS = 15;   // shrink only when the GPU is genuinely over ~66fps of work (heavy destruction)
-export const GROW_MS = 9;      // grow back only with real headroom (open view), so the city's ~15ms just holds
+// [GROW_MS, BUDGET_MS] is a HOLD zone — no resolution change while gpuMs sits inside it. It must bracket the
+// gpu-ms that ACTUALLY corresponds to 60 fps on the target machine, NOT a rounder number. Measured on a weak
+// GPU (perf.log, foreground ALTO): gpu 14-17 ms rendered at only 43-50 fps (frame 22-26 ms — the ~7 ms of
+// present/pipeline on top of the timer means gpu 15 ms ≈ 45 fps, not 66). So the old BUDGET_MS 15 tolerated
+// 45 fps as "fine" and left res stuck at 0.85. Retargeted to ~11 ms → the controller trims pixels until the
+// frame really lands near 16.7 ms. Still a band (reallocs only on view transitions, not per-frame thrash).
+export const BUDGET_MS = 11;   // over this the frame misses 60 → shrink; ~11 ms gpu ≈ 16.7 ms frame here
+export const GROW_MS = 7;      // grow back only with genuine headroom (open view), so the steady city holds
 
 const clamp = (s: number) => Math.min(RES_MAX, Math.max(RES_MIN, +s.toFixed(3)));
 

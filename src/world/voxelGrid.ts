@@ -37,7 +37,12 @@ const SC3 = SC * SC * SC;      // 32768
 const scKeyOf = (x: number, y: number, z: number) => packKey(x >> 5, y >> 5, z >> 5);
 const localIdx = (x: number, y: number, z: number) => (x & 31) | ((y & 31) << 5) | ((z & 31) << 10);
 const MAT_BYTE = new Map<MaterialId, number>(MATERIAL_ORDER.map((m, i) => [m, i + 1])); // 1..N; 0 = empty
+// Byte layout: bits 0-5 = material index (1..63 via MAT_MASK), bit 6 = INDESTRUCTIBLE, bit 7 = WEAK.
+// The material field was widened-down from 7 bits to 6 (still 63 materials, we use 16) to free bit 6 for the
+// indestructible flag: voxels immune to ALL gameplay destruction (the static forest wall + the gate vehicles).
 const WEAK = 0x80;
+const INDESTRUCTIBLE = 0x40;
+const MAT_MASK = 0x3f;
 
 export interface RayHit {
   /** Voxel that was hit. */
@@ -84,12 +89,18 @@ export class VoxelGrid {
     const c = this.chunks.get(scKeyOf(x, y, z));
     if (c === undefined) return undefined;
     const b = c[localIdx(x, y, z)];
-    return b === 0 ? undefined : MATERIAL_ORDER[(b & 0x7f) - 1];
+    return b === 0 ? undefined : MATERIAL_ORDER[(b & MAT_MASK) - 1];
   }
 
   has(x: number, y: number, z: number): boolean {
     const c = this.chunks.get(scKeyOf(x, y, z));
     return c !== undefined && c[localIdx(x, y, z)] !== 0;
+  }
+
+  /** Whether a voxel is flagged INDESTRUCTIBLE (immune to bullets, explosions and grenades). O(1). */
+  isIndestructible(x: number, y: number, z: number): boolean {
+    const c = this.chunks.get(scKeyOf(x, y, z));
+    return c !== undefined && (c[localIdx(x, y, z)] & INDESTRUCTIBLE) !== 0;
   }
 
   // --- Storage-neutral read API. External code (cook/mesh/collider/heightField/game/tests) goes through
@@ -119,7 +130,7 @@ export class VoxelGrid {
       const ox = scx * SC, oy = scy * SC, oz = scz * SC;
       for (let li = 0; li < SC3; li++) {
         const b = c[li];
-        if (b !== 0) out.push([packKey(ox + (li & 31), oy + ((li >> 5) & 31), oz + (li >> 10)), MATERIAL_ORDER[(b & 0x7f) - 1]]);
+        if (b !== 0) out.push([packKey(ox + (li & 31), oy + ((li >> 5) & 31), oz + (li >> 10)), MATERIAL_ORDER[(b & MAT_MASK) - 1]]);
       }
     }
     return out.values();
@@ -137,7 +148,7 @@ export class VoxelGrid {
     if (c === undefined) { c = new Uint8Array(SC3); this.chunks.set(sk, c); }
     const li = localIdx(x, y, z);
     const prev = c[li];
-    c[li] = MAT_BYTE.get(material)! | (prev & WEAK); // overwrite material, keep any weak flag (set never touched weakness)
+    c[li] = MAT_BYTE.get(material)! | (prev & (WEAK | INDESTRUCTIBLE)); // overwrite material, keep weak + indestructible flags
     if (prev === 0) { // a brand-new voxel
       this.voxelCount++;
       this.chunkFill.set(sk, (this.chunkFill.get(sk) ?? 0) + 1);
@@ -399,6 +410,22 @@ export class VoxelGrid {
           if (b === 0 || (b & WEAK) !== 0) continue; // no voxel, or already weak
           c[li] = b | WEAK;
           this.bumpMass(cellKey(x, y, z), -1); // a structural voxel becoming weak loses its cell mass
+        }
+  }
+
+  /** Flags every EXISTING voxel in the box as INDESTRUCTIBLE — immune to bullets/explosions/grenades. Used
+   *  for the static forest wall + the gate's sealing vehicles. Like markWeakBox the box is a generous bound
+   *  over air, so only real voxels take the flag; UNLIKE it, mass is untouched (an indestructible voxel is
+   *  still present/structural — it simply can never be removed, so it also never enters the collapse solver
+   *  in practice because these elements are markSettled → ground-anchored). */
+  markIndestructibleBox(x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): void {
+    for (let x = x0; x <= x1; x++)
+      for (let y = y0; y <= y1; y++)
+        for (let z = z0; z <= z1; z++) {
+          const c = this.chunks.get(scKeyOf(x, y, z));
+          if (c === undefined) continue;
+          const li = localIdx(x, y, z);
+          if (c[li] !== 0) c[li] |= INDESTRUCTIBLE;
         }
   }
 

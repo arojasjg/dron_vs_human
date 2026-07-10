@@ -12,6 +12,8 @@ class MockGrid {
   get(x: number, y: number, z: number) { return this.m.get(this.k(x, y, z)); }
   markSettled() {}
   markWeakBox() {}
+  markIndestructibleBox() {}
+  isIndestructible() { return false; }
   clear() { this.m.clear(); }
   cells(): Voxel[] {
     const out: Voxel[] = [];
@@ -122,14 +124,25 @@ describe("buildDefaultScene — varied city block", () => {
   const PLOT_W = 57, PLOT_D = 54;                            // fixed plot size (prefabs source of truth)
   const matCount = (g: MockGrid, mat: string) => { let n = 0; for (const m of g.m.values()) if (m === mat) n++; return n; };
 
-  it("places ~90 buildings (9×11 grid minus the central 3×3 plaza) with a taller landmark", () => {
+  it("places 60 objective-eligible towers (grid minus plaza, boulevard cross and the suburb rows) with a landmark", () => {
     const g = scene(3);
     const b = placedBuildings();
-    expect(b.length).toBe(90);                                              // 99 plots − 9 plaza plots
+    expect(b.length).toBe(60);                                              // 99 − 23 (plaza + cross) − 16 (suburb rows pz0/pz10, px≠4)
     expect(Math.max(...b.map((p) => p.FLOORS))).toBeGreaterThanOrEqual(5);  // a taller landmark exists
     expect(Math.min(...b.map((p) => p.FLOORS))).toBeLessThanOrEqual(3);     // the majority are low
     expect(new Set(b.map((p) => p.W)).size).toBeGreaterThan(3);             // varied (randomised) footprints
     for (const p of b) expect(g.has(p.ox + (p.W >> 1), 0, p.oz + (p.D >> 1))).toBe(true); // grounded at its centre
+  }, 30000);
+
+  it("rings the core with suburbs: the top/bottom rows are houses, not objective towers", () => {
+    const g = scene(3);
+    for (const p of placedBuildings()) {
+      const pz = Math.floor((p.oz + (p.D >> 1)) / PLOT_D);
+      expect(pz === 0 || pz === 10).toBe(false);                           // no tower is centred in a suburb row
+    }
+    let suburbBrick = 0;                                                    // …but those rows ARE populated with brick houses
+    for (const [key, mat] of g.m) if (mat === "brick" && Number(key.split(",")[2]) < PLOT_D) suburbBrick++;
+    expect(suburbBrick).toBeGreaterThan(0);
   }, 30000);
 
   it("has a central plaza: no building in the middle 3×3, a metal monument at its centre", () => {

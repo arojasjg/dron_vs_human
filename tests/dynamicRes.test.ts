@@ -3,7 +3,7 @@ import { nextResScaleGpu, nextResScaleFps, RES_MIN, RES_MAX, BUDGET_MS } from ".
 
 describe("dynamic resolution — GPU-time controller (the reliable signal)", () => {
   it("shrinks proportionally when over the GPU budget, converging in ~one step", () => {
-    // 26ms at scale 1 → sqrt(14/26) ≈ 0.734 in a SINGLE step (vs the old 0.1-per-tick crawl)
+    // 26ms at scale 1 → sqrt(BUDGET_MS/26) in a SINGLE step (vs the old 0.1-per-tick crawl)
     const s = nextResScaleGpu(26, 1.0);
     expect(s).toBeCloseTo(Math.sqrt(BUDGET_MS / 26), 2);
     expect(s).toBeLessThan(0.78);
@@ -12,8 +12,8 @@ describe("dynamic resolution — GPU-time controller (the reliable signal)", () 
   });
 
   it("grows back only with real headroom, and holds in the band (no vsync oscillation)", () => {
-    expect(nextResScaleGpu(8, 0.7)).toBeCloseTo(0.75); // well under budget → grow
-    expect(nextResScaleGpu(11, 0.8)).toBe(0.8);        // in [GROW_MS, BUDGET_MS] → hold
+    expect(nextResScaleGpu(5, 0.7)).toBeCloseTo(0.75); // below GROW_MS → real headroom → grow
+    expect(nextResScaleGpu(9, 0.8)).toBe(0.8);         // inside [GROW_MS, BUDGET_MS] → hold, no thrash
   });
 
   it("clamps to [RES_MIN, RES_MAX]", () => {

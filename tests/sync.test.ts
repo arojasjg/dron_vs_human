@@ -14,6 +14,8 @@ class MockGrid {
   get(x: number, y: number, z: number) { return this.m.get(this.k(x, y, z)); }
   markSettled() {}
   markWeakBox() {}
+  markIndestructibleBox() {}
+  isIndestructible() { return false; }
   clear() { this.m.clear(); }
   /** Order-independent checksum of the whole voxel set (commutative sum of per-cell hashes). */
   hash(): number {
