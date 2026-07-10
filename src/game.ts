@@ -39,6 +39,8 @@ import { AmmoCrates } from "./fx/ammoCrates";
 import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleMaxHp, roleWeapon, type Role } from "./net/roles";
+import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
+import { AiSwarm, type AiTarget } from "./net/ai";
 import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
@@ -192,7 +194,17 @@ export class Game {
   // --- multiplayer ---
   private readonly net = new Net();
   private remotes!: RemoteDrones;
-  private mode: Mode = "free";
+  private mode: Mode = "coop";
+  private phase: "menu" | "lobby" | "playing" = "menu"; // menu → lobby (joined, picking) → playing (match live)
+  private lobby: LobbyState = emptyLobby();
+  private roomCode = "";
+  private myRole: Role | null = null;   // chosen in the lobby; applied on begin
+  private pendingMode: Mode = "coop";   // the mode we'll start (host sets it; joiners learn it from the roster)
+  private hosting = false;              // we created the room → we are the AI authority in co-op
+  private swarm: AiSwarm | null = null; // host-only enemy AI simulation
+  private aiBcast = 0;                  // seconds until the next bot-transform broadcast
+  private aiWaveGap = 0;                // countdown to the next wave once the swarm is cleared
+  private readonly aiBots = new Map<number, { x: number; y: number; z: number }>(); // last-known bot positions (for shooting them)
   private quality: Quality = "medio";     // graphics preset (Bajo/Medio/Alto), K to cycle
   private role: Role = "drone";           // Drones-vs-Humans: our team
   private droneKills = 0;
@@ -301,33 +313,190 @@ export class Game {
    *  multiplayer room. Players in the same room see and (in VS) can damage each other. */
   private setupModeMenu(): void {
     const params = new URLSearchParams(location.search);
-    const defRoom = params.get("room") || "lobby";
-    const start = (mode: Mode, room: string) => {
-      this.mode = mode;
-      this.hp = this.myMaxHp();
-      // identical world for everyone in the room (seed from the room code) → full destruction sync
-      this.rebuildWorld(hashStr(room), mode === "free");
-      this.net.connect(room);
-      this.hud.setMode(mode, room);
-      this.camFx.setRole("drone"); // start as a drone (dvh reassigns to human on role assignment)
-      this.audio.ui();
-      this.hud.setHealth(this.hp, this.myMaxHp(), true);
-    };
     const urlMode = params.get("mode");
-    if (urlMode === "vs" || urlMode === "free" || urlMode === "dvh") { start(urlMode, defRoom); return; } // headless/test path
-    this.hud.showModeMenu(defRoom, start);
+    if (urlMode === "coop" || urlMode === "dvh" || urlMode === "vs" || urlMode === "free") {
+      // headless/test path: straight into the match, no lobby.
+      const room = params.get("room") || "lobby";
+      this.mode = this.pendingMode = urlMode; this.roomCode = room;
+      this.rebuildWorld(hashStr(room), false);
+      this.net.connect(room);
+      this.phase = "playing";
+      this.hud.setMode(urlMode, room);
+      this.camFx.setRole("drone");
+      this.hud.setHealth(this.hp, this.myMaxHp(), true);
+      return;
+    }
+    this.hud.showModeMenu({ create: (mode) => this.createRoom(mode), join: (code) => this.joinRoom(code) });
+  }
+
+  // --- lobby --------------------------------------------------------------
+
+  /** Create a room in `mode`: you're the host (own the AI in co-op) and get a random shareable code. */
+  private createRoom(mode: Mode): void { this.hosting = true; this.enterLobby(mode, makeRoomCode()); }
+  /** Join by code — the mode is learned from the host's roster broadcast; the host owns the AI. */
+  private joinRoom(code: string): void { this.hosting = false; this.enterLobby(null, code); }
+
+  private enterLobby(mode: Mode | null, code: string): void {
+    this.roomCode = code;
+    this.pendingMode = mode ?? "coop";                     // provisional until a peer's roster tells us
+    this.myRole = mode === "coop" ? "human" : null;        // co-op: everyone's a soldier; PvP: pick in the lobby
+    this.lobby = emptyLobby();
+    this.phase = "lobby";
+    this.net.connect(code);
+    this.showLobbyUi();
+    this.audio.ui();
+  }
+
+  private showLobbyUi(): void {
+    this.hud.showLobby(this.roomCode, this.pendingMode, {
+      pick: (r) => this.lobbyPick(r),
+      start: () => this.hostStart(),
+      leave: () => location.reload(),
+    });
+    this.refreshLobby();
+  }
+
+  /** Re-announce our presence (id, chosen role, mode) so the roster converges on every client. */
+  private broadcastLobby(): void {
+    this.lobby = applyJoin(this.lobby, this.net.id, this.myRole);
+    if (this.net.connected) this.net.send({ t: "lobby", role: this.myRole, mode: this.pendingMode });
+    this.refreshLobby();
+  }
+
+  private lobbyPick(role: Role): void {
+    this.myRole = role;
+    this.lobby = applyPick(this.lobby, this.net.id, role);
+    this.broadcastLobby();
+  }
+
+  private hostStart(): void {
+    if (this.net.id !== (hostOf(this.lobby) ?? this.net.id)) return; // only the host may start
+    this.net.send({ t: "begin", mode: this.pendingMode });
+    this.beginMatch();
+  }
+
+  private refreshLobby(): void {
+    if (this.phase !== "lobby") return;
+    const host = hostOf(this.lobby) ?? this.net.id;
+    this.hud.updateLobby(this.lobby.players.map((p) => ({ id: p.id, role: p.role })), this.net.id, host, this.myRole);
+  }
+
+  /** Everyone runs this on the host's "begin": build the shared seed-world + spawn with the chosen role. */
+  private beginMatch(): void {
+    if (this.phase === "playing") return;
+    this.mode = this.pendingMode;
+    this.rebuildWorld(hashStr(this.roomCode), false);
+    this.phase = "playing";
+    this.hud.hideLobby();
+    this.hud.setMode(this.mode, this.roomCode);
+    this.applyChosenRole(this.mode === "coop" ? "human" : (this.myRole ?? "human"));
+    this.spawnPlayerInBuilding();
+    this.net.send({ t: "needsync" });
+    if (this.mode === "coop" && this.hosting) { this.swarm = new AiSwarm(); this.aiWaveGap = 0; } // host owns the enemy AI
+    this.audio.ui();
+  }
+
+  // --- enemy AI (co-op) ----------------------------------------------------
+
+  /** Per-frame AI. The HOST simulates the swarm (spawn waves, seek, fire), broadcasts bot transforms and
+   *  renders them; peers only render from the broadcast. Bots target the host soldier (peer-targeting later). */
+  private aiFrame(dt: number): void {
+    if (this.mode !== "coop") return;
+    const s = this.swarm;
+    if (this.hosting && s) {
+      const cp = this.player.camera.position;
+      if (s.count === 0) {
+        this.aiWaveGap -= dt;
+        if (this.aiWaveGap <= 0) { s.spawnWave(cp.x, cp.z, 55, cp.y + 12); this.hud.flash(`⚠ Oleada ${s.wave}: ${s.count} drones`); }
+      } else this.aiWaveGap = 4;
+      const targets: AiTarget[] = this.hp > 0 ? [{ id: this.net.id, x: cp.x, y: cp.y, z: cp.z }] : [];
+      for (const f of s.tick(dt, targets)) this.aiShoot(f.x, f.y, f.z, f.dx, f.dy, f.dz, f.targetId);
+      this.aiBots.clear();
+      for (const b of s.list) this.aiBots.set(b.id, { x: b.x, y: b.y, z: b.z });
+      this.aiBcast -= dt;
+      if (this.aiBcast <= 0 && this.net.connected) {
+        this.aiBcast = 0.07;
+        this.net.send({ t: "ai", b: s.list.map((b) => [b.id, +b.x.toFixed(2), +b.y.toFixed(2), +b.z.toFixed(2)]) });
+      }
+    }
+    this.renderBots();
+  }
+
+  /** Draws every known bot as a remote drone avatar under a synthetic NEGATIVE id (never collides with peers). */
+  private renderBots(): void {
+    for (const [id, p] of this.aiBots) this.remotes.upsert(-id, p.x, p.y, p.z, 0, 0, 0, 1, 100, "drone", 100, 0, 0, 0);
+  }
+
+  /** A bot fires: muzzle flash (broadcast so all see it) + host-authoritative chip damage to its target
+   *  (dodgeable — break line of sight to avoid the next shot). */
+  private aiShoot(x: number, y: number, z: number, dx: number, dy: number, dz: number, targetId: number): void {
+    this.muzzleFlash(new THREE.Vector3(x, y, z), new THREE.Vector3(dx, dy, dz), 0.3);
+    if (this.net.connected) this.net.send({ t: "aifire", x: +x.toFixed(1), y: +y.toFixed(1), z: +z.toFixed(1), dx: +dx.toFixed(2), dy: +dy.toFixed(2), dz: +dz.toFixed(2) });
+    if (targetId === this.net.id) { if (this.hp > 0 && Math.random() < 0.55) this.damageDrone(4); }
+    else if (this.net.connected) this.net.send({ t: "aihit", to: targetId, dmg: 4 });
+  }
+
+  /** When the local player shoots, test the aim ray against known bot positions and damage the nearest hit. */
+  private aiHitscan(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): void {
+    if (this.mode !== "coop" || this.aiBots.size === 0) return;
+    let hitId = -1, hitT = 30;
+    for (const [id, p] of this.aiBots) {
+      const wx = p.x - ox, wy = p.y - oy, wz = p.z - oz;
+      const t = wx * dx + wy * dy + wz * dz;                 // projection of the bot onto the ray
+      if (t < 0 || t > hitT) continue;
+      const cx = ox + dx * t - p.x, cy = oy + dy * t - p.y, cz = oz + dz * t - p.z;
+      if (cx * cx + cy * cy + cz * cz < 1.4) { hitId = id; hitT = t; } // within ~1.2 m of the line
+    }
+    if (hitId < 0) return;
+    this.hud.hitMarker("hit"); this.audio.hitMarker(false);
+    if (this.hosting && this.swarm) { if (this.swarm.damageBot(hitId, 1)) this.onBotDead(hitId); }
+    else if (this.net.connected) this.net.send({ t: "aihitbot", bot: hitId });
+  }
+
+  /** A bot died (host authority): drop its avatar everywhere, credit the shooter. */
+  private onBotDead(id: number): void {
+    this.aiBots.delete(id);
+    this.remotes.remove(-id);
+    this.myKills++;
+    this.hud.hitMarker("kill");
+    if (this.net.connected) this.net.send({ t: "aidead", bot: id });
   }
 
   private onNet(m: NetMsg): void {
     if (m.t === "hello") {
       // got our network id → take the matching spawn point so players start apart
       this.spawnIndex = (this.net.id - 1) % Game.SPAWNS.length;
-      if (this.mode === "dvh" || this.mode === "vs") this.assignRoleAndController();
+      if (this.phase === "lobby") { this.broadcastLobby(); return; } // announce self; wait for the host to begin
+      if (this.mode === "dvh" || this.mode === "vs" || this.mode === "coop") this.assignRoleAndController();
       this.spawnPlayerInBuilding();
       // We may have joined AFTER destruction happened. Our world is pristine (seed-built) → ask any peer
       // that already has destruction to send us its diff, so our grid matches theirs (fixes the desync
       // where a late joiner sees a building standing that everyone else already collapsed).
       this.net.send({ t: "needsync" });
+    } else if (m.t === "lobby") {
+      if (this.phase !== "lobby") return;
+      this.lobby = m.role ? applyPick(this.lobby, m.id as number, m.role as Role) : applyJoin(this.lobby, m.id as number);
+      if (m.mode && this.pendingMode !== m.mode) { // joiner learned the room's mode from the host
+        this.pendingMode = m.mode as Mode;
+        if (m.mode === "coop") this.myRole = "human"; // co-op: everyone's a soldier
+        this.showLobbyUi();
+      }
+      this.refreshLobby();
+    } else if (m.t === "begin") {
+      if (this.phase === "lobby") { if (m.mode) this.pendingMode = m.mode as Mode; this.beginMatch(); }
+    } else if (m.t === "ai") {
+      if (this.mode === "coop" && !this.hosting) { // peers render the host's swarm from its broadcast
+        this.aiBots.clear();
+        for (const row of m.b as number[][]) this.aiBots.set(row[0], { x: row[1], y: row[2], z: row[3] });
+      }
+    } else if (m.t === "aifire") {
+      this.muzzleFlash(new THREE.Vector3(m.x as number, m.y as number, m.z as number), new THREE.Vector3(m.dx as number, m.dy as number, m.dz as number), 0.3);
+    } else if (m.t === "aihit") {
+      if ((m.to as number) === this.net.id && this.hp > 0) this.damageDrone(m.dmg as number); // host said a bot hit me
+    } else if (m.t === "aihitbot") {
+      if (this.hosting && this.swarm && this.swarm.damageBot(m.bot as number, 1)) this.onBotDead(m.bot as number); // a peer shot a bot
+    } else if (m.t === "aidead") {
+      this.aiBots.delete(m.bot as number); this.remotes.remove(-(m.bot as number));
     } else if (m.t === "needsync") {
       // a peer joined and asked for the world's destruction. If we have any, send our compact diff
       // (only real gameplay destruction, not window/door cuts) addressed to that joiner.
@@ -364,7 +533,7 @@ export class Game {
         m.px as number, m.py as number, m.pz as number, m.nx as number, m.ny as number, m.nz as number,
       );
     } else if (m.t === "died") {
-      this.addKill(m.role as Role); // a peer died → the enemy team scores
+      if (this.mode === "dvh") this.addKill(m.role as Role); // a peer died → the enemy team scores (PvP only)
       const by = m.by as number, mine = by === this.net.id;
       const victim = (m.role as Role) === "human" ? "🧍" : "🤖";
       const killer = mine ? "Tú" : by ? `J${by % 1000}` : ""; // no name layer → short id label
@@ -378,6 +547,7 @@ export class Game {
         this.recordDamager(m.id as number); this.damageDrone(m.dmg as number); this.audio.meleeHit();
       }
     } else if (m.t === "leave") {
+      if (this.phase === "lobby") { this.lobby = applyLeave(this.lobby, m.id as number); this.refreshLobby(); }
       this.remotes.remove(m.id as number);
     }
   }
@@ -385,8 +555,15 @@ export class Game {
   /** DvH: derive our team from the network id (assignRole applied in id order → balanced, stable,
    *  identical on every client) and swap the local controller to a Walker if we're a human. */
   private assignRoleAndController(): void {
-    this.role = assignRole([], this.net.id);
-    const wantWalker = this.role === "human";
+    // Headless/non-lobby path: co-op → everyone's a soldier; PvP → auto-balance by id. The LOBBY path calls
+    // applyChosenRole directly with the role the player picked.
+    this.applyChosenRole(this.mode === "coop" ? "human" : assignRole([], this.net.id));
+  }
+
+  /** Applies a role: swaps the local controller (Walker human / flying drone Player), sets HP/weapon/camera. */
+  private applyChosenRole(role: Role): void {
+    this.role = role;
+    const wantWalker = role === "human";
     if (wantWalker !== (this.player instanceof Walker)) {
       this.player.dispose();
       this.player = wantWalker ? new Walker(this.physics, this.grid) : new Player(this.physics);
@@ -399,7 +576,7 @@ export class Game {
   }
 
   /** Local max HP: role-based in any versus mode (human tank, drone fragile), else the default. */
-  private myMaxHp(): number { return this.mode === "dvh" || this.mode === "vs" ? roleMaxHp(this.role) : MAX_HP; }
+  private myMaxHp(): number { return this.mode === "dvh" || this.mode === "vs" || this.mode === "coop" ? roleMaxHp(this.role) : MAX_HP; }
 
   /** Scores a kill for the team opposing the victim, then checks for a match win. */
   private addKill(victim: Role): void {
@@ -460,7 +637,7 @@ export class Game {
    *  a rare disagreement self-corrects on the next state tick. */
   private predictHit(o: THREE.Vector3, d: THREE.Vector3): void {
     if (!this.net.connected) return;
-    this.remotes.enemyPositions(this.role === "human", this.mode === "free", this.enemyBuf);
+    this.remotes.enemyPositions(this.role === "human", this.mode === "free" || this.mode === "coop", this.enemyBuf);
     if (this.enemyBuf.length === 0) return;
     const wall = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 220);
     const maxD = wall ? wall.distance : 220;
@@ -770,7 +947,12 @@ export class Game {
       tick.onmessage = () => { if (this.hidden()) this.frame(); };
     } catch { /* no Worker → the game pauses when hidden, as a plain rAF app would */ }
     // Heartbeat fallback: re-emit the last state ~1 Hz so peers keep us even if the worker is unavailable.
-    setInterval(() => { if (this.net.connected && this.lastState) this.net.send(this.lastState); }, 1000);
+    // In the lobby, re-announce our roster row instead, so late joiners converge on the full player list.
+    setInterval(() => {
+      if (!this.net.connected) return;
+      if (this.phase === "lobby") this.broadcastLobby();
+      else if (this.lastState) this.net.send(this.lastState);
+    }, 1000);
   }
 
   /** Headless/debug helpers — used by the smoke test (no pointer-lock available there). */
@@ -1375,6 +1557,7 @@ export class Game {
 
   private shoot(origin: THREE.Vector3, dir: THREE.Vector3, dmg = 0): void {
     this.projectiles.launchBullet(origin, dir);
+    this.aiHitscan(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z); // damage co-op AI drones on the shot line
     this.muzzleFlash(origin, dir, 0.22); // subtle first-person muzzle glow (pool keeps one alive during auto-fire)
     this.trauma = addTrauma(this.trauma, 0.03); // light per-shot kick
     if (dmg > 0) this.predictHit(origin, dir); // local hit marker when our round is on an enemy
@@ -1878,6 +2061,7 @@ export class Game {
     const _tfx = performance.now();
     this.combatFrame(dt); // team weapons: base recharge, drone battery, HUD panels
     this.ammoFrame();     // soldier ammo-crate pickups on the streets + crate respawns
+    this.aiFrame(dt);     // co-op: the host simulates + broadcasts the enemy drone swarm; peers render it
     this.audioFrame();
     this.interiorLights?.update(this.time); // flicker the interior lights
     this.scenery?.update(dt);               // drift the clouds

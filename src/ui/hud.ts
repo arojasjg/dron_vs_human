@@ -5,7 +5,23 @@ import type { Quality } from "../engine/quality";
 import type { VisualSettings } from "../engine/settings";
 
 export type Tool = "shoot" | "grenade" | "cannon" | "missile" | "build" | "erase";
-export type Mode = "free" | "vs" | "dvh";
+// Selectable modes: "coop" (soldiers vs an AI drone swarm) and "dvh" (PvP, drone vs human). "vs"/"free" remain
+// as dormant internal values (no menu entry) so the sandbox/deathmatch code compiles without a risky rip-out.
+export type Mode = "coop" | "dvh" | "vs" | "free";
+
+/** Start-menu callbacks: create a room in a mode (host, random code), or join an existing code. */
+export interface MenuCallbacks {
+  create: (mode: Mode) => void;
+  join: (code: string) => void;
+}
+/** Lobby callbacks: pick your role (PvP), the host starts the match, or leave back to the menu. */
+export interface LobbyCallbacks {
+  pick: (role: Role) => void;
+  start: () => void;
+  leave: () => void;
+}
+/** One roster row for the lobby list. */
+export interface LobbyRow { id: number; role: Role | null; }
 
 /** Callbacks the settings menu invokes on the game. `auto` returns the detected settings so the menu can
  *  repaint its controls to match. */
@@ -140,7 +156,8 @@ export class Hud {
   hideScore(): void { this.score.style.display = "none"; }
 
   setMode(mode: Mode, room: string): void {
-    const label = mode === "vs" ? "⚔ VS" : mode === "dvh" ? "🤖 vs 🧍 Drones vs Humanos" : "🛠 Libre";
+    const label = mode === "coop" ? "🪖 Co-op vs IA" : mode === "dvh" ? "⚔ Jugador vs Jugador (Dron vs Soldado)"
+      : mode === "vs" ? "⚔ VS" : "🛠 Libre";
     this.modeEl.textContent = `${label} · sala ${room}`;
     this.modeEl.style.display = "block";
   }
@@ -202,20 +219,50 @@ export class Hud {
     this.team.style.display = "block";
   }
 
-  /** Start overlay: pick Libre or VS and a room, then begin. */
-  showModeMenu(room: string, onStart: (mode: Mode, room: string) => void): void {
+  /** Start overlay: pick a mode to CREATE a room (host, gets a random code), or type a code to JOIN one. */
+  showModeMenu(cb: MenuCallbacks): void {
     const menu = document.getElementById("hud-menu")!;
     const input = document.getElementById("hud-room") as HTMLInputElement;
-    input.value = room;
     menu.style.display = "flex";
-    const pick = (mode: Mode) => {
-      menu.style.display = "none";
-      onStart(mode, (input.value.trim() || "lobby").slice(0, 32));
+    const create = (mode: Mode) => { menu.style.display = "none"; cb.create(mode); };
+    document.getElementById("hud-btn-coop")!.onclick = () => create("coop");
+    document.getElementById("hud-btn-dvh")!.onclick = () => create("dvh");
+    document.getElementById("hud-btn-join")!.onclick = () => {
+      const code = input.value.trim().toUpperCase().slice(0, 8);
+      if (code) { menu.style.display = "none"; cb.join(code); }
     };
-    document.getElementById("hud-btn-free")!.onclick = () => pick("free");
-    document.getElementById("hud-btn-vs")!.onclick = () => pick("vs");
-    document.getElementById("hud-btn-dvh")!.onclick = () => pick("dvh");
   }
+
+  /** Pre-match lobby: shows the shareable code, the roster, a role picker (PvP only), and — for the host —
+   *  a Start button. `showLobby` wires it; `updateLobby` repaints the roster/host controls as peers change. */
+  showLobby(code: string, mode: Mode, cb: LobbyCallbacks): void {
+    const el = (id: string) => document.getElementById(id)!;
+    el("lobby-code").textContent = code;
+    el("lobby-title").textContent = mode === "coop" ? "🪖 Co-op vs IA" : "⚔ Jugador vs Jugador";
+    el("lobby-roles").style.display = mode === "dvh" ? "flex" : "none"; // role choice only in PvP
+    (el("lobby-copy") as HTMLButtonElement).onclick = () => { void navigator.clipboard?.writeText(code); this.flash("Código copiado"); };
+    for (const b of Array.from(document.querySelectorAll("#lobby-roles button[data-r]")) as HTMLButtonElement[])
+      b.onclick = () => cb.pick(b.dataset.r as Role);
+    (el("lobby-start") as HTMLButtonElement).onclick = () => cb.start();
+    (el("lobby-leave") as HTMLButtonElement).onclick = () => cb.leave();
+    el("hud-lobby").style.display = "flex";
+  }
+
+  updateLobby(rows: LobbyRow[], myId: number, hostId: number, myRole: Role | null): void {
+    const list = document.getElementById("lobby-list")!;
+    list.innerHTML = rows.map((p) => {
+      const icon = p.role === "drone" ? "🤖" : p.role === "human" ? "🧍" : "❓";
+      const tags = `${p.id === hostId ? " 👑" : ""}${p.id === myId ? " (tú)" : ""}`;
+      return `<div class="lrow">${icon} Jugador ${p.id}${tags}</div>`;
+    }).join("");
+    const isHost = myId === hostId;
+    (document.getElementById("lobby-start") as HTMLElement).style.display = isHost ? "inline-block" : "none";
+    (document.getElementById("lobby-wait") as HTMLElement).style.display = isHost ? "none" : "inline";
+    for (const b of Array.from(document.querySelectorAll("#lobby-roles button[data-r]")) as HTMLButtonElement[])
+      b.classList.toggle("on", b.dataset.r === myRole);
+  }
+
+  hideLobby(): void { (document.getElementById("hud-lobby") as HTMLElement).style.display = "none"; }
 
   /** Wires the always-visible gear button (opens the settings panel). Called once by the game. */
   onGear(open: () => void): void {
@@ -399,6 +446,25 @@ function inject(): void {
     #hud-settings .sactions button { pointer-events: auto; cursor: pointer; flex: 1; border: 1px solid rgba(255,255,255,.15);
       border-radius: 10px; padding: 11px; font-size: 14px; color: #eef2f6; background: rgba(40,52,68,.9); }
     #hud-settings .sprimary { background: rgba(30,48,80,.9); border-color: rgba(90,150,255,.5); }
+    #hud-lobby { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+      pointer-events: auto; background: rgba(6,9,14,.78); backdrop-filter: blur(3px); }
+    #hud-lobby .lcard { background: rgba(16,22,30,.97); border: 1px solid rgba(255,255,255,.1); border-radius: 14px;
+      padding: 24px 30px; width: 380px; text-align: center; }
+    #hud-lobby h1 { margin: 0 0 10px; font-size: 22px; }
+    #hud-lobby .lcode { font-size: 15px; color: #cfe0f2; }
+    #hud-lobby .lcode b { font-size: 30px; letter-spacing: 4px; color: #7fd0ff; font-variant-numeric: tabular-nums;
+      margin: 0 8px; vertical-align: -2px; }
+    #hud-lobby .lcode button, #hud-lobby #lobby-roles button, #hud-lobby .lactions button { pointer-events: auto;
+      cursor: pointer; border: 1px solid rgba(255,255,255,.15); border-radius: 8px; color: #eef2f6;
+      background: rgba(40,52,68,.85); padding: 6px 12px; font-size: 13px; }
+    #hud-lobby .lhint { color: #9fb3c8; font-size: 12px; margin: 8px 0 14px; }
+    #hud-lobby .lroles { display: flex; gap: 8px; align-items: center; justify-content: center; margin-bottom: 14px; font-size: 13px; color: #9fb3c8; }
+    #hud-lobby #lobby-roles button.on { background: rgba(90,150,255,.32); border-color: rgba(120,180,255,.8); }
+    #hud-lobby .llist { display: flex; flex-direction: column; gap: 5px; margin: 10px 0 18px; min-height: 40px; }
+    #hud-lobby .lrow { background: rgba(255,255,255,.05); border-radius: 7px; padding: 6px 10px; font-size: 13px; }
+    #hud-lobby .lactions { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+    #hud-lobby #lobby-wait { color: #9fb3c8; font-size: 12px; }
+    #hud-lobby .sprimary { background: rgba(30,60,40,.92); border-color: rgba(90,220,140,.5); font-size: 15px; padding: 10px 18px; }
   `;
   document.head.appendChild(style);
 
@@ -430,11 +496,26 @@ function inject(): void {
         <h1>PARTICLES</h1>
         <p>Drones de combate · destrucción física</p>
         <div class="row">
-          <button id="hud-btn-free"><b>🛠 Libre</b><small>Sandbox: construir y destruir</small></button>
-          <button id="hud-btn-vs"><b>⚔ VS</b><small>PvP: solo armas, vida y daño</small></button>
-          <button id="hud-btn-dvh"><b>🤖 vs 🧍</b><small>Drones vs Humanos</small></button>
+          <button id="hud-btn-coop"><b>🪖 Co-op vs IA</b><small>Soldados contra un enjambre de drones IA</small></button>
+          <button id="hud-btn-dvh"><b>⚔ Jugador vs Jugador</b><small>Dron vs Soldado — elige tu bando</small></button>
         </div>
-        <div class="room">Sala <input id="hud-room" maxlength="32" /> <span>(comparte el código)</span></div>
+        <div class="room">Unirse: <input id="hud-room" maxlength="8" placeholder="CÓDIGO" /> <button id="hud-btn-join">Entrar</button></div>
+      </div>
+    </div>
+    <div id="hud-lobby">
+      <div class="lcard">
+        <h1 id="lobby-title">Sala</h1>
+        <div class="lcode">Código <b id="lobby-code">—</b> <button id="lobby-copy">copiar</button></div>
+        <p class="lhint">Comparte el código para que se unan.</p>
+        <div id="lobby-roles" class="lroles"><span>Tu bando:</span>
+          <button data-r="drone">🤖 Dron</button><button data-r="human">🧍 Soldado</button>
+        </div>
+        <div id="lobby-list" class="llist"></div>
+        <div class="lactions">
+          <button id="lobby-leave">Salir</button>
+          <span id="lobby-wait">Esperando al anfitrión…</span>
+          <button id="lobby-start" class="sprimary">▶ Iniciar</button>
+        </div>
       </div>
     </div>
     <button id="hud-gear" title="Ajustes visuales (O)">⚙</button>
