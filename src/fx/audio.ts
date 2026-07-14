@@ -27,6 +27,8 @@ export class GameAudio {
   private rotorOsc: OscillatorNode | null = null;
   private rotorSubOsc: OscillatorNode | null = null;
   private rotorLfo: OscillatorNode | null = null;
+  private rotorLowpass: BiquadFilterNode | null = null; // distance muffling: far = dull hum, near = bright whir
+  private rotorPanner: StereoPannerNode | null = null;  // stereo pan by the drone's bearing (which side it's on)
 
   constructor() {
     try {
@@ -182,6 +184,22 @@ export class GameAudio {
     this.tone(p.bodyFreq, "sine", p.gain * 0.8, p.decay * 1.7, d, p.bodyFreq * 0.42); // muzzle body/thump
     this.tone(p.bodyFreq * 1.6, "sawtooth", p.gain * 0.28, p.decay * 0.5, d, p.bodyFreq * 0.7); // low-mid punch
     this.burst(2400, "bandpass", 0.8, p.gain * 0.18, p.decay * 2.4, d, 0.012);         // report tail (into reverb)
+    if (weapon === "sniper") { // a high-power rifle: supersonic CRACK + a long rolling echo + a deep chest thump
+      this.burst(3400, "bandpass", 2.4, p.gain * 0.6, 0.05, d, 0.008, 0.0003);         // supersonic snap
+      this.burst(820, "bandpass", 0.7, p.gain * 0.32, p.decay * 4, d, 0.06);           // long echo roll
+      this.tone(46, "sine", p.gain * 0.5, p.decay * 3, d, 30);                          // deep chest thump
+    }
+  }
+
+  /** Bolt-action rack after a sniper shot: lift + pull the bolt BACK (eject), then shove it FORWARD and lock
+   *  it DOWN (chamber the next round). A short sequence of metallic clicks + a slide, scheduled a beat after
+   *  the shot so it reads as "BANG … clack-clack". */
+  boltCycle(): void {
+    if (!this.ctx) return; const d = this.master!;
+    this.burst(2900, "bandpass", 3.5, 0.26, 0.03, d, 0.28, 0.0004);  // bolt handle lifts (sharp tink)
+    this.burst(1500, "highpass", 0.9, 0.13, 0.09, d, 0.33, 0.001);   // bolt slides BACK (scrape)
+    this.burst(2400, "bandpass", 3.5, 0.30, 0.035, d, 0.55, 0.0004); // bolt shoves FORWARD (chunk)
+    this.tone(300, "square", 0.16, 0.05, d, 210, 0.58);             // ...and locks DOWN (heavy thunk)
   }
 
   explosion(power: number, dist = 0): void {
@@ -251,7 +269,7 @@ export class GameAudio {
 
   /** Continuous drone rotor: layered noise + two saws + a blade-pass tremolo → a real quad-copper whir.
    *  level (0..1) sets loudness, speed sets pitch. Started lazily (never built in human-only matches). */
-  setRotor(level: number, speed: number, maxGain = 0.05): void {
+  setRotor(level: number, speed: number, maxGain = 0.05, pan = 0, cutoff = 6000): void {
     if (!this.ctx) return;
     if (!this.rotorGain) {
       if (level <= 0) return;
@@ -271,10 +289,21 @@ export class GameAudio {
         s.start(); o.start(); sub.start(); lfo.start();
         this.rotorFilter = f; this.rotorOsc = o; this.rotorSubOsc = sub; this.rotorLfo = lfo;
       }
-      g.connect(this.master!); this.rotorGain = g;
+      // spatial chain: gain(level) → lowpass(distance muffling) → stereo panner(bearing) → master
+      const lp = this.ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = cutoff; lp.Q.value = 0.7;
+      g.connect(lp);
+      let tail: AudioNode = lp;
+      if (typeof this.ctx.createStereoPanner === "function") { // panner may be absent on old engines
+        const p = this.ctx.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, pan));
+        lp.connect(p); tail = p; this.rotorPanner = p;
+      }
+      tail.connect(this.master!);
+      this.rotorGain = g; this.rotorLowpass = lp;
     }
     const t = this.ctx.currentTime;
     this.rotorGain.gain.setTargetAtTime(Math.max(0, Math.min(maxGain, level * maxGain)), t, 0.08);
+    if (this.rotorLowpass) this.rotorLowpass.frequency.setTargetAtTime(Math.max(120, cutoff), t, 0.1); // muffle with distance
+    if (this.rotorPanner) this.rotorPanner.pan.setTargetAtTime(Math.max(-1, Math.min(1, pan)), t, 0.06); // ease L/R (no zipper)
     if (this.rotorSrc) {
       this.rotorSrc.playbackRate.setTargetAtTime(0.82 + speed * 0.008, t, 0.15); // pitch rises with throttle
     } else if (this.rotorFilter) {

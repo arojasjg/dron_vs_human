@@ -14,9 +14,9 @@ describe("fall / impact damage", () => {
   });
 
   it("the drone is only hurt by a FAST, hard-blocked impact", () => {
-    expect(droneImpactDamage(9, 1)).toBe(0);    // cruising into a wall — harmless
-    expect(droneImpactDamage(20, 0.1)).toBe(0); // fast but NOT blocked (a graze / free air)
-    expect(droneImpactDamage(20, 1)).toBeGreaterThan(0);  // boosting hard into a wall — hurts
-    expect(droneImpactDamage(20, 1)).toBeGreaterThan(droneImpactDamage(16, 1)); // faster = worse
+    expect(droneImpactDamage(18, 1)).toBe(0);    // cruising (18 m/s) into a wall — harmless
+    expect(droneImpactDamage(40, 0.1)).toBe(0);  // fast but NOT blocked (a graze / free air)
+    expect(droneImpactDamage(40, 1)).toBeGreaterThan(0);  // boosting (40 m/s) hard into a wall — hurts
+    expect(droneImpactDamage(40, 1)).toBeGreaterThan(droneImpactDamage(30, 1)); // faster = worse
   });
 });

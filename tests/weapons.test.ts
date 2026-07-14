@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff } from "../src/net/weapons";
+import { roleMaxHp } from "../src/net/roles";
 
 describe("bullet range falloff + TTK intent", () => {
   it("shotgun punches up close and fades with range; mg is flat; unknown is version-safe 1.0", () => {
@@ -21,13 +22,16 @@ describe("bullet range falloff + TTK intent", () => {
 });
 
 describe("team weapon loadouts", () => {
-  it("drones get FEWER weapons (mg/grenade/kamikaze); humans get mg/shotgun/glauncher/net", () => {
+  it("drones get FEWER weapons (mg/grenade/kamikaze); humans get mg/shotgun/glauncher/swarm/sniper/smoke", () => {
     expect(roleLoadout("drone")).toEqual(["mg", "grenade", "kamikaze"]);
-    expect(roleLoadout("human")).toEqual(["mg", "shotgun", "glauncher", "net"]);
+    expect(roleLoadout("human")).toEqual(["mg", "shotgun", "glauncher", "swarm", "sniper", "smoke"]);
     expect(roleLoadout("drone").length).toBeLessThan(roleLoadout("human").length); // "pocas armas"
     expect(roleLoadout("drone")).toContain("kamikaze");     // drone-only
-    expect(roleLoadout("human")).toContain("net");          // human-only (catch a drone)
-    expect(roleLoadout("drone")).not.toContain("net");
+    expect(roleLoadout("human")).toContain("swarm");        // human-only anti-swarm mini-drones (replaced the net)
+    expect(roleLoadout("human")).toContain("sniper");       // human-only precision weapon
+    expect(roleLoadout("human")).not.toContain("net");      // the net is DORMANT now (replaced by the swarm)
+    expect(roleLoadout("drone")).not.toContain("swarm");
+    expect(roleLoadout("drone")).not.toContain("sniper");
     expect(roleLoadout("human")).not.toContain("kamikaze");
   });
 
@@ -40,6 +44,81 @@ describe("team weapon loadouts", () => {
     }
     expect(WEAPONS.grenade.magSize + WEAPONS.grenade.maxReserve).toBeLessThanOrEqual(8); // "pocas" granadas
     expect(WEAPONS.shotgun.pellets!).toBeGreaterThan(1);
+  });
+});
+
+describe("sniper — scoped, one-shot the drone, slow bolt cadence", () => {
+  const s = WEAPONS.sniper;
+  it("one clean body hit downs a drone at ANY range (flat damage, no falloff)", () => {
+    const droneHp = roleMaxHp("drone");                       // 80
+    expect(bulletFalloff("sniper", 3)).toBe(1);               // not the shotgun → flat…
+    expect(bulletFalloff("sniper", 90)).toBe(1);              // …at every range
+    expect(s.playerDmg! * bulletFalloff("sniper", 3)).toBeGreaterThanOrEqual(droneHp);  // one-shot up close
+    expect(s.playerDmg! * bulletFalloff("sniper", 90)).toBeGreaterThanOrEqual(droneHp); // …and far away
+  });
+
+  it("is a scoped precision weapon: magnifies, slow cadence, small mag", () => {
+    expect(s.scope).toBe(true);
+    expect(Math.min(...s.zoomMags!)).toBeGreaterThan(1);      // every stop magnifies (>1× = zoom IN, never out)
+    expect(s.fire).toBe("bullet");                            // pinpoint hitscan, no spread
+    expect(s.cooldown).toBeGreaterThan(WEAPONS.shotgun.cooldown); // slower than every other bullet weapon
+    expect(s.magSize).toBeLessThanOrEqual(6);                 // small magazine
+    expect(s.bulletSpeed!).toBeGreaterThan(120);              // the round zips downrange (faster tracer than the MG's default)
+    expect(s.boltAction).toBe(true);                          // one shot per trigger pull, then rack the bolt
+  });
+
+  it("has TWO zoom levels — ×5 and ×10 — the higher one reaching FARTHER (parallel ranges)", () => {
+    expect(s.zoomMags).toEqual([5, 10]);
+    expect(s.aiRanges!.length).toBe(s.zoomMags!.length);      // one reach per zoom level
+    expect(s.zoomMags![1]).toBeGreaterThan(s.zoomMags![0]);   // level 2 magnifies more
+    expect(s.aiRanges![1]).toBeGreaterThan(s.aiRanges![0]);   // …and it reaches farther
+  });
+
+  it("is worth carrying in co-op: one-shots a bot (HP 3) at long range", () => {
+    expect(s.botDmg!).toBeGreaterThanOrEqual(3);              // a bot has 3 HP → downed in one
+    expect(Math.max(...s.aiRanges!)).toBeGreaterThan(30);     // reaches farther than the default MG hitscan
+  });
+});
+
+describe("class bullet weapons — smg/lmg/dmr with distinct niches", () => {
+  it("smg shreds up close but falls off hard past mid-range (monotonic)", () => {
+    expect(bulletFalloff("smg", 5)).toBeGreaterThan(1);                          // close buff
+    expect(bulletFalloff("smg", 5)).toBeGreaterThan(bulletFalloff("smg", 18));   // monotonic decrease
+    expect(bulletFalloff("smg", 18)).toBeGreaterThan(bulletFalloff("smg", 40));
+    expect(bulletFalloff("smg", 40)).toBeLessThan(0.5);                          // feeble far
+  });
+
+  it("smg wins the close DPS race vs the mg but loses it at range (its weakness)", () => {
+    const dps = (w: "mg" | "smg", dist: number) => (WEAPONS[w].playerDmg! * bulletFalloff(w, dist)) / WEAPONS[w].cooldown;
+    expect(dps("smg", 4)).toBeGreaterThan(dps("mg", 4));   // close quarters → smg out-DPSes the mg
+    expect(dps("smg", 40)).toBeLessThan(dps("mg", 40));    // at range → the mg wins
+  });
+
+  it("lmg is the heavy suppressor: big mag + hard-hitting, flat range", () => {
+    expect(WEAPONS.lmg.magSize).toBeGreaterThan(WEAPONS.mg.magSize);    // huge magazine
+    expect(WEAPONS.lmg.playerDmg!).toBeGreaterThan(WEAPONS.mg.playerDmg!);
+    expect(bulletFalloff("lmg", 5)).toBe(1);                            // flat…
+    expect(bulletFalloff("lmg", 40)).toBe(1);                          // …at every range
+    expect(WEAPONS.lmg.botDmg!).toBeGreaterThanOrEqual(2);
+  });
+
+  it("dmr sits between the mg and the sniper: harder-hitting than mg, faster than sniper", () => {
+    expect(WEAPONS.dmr.playerDmg!).toBeGreaterThan(WEAPONS.mg.playerDmg!);
+    expect(WEAPONS.dmr.playerDmg!).toBeLessThan(WEAPONS.sniper.playerDmg!);
+    expect(WEAPONS.dmr.cooldown).toBeGreaterThan(WEAPONS.mg.cooldown);
+    expect(WEAPONS.dmr.cooldown).toBeLessThan(WEAPONS.sniper.cooldown);
+    expect(WEAPONS.dmr.scope).toBe(true);
+    expect(WEAPONS.dmr.boltAction).not.toBe(true);          // semi-auto, not bolt-action
+  });
+
+  it("all three route through the bullet path and carry valid specs", () => {
+    for (const w of ["smg", "lmg", "dmr"] as const) {
+      const s = WEAPONS[w];
+      expect(s.fire).toBe("bullet");
+      expect(s.name.length).toBeGreaterThan(0);
+      expect(s.magSize).toBeGreaterThan(0);
+      expect(s.playerDmg!).toBeGreaterThan(0);
+    }
   });
 });
 

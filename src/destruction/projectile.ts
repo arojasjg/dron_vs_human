@@ -22,9 +22,11 @@ interface Flying {
   prev: THREE.Vector3;
   stuck?: boolean; // grenades stick where they first hit, then count down
   ghost?: boolean; // a replayed remote shot: flies for visuals only, never mutates the grid
+  ai?: boolean;    // an ENEMY drone's dropped grenade → its blast must not damage the swarm (no friendly fire)
+  smoke?: boolean; // a SMOKE grenade → on "detonation" it deploys a sightline-blocking cloud, no blast
 }
 
-export type ExplodeFn = (x: number, y: number, z: number, radius: number, power: number) => void;
+export type ExplodeFn = (x: number, y: number, z: number, radius: number, power: number, ai?: boolean, smoke?: boolean) => void;
 export type BulletHitFn = (hit: RayHit, dx: number, dy: number, dz: number) => void;
 
 export class Projectiles {
@@ -32,14 +34,14 @@ export class Projectiles {
   private readonly cannonGeo = new THREE.SphereGeometry(0.18, 16, 12);
   private readonly grenadeGeo = new THREE.SphereGeometry(0.13, 14, 10);
   private readonly cannonMat = new THREE.MeshStandardMaterial({ color: 0x20242b, roughness: 0.4, metalness: 0.9 });
-  private readonly grenadeMat = new THREE.MeshStandardMaterial({ color: 0x3f5a2a, roughness: 0.6, metalness: 0.3 });
+  private readonly grenadeMat = new THREE.MeshStandardMaterial({ color: 0x3f5a2a, roughness: 0.55, metalness: 0.45, emissive: 0x1a2a0a, emissiveIntensity: 0.5 });
   // missile parts (assembled along +Y in makeRocketMesh, then aimed along its velocity)
   private readonly rocketBodyGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.42, 10);
   private readonly rocketNoseGeo = new THREE.ConeGeometry(0.07, 0.16, 10);
   private readonly rocketFinGeo = new THREE.BoxGeometry(0.012, 0.12, 0.1);
   private readonly rocketExhaustGeo = new THREE.ConeGeometry(0.05, 0.12, 8);
   private readonly rocketBodyMat = new THREE.MeshStandardMaterial({ color: 0x9a9a90, roughness: 0.5, metalness: 0.6 });
-  private readonly rocketNoseMat = new THREE.MeshStandardMaterial({ color: 0xcc2a1a, roughness: 0.4, metalness: 0.5 });
+  private readonly rocketNoseMat = new THREE.MeshStandardMaterial({ color: 0xcc2a1a, roughness: 0.35, metalness: 0.55, emissive: 0x6a1008, emissiveIntensity: 0.7 }); // hot warhead tip
   private readonly rocketFinMat = new THREE.MeshStandardMaterial({ color: 0x3a3e38, roughness: 0.7, metalness: 0.4 });
   private readonly rocketExhaustMat = new THREE.MeshBasicMaterial({ color: 0xffc24d });
   // a thin, bright tracer stretched along its travel direction so the shot reads as a bullet
@@ -76,12 +78,12 @@ export class Projectiles {
     }, ghost);
   }
 
-  launchGrenade(origin: THREE.Vector3, dir: THREE.Vector3, speed = 22, ghost = false, powerMul = 1): void {
+  launchGrenade(origin: THREE.Vector3, dir: THREE.Vector3, speed = 22, ghost = false, powerMul = 1, ai = false, smoke = false): void {
     const m = new THREE.Mesh(this.grenadeGeo, this.grenadeMat);
     m.castShadow = true;
     this.spawn("grenade", origin, dir, speed, m, {
       radius: 0.13, ccd: true, density: 1200, restitution: 0.0, fuse: 1.6, blast: 2.7, power: BLAST_POWER.grenade * powerMul * WEAPON_BLAST_MUL,
-    }, ghost);
+    }, ghost, ai, smoke);
   }
 
   launchRocket(origin: THREE.Vector3, dir: THREE.Vector3, speed = 52, ghost = false, powerMul = 1): void {
@@ -145,6 +147,8 @@ export class Projectiles {
     visual: THREE.Object3D,
     o: { radius: number; ccd: boolean; density: number; restitution: number; fuse: number; blast: number; power: number; gravityScale?: number },
     ghost = false,
+    ai = false,
+    smoke = false,
   ): void {
     const p = origin.clone().addScaledVector(dir, 0.6);
     const v = dir.clone().multiplyScalar(speed);
@@ -165,7 +169,7 @@ export class Projectiles {
     this.scene.add(visual);
 
     this.list.push({
-      body, collider, mesh: visual, kind, fuse: o.fuse, life: 6, armed: 0.04, radius: o.blast, power: o.power, prev: p.clone(), ghost,
+      body, collider, mesh: visual, kind, fuse: o.fuse, life: 6, armed: 0.04, radius: o.blast, power: o.power, prev: p.clone(), ghost, ai, smoke,
     });
   }
 
@@ -293,7 +297,7 @@ export class Projectiles {
         this.physics.world.removeRigidBody(f.body);
         this.scene.remove(f.mesh);
         this.list.splice(i, 1);
-        if (!f.ghost) this.explode(hx, hy, hz, f.radius, f.power); // ghosts are visual only
+        if (!f.ghost) this.explode(hx, hy, hz, f.radius, f.power, f.ai, f.smoke); // ghosts visual only; ai=no friendly-fire; smoke=deploy cloud
       }
     }
   }
@@ -312,7 +316,7 @@ export class Projectiles {
       this.physics.world.removeRigidBody(f.body);
       this.scene.remove(f.mesh);
       this.list.splice(i, 1);
-      this.explode(t.x, t.y, t.z, f.radius, f.power);
+      this.explode(t.x, t.y, t.z, f.radius, f.power, f.ai, f.smoke);
     }
   }
 }

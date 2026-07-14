@@ -1,17 +1,16 @@
 import * as THREE from "three";
-import type { Role } from "./roles";
+import RAPIER from "@dimforge/rapier3d-compat";
+import { classStats, TEAM_COLOR, type Role } from "./roles";
+import { MODEL_CONFIGS, type AvatarModelConfig } from "./avatarModels";
+import type { Physics } from "../engine/physics";
 import { legSwing, stanceInfo, type Stance } from "./humanPose";
 import { instanceModel, pickAction, type ModelInstance } from "../engine/modelLoader";
 
 export const MAX_HP = 100;
 
-// Rigged + animated soldier (three.js examples "Soldier" by kupvom, CC-BY 4.0) — replaces the procedural
-// human rig on every peer avatar; falls back to the procedural rig if the .glb fails to load. Scale /
-// offset / facing are tunable by eye (the model is added to the yawing human group at the eye).
-const HUMAN_MODEL = "models/Soldier.glb";
-const HUMAN_SCALE = 1.0;
-const HUMAN_Y = -1.5;       // drop the model so its feet reach the ground
-const HUMAN_ROT = Math.PI;  // face the same way the body yaws
+// Rigged + animated glTF avatars (soldier = "Soldier.glb" by kupvom CC-BY 4.0; drone near-LOD/preview =
+// RobotExpressive.glb) — replace the procedural rig/quadcopter when loaded; fall back to procedural on any
+// load failure. Scale/offset/facing/clip names live in MODEL_CONFIGS (avatarModels.ts).
 
 interface Remote {
   drone: THREE.Group;  // quadcopter avatar (role "drone"), positioned at the eye
@@ -33,6 +32,9 @@ interface Remote {
   walkPhase: number;           // walk-cycle phase, advanced by the interpolated ground distance
   prevX: number; prevZ: number;
   isHuman: boolean;
+  team: number;                // PvP team (0/1) — drives friend/enemy + the teammates panel
+  cls: string;                 // chosen class id — drives the avatar tint
+  tintMat: THREE.MeshStandardMaterial; // per-instance accent: colour = class, emissive glow = team
   frac: number;                // hp fraction for the health bar
   hp: number;                  // raw hp/maxHp — for the teammates panel
   maxHp: number;
@@ -40,6 +42,7 @@ interface Remote {
   model: ModelInstance | null;   // rigged soldier glTF (null until loaded / if it failed → procedural rig)
   modelReq: boolean;             // load kicked off (only for humans, once)
   curClip: string;               // current animation clip, for crossfading
+  body: RAPIER.RigidBody;        // kinematic collider that follows the avatar so debris/weapons don't pass through it
 }
 
 const LERP = 18;               // interpolation rate → smooths the ~20 Hz network samples into 60 fps motion
@@ -65,6 +68,7 @@ const D_SKID = new THREE.BoxGeometry(0.028, 0.028, 0.4);         // landing skid
 const D_SKIDLEG = new THREE.BoxGeometry(0.025, 0.12, 0.025);
 const D_LIGHT = new THREE.SphereGeometry(0.022, 8, 6);           // nav light
 const D_ANT = new THREE.CylinderGeometry(0.006, 0.006, 0.17, 6); // antenna
+const D_BEACON = new THREE.BoxGeometry(0.13, 0.055, 0.13);      // class/team beacon atop the drone
 
 // --- Soldier: detailed infantry (~1.7 m, centred at the capsule origin) ---
 const H_HIPS = new THREE.BoxGeometry(0.36, 0.2, 0.24);
@@ -84,6 +88,7 @@ const H_SHIN = new THREE.BoxGeometry(0.13, 0.34, 0.14);
 const H_KNEE = new THREE.SphereGeometry(0.075, 8, 6);
 const H_BOOT = new THREE.BoxGeometry(0.14, 0.12, 0.26);
 const H_PACK = new THREE.BoxGeometry(0.3, 0.42, 0.16);
+const H_BAND = new THREE.BoxGeometry(0.48, 0.09, 0.33);        // class/team sash around the torso
 const H_PACKTOP = new THREE.CylinderGeometry(0.08, 0.08, 0.3, 8);
 // rifle held across the chest
 const R_BODY = new THREE.BoxGeometry(0.06, 0.1, 0.42);
@@ -96,13 +101,13 @@ const R_SIGHT = new THREE.BoxGeometry(0.03, 0.06, 0.08);
  *  billboarded health bar. The avatar shown follows each peer's broadcast role. */
 export class RemoteDrones {
   private readonly drones = new Map<number, Remote>();
-  private readonly bodyMat = new THREE.MeshStandardMaterial({ color: 0x2b3038, roughness: 0.5, metalness: 0.75 }); // gunmetal
-  private readonly carbonMat = new THREE.MeshStandardMaterial({ color: 0x111418, roughness: 0.35, metalness: 0.6 }); // carbon fibre
-  private readonly domeMat = new THREE.MeshStandardMaterial({ color: 0x0c0f14, roughness: 0.2, metalness: 0.5 });
-  private readonly lensMat = new THREE.MeshStandardMaterial({ color: 0x0a0a12, roughness: 0.1, metalness: 0.2, emissive: 0x220033 });
-  private readonly rotorMat = new THREE.MeshStandardMaterial({ color: 0x0d0f12, roughness: 0.8, transparent: true, opacity: 0.55 });
-  private readonly redLight = new THREE.MeshStandardMaterial({ color: 0xff2a1e, emissive: 0xcc1408, roughness: 0.4 });
-  private readonly greenLight = new THREE.MeshStandardMaterial({ color: 0x2bff44, emissive: 0x10bb22, roughness: 0.4 });
+  private readonly bodyMat = new THREE.MeshStandardMaterial({ color: 0x2b3038, roughness: 0.38, metalness: 0.88 }); // polished gunmetal — sharper specular
+  private readonly carbonMat = new THREE.MeshStandardMaterial({ color: 0x111418, roughness: 0.32, metalness: 0.65 }); // carbon fibre
+  private readonly domeMat = new THREE.MeshStandardMaterial({ color: 0x0c0f14, roughness: 0.18, metalness: 0.55, emissive: 0x06121e, emissiveIntensity: 0.6 }); // sensor dome with a faint glow
+  private readonly lensMat = new THREE.MeshStandardMaterial({ color: 0x0a0a12, roughness: 0.08, metalness: 0.25, emissive: 0x3a1cc0, emissiveIntensity: 1.4 }); // glowing camera lens
+  private readonly rotorMat = new THREE.MeshStandardMaterial({ color: 0x0d0f12, roughness: 0.8, transparent: true, opacity: 0.5 });
+  private readonly redLight = new THREE.MeshStandardMaterial({ color: 0xff2a1e, emissive: 0xff1808, emissiveIntensity: 2.2, roughness: 0.4 }); // punchy nav lights
+  private readonly greenLight = new THREE.MeshStandardMaterial({ color: 0x2bff44, emissive: 0x18ff33, emissiveIntensity: 2.2, roughness: 0.4 });
   private readonly fatigueMat = new THREE.MeshStandardMaterial({ color: 0x4a5238, roughness: 0.9 }); // olive fatigues
   private readonly gearMat = new THREE.MeshStandardMaterial({ color: 0x2b3024, roughness: 0.85 });   // vest/helmet/pack
   private readonly skinMat = new THREE.MeshStandardMaterial({ color: 0x8a6b50, roughness: 0.8 });
@@ -110,16 +115,16 @@ export class RemoteDrones {
   private readonly visorMat = new THREE.MeshStandardMaterial({ color: 0x121a22, roughness: 0.15, metalness: 0.3, emissive: 0x08222a });
   private readonly bootMat = new THREE.MeshStandardMaterial({ color: 0x1c1a17, roughness: 0.9 });
 
-  constructor(private readonly scene: THREE.Scene) {}
+  constructor(private readonly scene: THREE.Scene, private readonly physics: Physics) {}
 
   get count(): number { return this.drones.size; }
 
   /** Positions of ENEMY peers (opposite team, or everyone in free-for-all) — for local hit prediction so
    *  the shooter gets a hit marker even though damage is applied authoritatively on the victim. */
-  enemyPositions(iAmHuman: boolean, freeForAll: boolean, out: { x: number; y: number; z: number }[]): void {
+  enemyPositions(myTeam: number, freeForAll: boolean, out: { x: number; y: number; z: number }[]): void {
     out.length = 0;
     for (const d of this.drones.values())
-      if (freeForAll || d.isHuman !== iAmHuman) out.push({ x: d.drone.position.x, y: d.drone.position.y, z: d.drone.position.z });
+      if (freeForAll || d.team !== myTeam) out.push({ x: d.drone.position.x, y: d.drone.position.y, z: d.drone.position.z });
   }
 
   /** First remote's position (test helper). */
@@ -128,47 +133,89 @@ export class RemoteDrones {
     return null;
   }
 
-  /** Distance to the nearest ENEMY-drone avatar (role drone), or Infinity if none — lets a human on
-   *  the ground HEAR drones approach (the closer the louder). */
-  nearestDroneDist(x: number, y: number, z: number): number {
-    let best = Infinity;
+  /** Nearest ENEMY-drone avatar (role drone): its distance + XZ position, or null if none — lets a human on
+   *  the ground HEAR drones (closer = louder/brighter) AND pan the rotor to the side it's on. */
+  nearestDrone(x: number, y: number, z: number): { dist: number; x: number; z: number } | null {
+    let best = Infinity, bx = 0, bz = 0, found = false;
     for (const d of this.drones.values()) {
       if (d.isHuman) continue;
       const p = d.drone.position, dd = Math.hypot(p.x - x, p.y - y, p.z - z);
-      if (dd < best) best = dd;
+      if (dd < best) { best = dd; bx = p.x; bz = p.z; found = true; }
     }
-    return best;
+    return found ? { dist: best, x: bx, z: bz } : null;
+  }
+
+  /** Distance to the nearest enemy drone, or Infinity if none. */
+  nearestDroneDist(x: number, y: number, z: number): number {
+    return this.nearestDrone(x, y, z)?.dist ?? Infinity;
   }
 
   /** Loads the rigged soldier glTF for a human peer (once); on success it replaces the procedural rig. */
   private loadHumanModel(d: Remote): void {
-    d.modelReq = true;
-    instanceModel(HUMAN_MODEL).then((m) => {
-      if (!m || !d.human.parent) return; // load failed, OR the peer was pruned mid-load → no orphan
+    this.loadAvatarModel(d, MODEL_CONFIGS.soldier, d.human);
+  }
 
-      m.scene.scale.setScalar(HUMAN_SCALE);
-      m.scene.position.y = HUMAN_Y;
-      m.scene.rotation.y = HUMAN_ROT;
-      d.human.add(m.scene);
+  /** Generic glTF avatar loader: instances a config, poses it to Idle, mounts it on `mount`, hides the
+   *  procedural rig, and stores it on the Remote — or leaves the procedural avatar visible on load failure
+   *  (instanceModel resolves null on error). Shared by the soldier and the drone near-LOD robot. */
+  private loadAvatarModel(d: Remote, cfg: AvatarModelConfig, mount: THREE.Group): void {
+    d.modelReq = true;
+    instanceModel(cfg.url).then((m) => {
+      if (!m || !mount.parent) return; // load failed, OR the peer was pruned mid-load → no orphan
+      m.scene.scale.setScalar(cfg.scale);
+      m.scene.position.y = cfg.yOffset;
+      m.scene.rotation.y = cfg.rot;
+      mount.add(m.scene);
       d.rig.visible = false;                       // hide the hand-built rig
-      const idle = pickAction(m.actions, "Idle"); if (idle) idle.play();
-      m.mixer.update(0); // pose to Idle NOW so a peer that loads while far (LOD-frozen) isn't a bind-pose T-pose
+      const idle = pickAction(m.actions, cfg.clips.idle); if (idle) idle.play();
+      m.mixer.update(0); // pose to Idle NOW so an avatar that loads while far (LOD-frozen) isn't a bind-pose T-pose
       d.curClip = "Idle";
       d.model = m;                                  // set LAST so update() only drives a fully-ready model
+      this.tintModel(d);                            // apply the current team accent to the freshly-loaded materials
     });
+  }
+
+  /** Applies this avatar's TEAM accent (an emissive glow) to its loaded glTF's per-instance materials, so a
+   *  Rojo/Azul soldier/robot reads at a glance without mutating the shared model cache. No-op if no model yet. */
+  private tintModel(d: Remote): void {
+    if (!d.model) return;
+    const hex = TEAM_COLOR[d.team === 1 ? 1 : 0];
+    for (const mm of d.model.materials) { mm.emissive.setHex(hex); mm.emissiveIntensity = 0.32; }
   }
 
   /** Triggers a rifle-butt swing animation on a peer's avatar (they just melee'd). */
   meleeAnim(id: number): void { const d = this.drones.get(id); if (d) d.meleeTimer = 0.4; }
 
-  /** Snapshot of every known peer (id, hp, role) — the HUD filters to teammates by role. */
-  peers(): { id: number; hp: number; maxHp: number; isHuman: boolean }[] {
-    const out: { id: number; hp: number; maxHp: number; isHuman: boolean }[] = [];
-    for (const [id, d] of this.drones) out.push({ id, hp: d.hp, maxHp: d.maxHp, isHuman: d.isHuman });
+  /** XZ position + role of every known avatar (peers AND AI bots) for the minimap. The caller decides
+   *  friend/enemy from the game mode + its own role. */
+  radar(): { x: number; z: number; isHuman: boolean; team: number }[] {
+    const out: { x: number; z: number; isHuman: boolean; team: number }[] = [];
+    for (const d of this.drones.values()) {
+      const p = d.isHuman ? d.human.position : d.drone.position;
+      out.push({ x: p.x, z: p.z, isHuman: d.isHuman, team: d.team });
+    }
     return out;
   }
 
-  upsert(id: number, x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number, hp: number, role: Role = "drone", maxHp = MAX_HP, yaw = 0, pitch = 0, stance: Stance = 0): void {
+  /** Snapshot of every known peer (id, hp, role, team) — the HUD filters to teammates by team. */
+  peers(): { id: number; hp: number; maxHp: number; isHuman: boolean; team: number }[] {
+    const out: { id: number; hp: number; maxHp: number; isHuman: boolean; team: number }[] = [];
+    for (const [id, d] of this.drones) out.push({ id, hp: d.hp, maxHp: d.maxHp, isHuman: d.isHuman, team: d.team });
+    return out;
+  }
+
+  /** Living HUMAN peers as AI targets (id + eye position), written into `out` (reused, no alloc). Co-op:
+   *  the enemy swarm chases every living soldier, not only the host. Skips avatars at hp ≤ 0. */
+  humanTargets(out: { id: number; x: number; y: number; z: number; hp: number; maxHp: number }[]): void {
+    out.length = 0;
+    for (const [id, d] of this.drones) {
+      if (!d.isHuman || d.hp <= 0) continue;
+      const p = d.human.position;
+      out.push({ id, x: p.x, y: p.y, z: p.z, hp: d.hp, maxHp: d.maxHp });
+    }
+  }
+
+  upsert(id: number, x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number, hp: number, role: Role = "drone", maxHp = MAX_HP, yaw = 0, pitch = 0, stance: Stance = 0, team = 0, cls = ""): void {
     let d = this.drones.get(id);
     const isNew = !d;
     if (!d) d = this.create(id);
@@ -176,6 +223,13 @@ export class RemoteDrones {
     d.targetQuat.set(qx, qy, qz, qw);
     d.targetYaw = yaw; d.targetPitch = pitch; d.stance = stance;
     d.isHuman = role === "human";
+    d.team = team; d.cls = cls;
+    // accent: class colour on the body, team colour as an emissive glow → drone-vs-drone stays readable
+    const st = classStats(d.isHuman ? "human" : "drone", cls);
+    d.tintMat.color.setHex(st.tint);
+    d.tintMat.emissive.setHex(TEAM_COLOR[team === 1 ? 1 : 0]);
+    d.tintMat.emissiveIntensity = 0.55;
+    this.tintModel(d); // if a glTF model is loaded, give ITS materials the same team accent (per-instance)
     if (d.isHuman && !d.modelReq) this.loadHumanModel(d);
     d.hp = hp; d.maxHp = maxHp;
     d.frac = Math.max(0, Math.min(1, hp / maxHp));
@@ -239,6 +293,8 @@ export class RemoteDrones {
       d.barFg.scale.set(0.6 * d.frac, 0.08, 1);
       d.barFg.position.set(p.x - 0.3 * (1 - d.frac), p.y + 0.45, p.z);
       d.barBg.position.set(p.x, p.y + 0.45, p.z);
+      // follow the eased avatar with the kinematic collider (humans: drop to the torso; drones: at the body)
+      d.body.setNextKinematicTranslation({ x: p.x, y: p.y - (d.isHuman ? 0.6 : 0), z: p.z });
     }
   }
 
@@ -252,6 +308,7 @@ export class RemoteDrones {
     const d = this.drones.get(id);
     if (!d) return;
     this.scene.remove(d.drone, d.human, d.barBg, d.barFg);
+    this.physics.world.removeRigidBody(d.body); // also removes its attached collider
     this.drones.delete(id);
   }
 
@@ -283,6 +340,10 @@ export class RemoteDrones {
       drone.add(motor, hub, rotor, light);
       rotors.push(rotor);
     }
+    // per-instance class/team accent: a beacon atop the drone + a torso sash on the soldier, both sharing
+    // ONE material per avatar so upsert() can recolour it (class = colour, team = emissive glow) cheaply.
+    const tintMat = new THREE.MeshStandardMaterial({ color: 0x808080, emissive: 0x000000, roughness: 0.45, metalness: 0.2 });
+    const beacon = new THREE.Mesh(D_BEACON, tintMat); beacon.position.set(0, 0.2, -0.02); drone.add(beacon);
     drone.frustumCulled = false;
     this.scene.add(drone);
 
@@ -338,6 +399,9 @@ export class RemoteDrones {
     };
     const legL = makeLeg(-1), legR = makeLeg(1);
     rig.add(legL, legR);
+    // sash on the OUTER human group (not the rig, which hides when the glTF model loads) → team band stays
+    // visible at torso height whether the procedural rig or the rigged model is showing.
+    const sash = new THREE.Mesh(H_BAND, tintMat); sash.position.set(0, RIG_DROP + 0.16, 0); human.add(sash);
 
     human.frustumCulled = false;
     human.visible = false;
@@ -349,12 +413,18 @@ export class RemoteDrones {
     barFg.renderOrder = 999; barBg.renderOrder = 998;
     this.scene.add(barBg, barFg);
 
+    // A kinematic collider (default groups) that follows this avatar each frame, so physics debris bounces
+    // off it and the projectile/bullet raycasts (which include non-fixed bodies) stop on it instead of
+    // passing straight through. Kinematic → it never gets pushed; the remote client already resolved its motion.
+    const body = this.physics.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, -1000, 0));
+    this.physics.world.createCollider(RAPIER.ColliderDesc.ball(0.55).setFriction(0.4), body);
+
     const d: Remote = {
       drone, rotors, human, rig, upper, rifle, legL, legR, barBg, barFg,
       targetPos: new THREE.Vector3(), targetQuat: new THREE.Quaternion(),
       targetYaw: 0, targetPitch: 0, stance: 0, walkPhase: 0, prevX: 0, prevZ: 0, meleeTimer: 0,
-      isHuman: false, frac: 1, hp: MAX_HP, maxHp: MAX_HP, lastSeen: performance.now(),
-      model: null, modelReq: false, curClip: "none",
+      isHuman: false, team: 0, cls: "", tintMat, frac: 1, hp: MAX_HP, maxHp: MAX_HP, lastSeen: performance.now(),
+      model: null, modelReq: false, curClip: "none", body,
     };
     this.drones.set(id, d);
     return d;

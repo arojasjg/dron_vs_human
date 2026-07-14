@@ -1,6 +1,7 @@
 import type { MaterialId } from "../world/materials";
 import type { VoxelGrid } from "../world/voxelGrid";
 import { Rng, mix32 } from "../engine/rng";
+import { VOXEL } from "../config";
 
 // Seeded PRNG (mulberry32) so every client in a multiplayer room generates the IDENTICAL building —
 // the foundation of full destruction sync. setWorldSeed() is called from the room code before build.
@@ -45,15 +46,15 @@ export function buildHouse(grid: VoxelGrid, ox = 0, oz = 0): void {
   // wooden roof
   fillBox(grid, ox, ox + W - 1, H + 1, H + 1, oz, oz + D - 1, "wood");
 
-  // door (front wall, z = oz)
-  clearBox(grid, ox + 6, ox + 9, 1, 6, oz, oz);
+  // door (front wall, z = oz) — 2 m clear (y1..8) so a 1.7 m soldier (head ~1.95 m) walks straight through
+  clearBox(grid, ox + 6, ox + 9, 1, 8, oz, oz);
   // glass windows on the side walls
   fillBox(grid, ox, ox, 5, 8, oz + 3, oz + 5, "glass");
   fillBox(grid, ox, ox, 5, 8, oz + 8, oz + 10, "glass");
   fillBox(grid, ox + W - 1, ox + W - 1, 5, 8, oz + 3, oz + 5, "glass");
   fillBox(grid, ox + W - 1, ox + W - 1, 5, 8, oz + 8, oz + 10, "glass");
-  // glass window above the door + back window
-  fillBox(grid, ox + 6, ox + 9, 8, 10, oz, oz, "glass");
+  // glass transom above the door (y9..10, clear of the taller opening) + back window
+  fillBox(grid, ox + 6, ox + 9, 9, 10, oz, oz, "glass");
   fillBox(grid, ox + 6, ox + 9, 5, 9, oz + D - 1, oz + D - 1, "glass");
 }
 
@@ -609,28 +610,38 @@ export interface Placed { ox: number; oz: number; W: number; D: number; FLOORS: 
 // A mini-town: a 9×11 plot grid (99 plots) with a central 3×3 plaza carved out → 90 buildings. Plot size
 // is fixed (its own source of truth, not derived from BIG) so buildings keep the exact geometry that
 // passes the collapse solver — tripling the count is pure footprint growth, no false floaters.
-const PLOTS_X = 9, PLOTS_Z = 11, STREET = 14;
+const STREET = 14;
 const PLOT_W = 57, PLOT_D = 54;
-// central plaza: the 3×3 block of plots in the middle carries no building, just a monument + street furniture
-const PLAZA_PX0 = 3, PLAZA_PX1 = 5, PLAZA_PZ0 = 4, PLAZA_PZ1 = 6;
+
+// Map-size presets. The largest ("large") IS the current world; smaller presets shrink the plot grid for
+// fewer players. The size travels with the room (synced in the `begin` message), never a local-only choice.
+export type MapSize = "small" | "medium" | "large";
+export const MAP_SIZES: Record<MapSize, { label: string; plotsX: number; plotsZ: number; players: number }> = {
+  small:  { label: "Pequeño", plotsX: 5, plotsZ: 5,  players: 6 },
+  medium: { label: "Mediano", plotsX: 7, plotsZ: 8,  players: 16 },
+  large:  { label: "Grande",  plotsX: 9, plotsZ: 11, players: 50 }, // = the current map
+};
+
+// Live map dimensions — mutable so setMapSize() can rescale the world. Initialised to the LARGE (current)
+// values so a module that never calls setMapSize (unit tests) builds the exact same world as before.
+let PLOTS_X = 9, PLOTS_Z = 11;
+// central plaza (3×3 centred block) + boulevard cross + suburb rows — only on the bigger maps (CITY_FEATURES);
+// the small arena drops them for a dense tower field. Plaza/avenue plot indices derive CENTRED from the grid,
+// so at 9×11 they reproduce the historical 3-5/4-6 & 4/5 exactly (byte-identical default).
+let PLAZA_PX0 = 3, PLAZA_PX1 = 5, PLAZA_PZ0 = 4, PLAZA_PZ1 = 6;
+let AVENUE_PX = 4, AVENUE_PZ = 5;
+let CITY_FEATURES = true; // plaza / avenue / suburbs present (large + medium); false on the small arena
+const AVENUE_HALF = 17;   // half-width of the boulevard asphalt in voxels (~4.25 m/side); size-independent
+
 const inPlaza = (px: number, pz: number): boolean =>
-  px >= PLAZA_PX0 && px <= PLAZA_PX1 && pz >= PLAZA_PZ0 && pz <= PLAZA_PZ1;
+  CITY_FEATURES && px >= PLAZA_PX0 && px <= PLAZA_PX1 && pz >= PLAZA_PZ0 && pz <= PLAZA_PZ1;
+const onAvenuePlot = (px: number, pz: number): boolean => CITY_FEATURES && (px === AVENUE_PX || pz === AVENUE_PZ);
+const isResidential = (pz: number): boolean => CITY_FEATURES && (pz === 0 || pz === PLOTS_Z - 1);
 
-// Grand boulevards: a CROSS of two wide avenues down the central plot column (N-S) + row (E-O), meeting at
-// the plaza. Their plot column/row carries NO building; groundClass paints the corridor as asphalt with a
-// thin concrete median down the centre. AVENUE_HALF is the half-width of the asphalt in voxels (~4.25 m/side).
-const AVENUE_PX = 4, AVENUE_PZ = 5;
-const AVENUE_HALF = 17;
-const onAvenuePlot = (px: number, pz: number): boolean => px === AVENUE_PX || pz === AVENUE_PZ;
-
-// Residential suburbs: the top + bottom plot rows are low-rise houses (a cluster per plot) instead of towers,
-// so the tall core is ringed by a distinct neighbourhood. These plots hold no OBJECTIVE-eligible building.
-const isResidential = (pz: number): boolean => pz === 0 || pz === PLOTS_Z - 1;
-
-/** City ground extent in VOXELS (the plot grid buildDefaultScene fills). */
+/** City ground extent in VOXELS (the plot grid buildDefaultScene fills). Mutated by setMapSize. */
 export const CITY_VOX = { x1: PLOTS_X * PLOT_W, z1: PLOTS_Z * PLOT_D };
 // Voxel-space centre lines of the two boulevards (used by groundClass painting + the median dressing).
-const AVENUE_VX = (AVENUE_PX + 0.5) * PLOT_W, AVENUE_VZ = (AVENUE_PZ + 0.5) * PLOT_D;
+let AVENUE_VX = (AVENUE_PX + 0.5) * PLOT_W, AVENUE_VZ = (AVENUE_PZ + 0.5) * PLOT_D;
 
 /** Classifies a voxel-space XZ column under the city so the ground can be painted as a real city floor:
  *  'street' (a plot-boundary gap → asphalt), 'plot' (under/around a building → concrete apron), or
@@ -639,7 +650,8 @@ export function groundClass(vx: number, vz: number): "street" | "plot" | "outsid
   const m = 6; // pavement extends a little past the outer plots
   if (vx < -m || vz < -m || vx > CITY_VOX.x1 + m || vz > CITY_VOX.z1 + m) return "outside";
   // the grand-boulevard cross: a wide asphalt corridor with a thin concrete median down each centre line
-  if (Math.abs(vx - AVENUE_VX) <= AVENUE_HALF || Math.abs(vz - AVENUE_VZ) <= AVENUE_HALF)
+  // (only on the bigger maps — the small arena has no avenue, so its centre plots hold towers, not asphalt)
+  if (CITY_FEATURES && (Math.abs(vx - AVENUE_VX) <= AVENUE_HALF || Math.abs(vz - AVENUE_VZ) <= AVENUE_HALF))
     return (Math.abs(vx - AVENUE_VX) <= 2 || Math.abs(vz - AVENUE_VZ) <= 2) ? "plot" : "street";
   const nearBoundary = (v: number, period: number) => {
     const r = ((v % period) + period) % period;
@@ -665,6 +677,23 @@ export function ammoBoxSites(worldSeed: number): AmmoSite[] {
       const vx = Math.round(xl + rng.centered(8));                       // ±4 across the avenue → stays street
       const vz = Math.round((pz + 0.5) * PLOT_D + rng.centered(PLOT_D * 0.4));
       if (groundClass(vx, vz) === "street") sites.push({ vx, vz });      // defensive: only real street spots
+    }
+  }
+  return sites;
+}
+
+// Medkit crates (bandage resupply): fewer than ammo, on the HORIZONTAL streets, every other block, from their
+// OWN seeded stream so they're identical on every client and don't sit exactly on the ammo grid.
+const MEDKIT_SEED_TAG = 0x3ed1c7;
+export function medkitSites(worldSeed: number): AmmoSite[] {
+  const rng = new Rng(mix32(worldSeed >>> 0, MEDKIT_SEED_TAG));
+  const sites: AmmoSite[] = [];
+  for (let pz = 1; pz < PLOTS_Z; pz++) {            // each interior horizontal street
+    const zl = pz * PLOT_D;
+    for (let px = 0; px < PLOTS_X; px += 2) {        // every OTHER block → sparser than the ammo grid
+      const vx = Math.round((px + 0.5) * PLOT_W + rng.centered(PLOT_W * 0.4));
+      const vz = Math.round(zl + rng.centered(8));
+      if (groundClass(vx, vz) === "street") sites.push({ vx, vz });
     }
   }
   return sites;
@@ -699,31 +728,68 @@ function buildPlaza(grid: VoxelGrid): void {
 // Static forest wall around the whole city: an INDESTRUCTIBLE treeline (plus a continuous low hedge that
 // actually blocks passage at ground level) sealing every edge, with ONE gate at the south end of the N-S
 // boulevard — itself plugged by indestructible trucks. Nothing here can be shot, blown up or knocked down.
-const FOREST_MARGIN = 6, FOREST_DEPTH = 24, FOREST_SPACING = 11; // 11 (was 7): ~½ the trees; the hedge is the real barrier, trees are decor
+const FOREST_MARGIN = 48, FOREST_DEPTH = 30, FOREST_SPACING = 10; // margin = hedge inset (a wide ~12 m flat field between the city and the boundary)
+const TREE_GAP = 24;  // clearing (voxels, ~6 m) between the hedge and the treeline → the whole boundary (hedge + trees) sits ~12-18 m off the city
+const HEDGE_TOP = 7;  // hedge height (voxels, ~1.75 m): a view-blocking green wall on every edge — hides the clearing + the fogged void behind it
 const GATE_HALF = AVENUE_HALF + 3;
+
+/** Forest-ring geometry (voxels), the single source of truth shared by the builder AND the tests: the hedge
+ *  sits `hedgeInset` outside the city, the treeline starts `treeGap` further out and is `depth` thick. */
+export const FOREST_RING = { hedgeInset: FOREST_MARGIN, treeGap: TREE_GAP, depth: FOREST_DEPTH, hedgeTop: HEDGE_TOP };
+
+// World-space rectangle the human is confined to: the forest ring's INNER faces (where the hedge sits). The
+// ring seals the map visually + on the ground, but a soldier could climb a perimeter building and jump the
+// short (1 m) treeline — so the Walker also hard-clamps to this box, sealing the edge at ANY height. Byte-
+// identical everywhere (derived from the same seeded constants); render/controller-only → no sim divergence.
+export const PLAY_BOUNDS = {
+  minX: (-FOREST_MARGIN + 1) * VOXEL,
+  maxX: (CITY_VOX.x1 + FOREST_MARGIN) * VOXEL,
+  minZ: (-FOREST_MARGIN + 1) * VOXEL,
+  maxZ: (CITY_VOX.z1 + FOREST_MARGIN) * VOXEL,
+};
+
+/** Rescale the world to a size preset. Call BEFORE buildDefaultScene (like setWorldSeed) so the whole room
+ *  agrees on the extent. Mutates the exported CITY_VOX / PLAY_BOUNDS IN PLACE (never reassigns) so existing
+ *  imports keep pointing at the live objects. "large" reproduces the historical constants exactly. */
+export function setMapSize(size: MapSize): void {
+  const p = MAP_SIZES[size] ?? MAP_SIZES.large;
+  PLOTS_X = p.plotsX; PLOTS_Z = p.plotsZ;
+  CITY_FEATURES = p.plotsX >= 7 && p.plotsZ >= 7;                  // plaza/avenue/suburbs only on the bigger maps
+  const cx = Math.floor(PLOTS_X / 2), cz = Math.floor(PLOTS_Z / 2); // centred plaza/avenue → 9×11 gives 3-5/4-6 & 4/5
+  PLAZA_PX0 = cx - 1; PLAZA_PX1 = cx + 1; PLAZA_PZ0 = cz - 1; PLAZA_PZ1 = cz + 1;
+  AVENUE_PX = cx; AVENUE_PZ = cz;
+  AVENUE_VX = (AVENUE_PX + 0.5) * PLOT_W; AVENUE_VZ = (AVENUE_PZ + 0.5) * PLOT_D;
+  CITY_VOX.x1 = PLOTS_X * PLOT_W; CITY_VOX.z1 = PLOTS_Z * PLOT_D;
+  PLAY_BOUNDS.maxX = (CITY_VOX.x1 + FOREST_MARGIN) * VOXEL;
+  PLAY_BOUNDS.maxZ = (CITY_VOX.z1 + FOREST_MARGIN) * VOXEL;
+}
 
 /** Builds the forest wall + the sealed gate. All voxels are weak+settled (non-structural, anchored → never
  *  enter the collapse solver) and INDESTRUCTIBLE. Deterministic (position-hashed, no rand()) so it's byte-
  *  identical on every client and never perturbs the city's rand() stream. */
 function buildForestRing(grid: VoxelGrid): void {
   const ix0 = -FOREST_MARGIN, ix1 = CITY_VOX.x1 + FOREST_MARGIN, iz0 = -FOREST_MARGIN, iz1 = CITY_VOX.z1 + FOREST_MARGIN;
-  const ox0 = ix0 - FOREST_DEPTH, ox1 = ix1 + FOREST_DEPTH, oz0 = iz0 - FOREST_DEPTH, oz1 = iz1 + FOREST_DEPTH;
+  // the treeline is SET BACK from the hedge by TREE_GAP (a clearing), then FOREST_DEPTH thick beyond that —
+  // so the canopies never crowd the perimeter buildings, while the hedge still seals the edge right at the city.
+  const tx0 = ix0 - TREE_GAP, tx1 = ix1 + TREE_GAP, tz0 = iz0 - TREE_GAP, tz1 = iz1 + TREE_GAP;
+  const ox0 = tx0 - FOREST_DEPTH, ox1 = tx1 + FOREST_DEPTH, oz0 = tz0 - FOREST_DEPTH, oz1 = tz1 + FOREST_DEPTH;
   const gateX = Math.round(AVENUE_VX);
-  const atGate = (vx: number, vz: number): boolean => Math.abs(vx - gateX) <= GATE_HALF && vz < iz0; // the south gate opening
-  // scattered indestructible trees filling the ring band (skip the city interior and the gate mouth)
+  const atGate = (vx: number, vz: number): boolean => Math.abs(vx - gateX) <= GATE_HALF && vz < iz0; // the south gate corridor
+  // scattered indestructible trees filling the ring band (skip the city + its clearing, and the gate mouth)
   for (let vx = ox0; vx <= ox1; vx += FOREST_SPACING)
     for (let vz = oz0; vz <= oz1; vz += FOREST_SPACING) {
-      if (vx > ix0 && vx < ix1 && vz > iz0 && vz < iz1) continue; // inside the city → no forest
+      if (vx > tx0 && vx < tx1 && vz > tz0 && vz < tz1) continue; // inside the city/clearing → no forest
       if (atGate(vx, vz)) continue;
       buildTree(grid, vx + (mix32(vx, vz) % 3) - 1, vz + (mix32(vz, vx, 7) % 3) - 1, undefined, true);
     }
-  // a continuous low hedge along the inner edge — the real ground-level barrier (4 tall → past the autostep)
+  // a continuous hedge along the inner edge — the real ground-level barrier AND a view-blocking green wall
+  // (HEDGE_TOP ≈ 1.75 m, above eye level) that hides the clearing + the fogged void so every edge reads solid.
   const hedge = (x0: number, x1: number, z0: number, z1: number): void => {
     if (x1 < x0 || z1 < z0) return;
-    fillBox(grid, x0, x1, 0, 3, z0, z1, "leaves");
-    grid.markWeakBox(x0, x1, 0, 3, z0, z1);
-    markSettledBox(grid, x0, x1, 0, 3, z0, z1);
-    grid.markIndestructibleBox(x0, x1, 0, 3, z0, z1);
+    fillBox(grid, x0, x1, 0, HEDGE_TOP, z0, z1, "leaves");
+    grid.markWeakBox(x0, x1, 0, HEDGE_TOP, z0, z1);
+    markSettledBox(grid, x0, x1, 0, HEDGE_TOP, z0, z1);
+    grid.markIndestructibleBox(x0, x1, 0, HEDGE_TOP, z0, z1);
   };
   hedge(ix0 - 1, ix1 + 1, iz1, iz1 + 1);                          // north edge
   hedge(ix0 - 1, ix0, iz0 - 1, iz1 + 1);                          // west edge
@@ -781,7 +847,7 @@ export function buildDefaultScene(grid: VoxelGrid): void {
       buildBuilding(grid, ox, oz, { W, D, FLOORS }, wallMat);
       _placed.push({ ox, oz, W, D, FLOORS });
     }
-  buildPlaza(grid);
+  if (CITY_FEATURES) buildPlaza(grid); // central monument/plaza — only on the bigger maps (small = tower arena)
   // parked vehicles along the horizontal streets (seeded → identical on every client), varied type + paint
   const PAINTS: MaterialId[] = ["car_red", "car_blue", "car_teal", "metal"];
   const park = (ox: number, oz: number): void => {
@@ -815,16 +881,19 @@ export function buildDefaultScene(grid: VoxelGrid): void {
   // band around the plaza/intersection so the crossing stays open. Seeded rand() → identical per client.
   // Median is CENTRAL (always on-screen), so it's kept light: sparse (every 28 vox), mostly cheap lampposts
   // over dense tree canopies, and only occasional lane traffic — this is a hot spot for draws/fill.
-  const avX = Math.round(AVENUE_VX), avZ = Math.round(AVENUE_VZ);
-  for (let vz = 8; vz < CITY_VOX.z1 - 8; vz += 28) {
-    if (Math.abs(vz - avZ) <= AVENUE_HALF + 6) continue;              // keep the crossing/plaza open
-    if (rand() < 0.35) buildTree(grid, avX, vz); else buildLamppost(grid, avX - 1, vz);
-    if (rand() < 0.3) park(avX - 13, vz - 3);                        // occasional vehicle in the west lane
-  }
-  for (let vx = 8; vx < CITY_VOX.x1 - 8; vx += 28) {
-    if (Math.abs(vx - avX) <= AVENUE_HALF + 6) continue;
-    if (rand() < 0.35) buildTree(grid, vx, avZ); else buildLamppost(grid, vx, avZ - 1);
-    if (rand() < 0.3) park(vx - 3, avZ - 13);                        // occasional vehicle in the north lane
+  // Grand-boulevard median decor — only on the bigger maps (the small arena's centre is towers, not an avenue).
+  if (CITY_FEATURES) {
+    const avX = Math.round(AVENUE_VX), avZ = Math.round(AVENUE_VZ);
+    for (let vz = 8; vz < CITY_VOX.z1 - 8; vz += 28) {
+      if (Math.abs(vz - avZ) <= AVENUE_HALF + 6) continue;              // keep the crossing/plaza open
+      if (rand() < 0.35) buildTree(grid, avX, vz); else buildLamppost(grid, avX - 1, vz);
+      if (rand() < 0.3) park(avX - 13, vz - 3);                        // occasional vehicle in the west lane
+    }
+    for (let vx = 8; vx < CITY_VOX.x1 - 8; vx += 28) {
+      if (Math.abs(vx - avX) <= AVENUE_HALF + 6) continue;
+      if (rand() < 0.35) buildTree(grid, vx, avZ); else buildLamppost(grid, vx, avZ - 1);
+      if (rand() < 0.3) park(vx - 3, avZ - 13);                        // occasional vehicle in the north lane
+    }
   }
   buildForestRing(grid); // the indestructible treeline that walls the whole map in (one sealed gate)
 }

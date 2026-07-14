@@ -16,7 +16,7 @@ import { collapseTick, CELL_OVERHANG, CELL_MIN_MASS } from "./destruction/collap
 import { GpuTimer, makeGpuTimer } from "./engine/gpuTimer";
 import { humanFallDamage, droneImpactDamage } from "./engine/falldamage";
 import { Physics, GROUP_GROUND } from "./engine/physics";
-import { Renderer } from "./engine/renderer";
+import { Renderer, SCOPE_CIRCLE_R } from "./engine/renderer";
 import { DebrisSystem } from "./destruction/debris";
 import { DEBRIS_CT, type CarveTargets } from "./destruction/carve";
 import { resolveDebrisImpacts } from "./destruction/impact";
@@ -28,20 +28,23 @@ import { ImpactMarks } from "./fx/impactMarks";
 import { RubbleField } from "./fx/rubble";
 import { HeightField } from "./fx/heightField";
 import { placeVoxel, eraseVoxel, type EditRegion } from "./build/editor";
-import { BIG, ammoBoxSites, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, groundClass, objectiveHp, objectiveDestroyed, OBJECTIVE_SITES, placedBuildings, setWorldSeed } from "./build/prefabs";
+import { BIG, ammoBoxSites, medkitSites, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, CITY_VOX, FOREST_RING, groundClass, objectiveHp, objectiveDestroyed, OBJECTIVE_SITES, PLAY_BOUNDS, placedBuildings, setWorldSeed, setMapSize, MAP_SIZES, type MapSize } from "./build/prefabs";
 import { InteriorLights } from "./engine/interiorLights";
-import { Hud, type Mode, type Tool } from "./ui/hud";
+import { Hud, type Mode, type Tool, type RadarBlip, type RadarShot } from "./ui/hud";
+import { bearing } from "./ui/radar";
+import { rotorLevel, rotorCutoff, rotorPitch, rotorPan, frontBrightness } from "./fx/rotorAudio";
 import { CameraFx } from "./fx/cameraFx";
-import { addTrauma, decayTrauma, shakeOffset } from "./engine/cameraFeel";
+import { addTrauma, decayTrauma, shakeOffset, HUMAN_FOV } from "./engine/cameraFeel";
 import { GameAudio } from "./fx/audio";
 import { Scenery } from "./fx/scenery";
 import { AmmoCrates } from "./fx/ammoCrates";
 import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
-import { assignRole, roleMaxHp, roleWeapon, type Role } from "./net/roles";
+import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, TEAM_LABEL, type Role, type Team, type UnitClass } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
-import { AiSwarm, type AiTarget } from "./net/ai";
-import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, type Weapon, type Ammo } from "./net/weapons";
+import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise } from "./net/ai";
+import { respawnDelay, allDead, wallBlocks, smokeOccludes, playerSpawn, cardinalSpawn, bandageStep, canBeginMatch, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
+import { WEAPONS, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -83,6 +86,7 @@ export class Game {
   private interiorLights?: InteriorLights;  // dim/flickering lights inside some buildings
   private scenery?: Scenery;                // trees + drifting clouds (visual scene dressing)
   private ammoCrates!: AmmoCrates;          // soldier ammo-supply pickups on the streets (set in ctor)
+  private medkits!: AmmoCrates;             // soldier bandage-restock pickups (red crates; set in ctor)
   private flashlight?: THREE.SpotLight;     // head-mounted torch for the local player (F to toggle)
   private flashOn = false;
 
@@ -130,9 +134,18 @@ export class Game {
   private readonly ammo: Record<Weapon, Ammo> = {
     mg: fullAmmo(WEAPONS.mg), grenade: fullAmmo(WEAPONS.grenade), kamikaze: fullAmmo(WEAPONS.kamikaze),
     shotgun: fullAmmo(WEAPONS.shotgun), glauncher: fullAmmo(WEAPONS.glauncher), net: fullAmmo(WEAPONS.net),
+    sniper: fullAmmo(WEAPONS.sniper), smoke: fullAmmo(WEAPONS.smoke), swarm: fullAmmo(WEAPONS.swarm),
+    smg: fullAmmo(WEAPONS.smg), lmg: fullAmmo(WEAPONS.lmg), dmr: fullAmmo(WEAPONS.dmr),
   };
+  private readonly smokeClouds: SmokeCloud[] = []; // active smoke grenades: block LOS (both ways) until they expire
+  private smokeFxAt = 0;                           // throttle for the sustained smoke particle emission
+  // soldier's interceptor swarm: local homing mini-drones that ram the nearest enemy drone (kill is host-auth)
+  private readonly miniDrones: { mesh: THREE.Object3D; x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number }[] = [];
+  private readonly miniGeo = new THREE.SphereGeometry(0.16, 10, 8);
+  private readonly miniMat = new THREE.MeshBasicMaterial({ color: 0x7cffd0 }); // glowing interceptor orb
   private weaponReadyAt = 0;      // shared per-shot cooldown gate
   private firing = false;         // LMB held → auto-fire (machine gun) each frame at the weapon's rate
+  private ads = false;            // RMB held → aim down sights (only engages for a scoped weapon; see applyAds)
   private bulletReadyAt = 0;      // free-mode auto-fire cadence gate
   private battery = BATTERY_MAX;  // drone battery (drains with movement; 0 → fall & die)
   private combatHudT = 0;         // throttle for the combat HUD panels
@@ -161,14 +174,8 @@ export class Game {
   // chunks (~4.6×): fewer colliders in the broadphase AND far cheaper re-opts as chunks stream.
   private static readonly COLLIDER_RADIUS = 1;
 
-  // Four spread spawn points across the ground-floor lobby (the 4 quadrants), clear of the NW
-  // stairwell and the NE gas tank. Players are assigned one by their network id. World coords.
-  private static readonly SPAWNS: [number, number, number][] = [
-    [40 * VOXEL, 2.0, 40 * VOXEL],   // SW
-    [248 * VOXEL, 2.0, 40 * VOXEL],  // SE
-    [40 * VOXEL, 2.0, 176 * VOXEL],  // NW (east of the stairwell)
-    [248 * VOXEL, 2.0, 176 * VOXEL], // NE (west of the gas tank)
-  ];
+  // Players spawn in the clear perimeter band (generated by playerSpawn, scaled to map size + count), so the
+  // set is no longer a fixed 4-corner array — 2..50 players spread around the edge and advance inward.
 
   // renderMax/renderTotal are CPU SUBMIT time only (GPU work is async) — do NOT read them as GPU cost.
   // drawCalls/triangles + framesRendered are the honest signals: framesRendered===0 means the tab is
@@ -200,25 +207,48 @@ export class Game {
   private roomCode = "";
   private myRole: Role | null = null;   // chosen in the lobby; applied on begin
   private pendingMode: Mode = "coop";   // the mode we'll start (host sets it; joiners learn it from the roster)
+  private mapSize: MapSize = "large";        // active map size (large = the historical full map)
+  private pendingMapSize: MapSize = "large"; // host's lobby pick, synced in the begin/lobby messages
   private hosting = false;              // we created the room → we are the AI authority in co-op
   private swarm: AiSwarm | null = null; // host-only enemy AI simulation
   private aiBcast = 0;                  // seconds until the next bot-transform broadcast
   private aiWaveGap = 0;                // countdown to the next wave once the swarm is cleared
   private readonly aiBots = new Map<number, { x: number; y: number; z: number }>(); // last-known bot positions (for shooting them)
+  private sessionKills = 0;     // co-op: drones the TEAM has killed this session (host-authoritative → HUD score)
+  private coopHardcore = false; // co-op: permadeath (no respawns) vs respawn-while-a-teammate-lives
+  private aiPrevX = 0; private aiPrevZ = 0; // host player XZ last frame → velocity estimate feeding the AI aim lead
+  private readonly aiTargetBuf: AiTarget[] = [];                                   // reused each frame (no alloc)
+  private readonly aiPeerBuf: { id: number; x: number; y: number; z: number; hp: number; maxHp: number }[] = []; // living human peers as AI targets (+hp for threat scoring)
+  private readonly aiDropBuf: AiDrop[] = [];                                       // grenade drops emitted this tick
+  private readonly aiBoomBuf: AiBoom[] = [];                                       // kamikaze contact detonations this tick
+  private readonly aiNoiseBuf: AiNoise[] = [];                                     // what the swarm hears this tick (footsteps/gunfire/blasts)
+  private readonly recentBlasts: { x: number; z: number; t: number; loud: number }[] = []; // player explosions the swarm can still hear
+  private readonly aiAimTmp = new THREE.Vector3();                                 // reused: host camera forward (bots dodge our aim)
+  private minimapBig = false;                   // TAB toggles the enlarged minimap
+  private readonly recentShots: RadarShot[] = []; // fading shot rays on the minimap (from peers + AI fire)
   private quality: Quality = "medio";     // graphics preset (Bajo/Medio/Alto), K to cycle
-  private role: Role = "drone";           // Drones-vs-Humans: our team
+  private role: Role = "drone";           // our avatar type (drone/human) — independent of the team below
+  private myTeam: Team = 0;               // PvP team (0 Rojo / 1 Azul): decides friend/enemy + friendly fire
+  private myClass: UnitClass = "assault"; // chosen class (stats + loadout + move); default = balanced assault
+  private pendingTeam: Team = 0;          // lobby pick, applied on begin
+  private pendingClass: UnitClass = "assault";
+  private teamChosen = false;             // did the player explicitly pick a team? (else auto-balance by id)
   private droneKills = 0;
   private humanKills = 0;
   private matchOver = false;
   private prevDroneHp = 1;   // weakest drone-base HP last frame → base-under-attack threshold alerts
   private prevHumanHp = 1;
   private static readonly KILL_LIMIT = 15; // deathmatch limit (win also by destroying the enemy objective)
+  private static readonly WAVE_CLUSTER_R = 12; // radius (m) of a wave's spawn cluster at its cardinal point
+  private static readonly DIR_LABEL: Record<Cardinal, string> = { N: "NORTE", S: "SUR", E: "ESTE", O: "OESTE" };
   private hp = MAX_HP;
+  private bandages = BANDAGE_MAX;  // soldier self-heal charges (refilled at base / on respawn / by medkits)
+  private bandageT = 0;            // channel progress (s); reset on interrupt or completion
+  private bandaging = false;       // currently mid-channel (drives the HUD progress bar)
   private netT = 0;          // throttle for state broadcasts
   private netSent = 0;       // diagnostic: count of state messages sent
   private lastState: NetMsg | null = null; // last state sent — re-emitted by the background heartbeat
   private respawnAt = 0;     // when dead, time to respawn
-  private spawnIndex = 0;    // which of the 4 spawn points this player uses (by network id)
 
   private readonly tmpDir = new THREE.Vector3();
   private readonly crateGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
@@ -273,13 +303,14 @@ export class Game {
     this.targets = { grid: this.grid, debris: this.debris, particles: this.sink };
     this.projectiles = new Projectiles(
       this.physics, this.renderer.scene, this.grid,
-      (x, y, z, r, p) => this.explodeAt(x, y, z, r, p, true), // local weapon detonation → broadcast
+      (x, y, z, r, p, ai, smoke) => smoke ? this.deploySmoke(x, y, z) : this.explodeAt(x, y, z, r, p, true, 0, !ai), // smoke grenade deploys a cloud (no blast); ai=no swarm friendly-fire
       (hit, dx, dy, dz) => this.onBulletHit(hit, dx, dy, dz),
     );
 
     this.buildGround();
     this.scenery = new Scenery(this.renderer.scene); // trees + clouds
     this.ammoCrates = new AmmoCrates(this.renderer.scene); // soldier ammo pickups (populated per world)
+    this.medkits = new AmmoCrates(this.renderer.scene, 0x8a2a2a, 0x5a1414); // red medkit crates (bandage restock)
     this.initFlashes();
     buildDefaultScene(this.grid);
     this.mesher.rebuild(this.grid); this.seedMeshChunks();
@@ -298,13 +329,14 @@ export class Game {
     this.hud.setTool(this.tool);
     this.hud.setMaterial(MATERIAL_ORDER[this.matIndex]);
     this.hud.onGear(() => this.openSettings()); // gear button ≡ the O key
+    this.hud.onGameOver({ restart: () => this.restartMatch(), menu: () => location.reload() }); // end-of-match: replay or menu
 
     this.input.onMouseDown = (b) => this.onMouseDown(b);
-    this.input.onMouseUp = (b) => { if (b === 0) this.firing = false; }; // release LMB → stop auto-fire
+    this.input.onMouseUp = (b) => { if (b === 0) this.firing = false; if (b === 2) this.ads = false; }; // LMB→stop fire, RMB→unscope
     this.input.onWheel = (s) => this.onWheel(s);
     this.input.onKey = (c) => this.onKey(c);
 
-    this.remotes = new RemoteDrones(this.renderer.scene);
+    this.remotes = new RemoteDrones(this.renderer.scene, this.physics);
     this.net.onMessage = (m) => this.onNet(m);
     this.setupModeMenu();
   }
@@ -352,47 +384,103 @@ export class Game {
       pick: (r) => this.lobbyPick(r),
       start: () => this.hostStart(),
       leave: () => location.reload(),
+      toggleHardcore: () => { this.coopHardcore = !this.coopHardcore; this.hud.setHardcore(this.coopHardcore); },
+      pickTeam: (t) => this.lobbyPickTeam(t),
+      pickClass: (c) => this.lobbyPickClass(c),
+      pickMapSize: (s) => this.lobbyPickMapSize(s),
     });
+    this.hud.setHardcore(this.coopHardcore); // reflect the current death rule on the toggle
     this.refreshLobby();
   }
 
   /** Re-announce our presence (id, chosen role, mode) so the roster converges on every client. */
   private broadcastLobby(): void {
     this.lobby = applyJoin(this.lobby, this.net.id, this.myRole);
-    if (this.net.connected) this.net.send({ t: "lobby", role: this.myRole, mode: this.pendingMode });
+    if (!this.teamChosen) this.pendingTeam = this.autoTeam(); // show the auto-balanced team until they pick
+    if (this.net.connected) this.net.send({ t: "lobby", role: this.myRole, mode: this.pendingMode, map: this.pendingMapSize });
     this.refreshLobby();
   }
 
   private lobbyPick(role: Role): void {
     this.myRole = role;
+    this.pendingClass = defaultClass(role); // switching type resets to that side's balanced default class
     this.lobby = applyPick(this.lobby, this.net.id, role);
     this.broadcastLobby();
   }
 
+  /** PvP: choose Rojo/Azul (independent of the drone/soldier type). */
+  private lobbyPickTeam(team: Team): void {
+    this.pendingTeam = team; this.teamChosen = true;
+    this.audio.ui(); this.refreshLobby();
+  }
+
+  /** PvP: choose the class within the chosen type (validated against the role at apply-time). */
+  private lobbyPickClass(cls: string): void {
+    this.pendingClass = cls as UnitClass;
+    this.audio.ui(); this.refreshLobby();
+  }
+
+  /** Host-only: choose the map size preset; broadcast so every joiner learns it before start. */
+  private lobbyPickMapSize(size: string): void {
+    if (!MAP_SIZES[size as MapSize]) return;
+    this.pendingMapSize = size as MapSize;
+    this.audio.ui(); this.broadcastLobby();
+  }
+
   private hostStart(): void {
     if (this.net.id !== (hostOf(this.lobby) ?? this.net.id)) return; // only the host may start
-    this.net.send({ t: "begin", mode: this.pendingMode });
+    this.net.send({ t: "begin", mode: this.pendingMode, hardcore: this.coopHardcore, map: this.pendingMapSize }); // share mode + death rule + map size
     this.beginMatch();
+  }
+
+  /** "Jugar de nuevo" from the game-over overlay. The HOST (or a solo/offline player) re-broadcasts `begin`
+   *  so every client replays the SAME room in sync (host-authoritative, deterministic seed) and rebuilds
+   *  locally. A non-host joiner can't restart the shared match alone → it drops back to the lobby to await
+   *  the host's next start. Only fires while the match is over (the overlay is the only caller). */
+  private restartMatch(): void {
+    const isHost = this.net.id === (hostOf(this.lobby) ?? this.net.id); // solo/offline → hostOf falls back to us
+    if (isHost) {
+      if (this.net.connected) this.net.send({ t: "begin", mode: this.pendingMode, hardcore: this.coopHardcore, map: this.pendingMapSize });
+      this.beginMatch();
+    } else {
+      this.matchOver = false; // leave the frozen game-over state; wait in the lobby for the host to begin
+      this.hud.hideWin(); this.hud.hideDeath();
+      this.phase = "lobby";
+      this.showLobbyUi();
+      this.hud.flash("Esperando al anfitrión…");
+    }
   }
 
   private refreshLobby(): void {
     if (this.phase !== "lobby") return;
     const host = hostOf(this.lobby) ?? this.net.id;
-    this.hud.updateLobby(this.lobby.players.map((p) => ({ id: p.id, role: p.role })), this.net.id, host, this.myRole);
+    this.hud.updateLobby(this.lobby.players.map((p) => ({ id: p.id, role: p.role })), this.net.id, host, this.myRole, this.pendingTeam, this.pendingClass, this.pendingMapSize);
   }
 
   /** Everyone runs this on the host's "begin": build the shared seed-world + spawn with the chosen role. */
   private beginMatch(): void {
-    if (this.phase === "playing") return;
+    if (!canBeginMatch(this.phase, this.matchOver)) return; // block a duplicate begin mid-fight; allow a restart once over
     this.mode = this.pendingMode;
+    this.mapSize = this.pendingMapSize; // apply the agreed map size BEFORE the world is built
     this.rebuildWorld(hashStr(this.roomCode), false);
     this.phase = "playing";
     this.hud.hideLobby();
+    this.hud.hideWin(); this.hud.hideDeath(); // clear any prior game-over/death overlay on a replay (idempotent on a first start)
+    this.bandages = BANDAGE_MAX;              // fresh match → full bandages
     this.hud.setMode(this.mode, this.roomCode);
-    this.applyChosenRole(this.mode === "coop" ? "human" : (this.myRole ?? "human"));
+    // team: co-op is one team vs the AI; PvP honours the pick, else auto-balances by roster join order
+    this.myTeam = this.mode === "coop" ? 0 : (this.teamChosen ? this.pendingTeam : this.autoTeam());
+    this.myClass = this.pendingClass;
+    this.applyChosenRole(this.mode === "coop" ? "human" : (this.myRole ?? "human"), this.pendingClass);
     this.spawnPlayerInBuilding();
     this.net.send({ t: "needsync" });
-    if (this.mode === "coop" && this.hosting) { this.swarm = new AiSwarm(); this.aiWaveGap = 0; } // host owns the enemy AI
+    if (this.mode === "coop") { // fresh survival session: reset the score/deaths, clear any prior game-over
+      this.sessionKills = 0; this.myDeaths = 0; this.matchOver = false;
+      this.hud.hideWin(); this.hud.hideDeath();
+      for (const id of this.aiBots.keys()) this.remotes.remove(-id); // drop last match's bot avatars so they don't ghost (mesh + radar) into the replay
+      this.aiBots.clear();
+      if (this.hosting) { this.swarm = new AiSwarm(); this.aiWaveGap = 0; } // host owns the enemy AI
+    }
     this.audio.ui();
   }
 
@@ -403,20 +491,62 @@ export class Game {
   private aiFrame(dt: number): void {
     if (this.mode !== "coop") return;
     const s = this.swarm;
-    if (this.hosting && s) {
+    if (this.hosting && s && !this.matchOver) {
       const cp = this.player.camera.position;
       if (s.count === 0) {
         this.aiWaveGap -= dt;
-        if (this.aiWaveGap <= 0) { s.spawnWave(cp.x, cp.z, 55, cp.y + 12); this.hud.flash(`⚠ Oleada ${s.wave}: ${s.count} drones`); }
-      } else this.aiWaveGap = 4;
-      const targets: AiTarget[] = this.hp > 0 ? [{ id: this.net.id, x: cp.x, y: cp.y, z: cp.z }] : [];
-      for (const f of s.tick(dt, targets)) this.aiShoot(f.x, f.y, f.z, f.dx, f.dy, f.dz, f.targetId);
+        if (this.aiWaveGap <= 0) { // each wave enters from ONE cardinal side (rotating N→S→E→O), from BEYOND the barricade
+          const beyond = FOREST_RING.hedgeInset + FOREST_RING.treeGap + FOREST_RING.depth + 12; // voxels PAST the treeline
+          const c = cardinalSpawn(CITY_VOX.x1, CITY_VOX.z1, VOXEL, s.wave, beyond); // s.wave = index BEFORE spawnWave's wave++
+          s.spawnWave(c.cx, c.cz, Game.WAVE_CLUSTER_R, 20);                 // small radius → a tight cluster, spawned high to clear the trees
+          s.seedContact(CITY_VOX.x1 * 0.5 * VOXEL, CITY_VOX.z1 * 0.5 * VOXEL); // advance toward the city centre until a bot perceives you
+          this.hud.flash(`⚠ Oleada ${s.wave} — desde el ${Game.DIR_LABEL[c.dir]}`);
+        }
+      } else this.aiWaveGap = 2.5; // BRUTAL: relentless — the next wave crowds in fast once the swarm thins
+      // Targets = every LIVING player (host + human peers) — the swarm chases them ALL, not just the host. The
+      // host is led by its own velocity for tighter aim; peers unled. LOS is injected so bots flank cover and
+      // never fire through walls (the sim only emits a shot when the firing bot can see its chosen target).
+      const targets = this.aiTargetBuf; targets.length = 0;
+      if (this.hp > 0) {
+        const vx = (cp.x - this.aiPrevX) / Math.max(dt, 1e-3), vz = (cp.z - this.aiPrevZ) / Math.max(dt, 1e-3);
+        this.player.camera.getWorldDirection(this.aiAimTmp); // our look dir → bots dodge when we aim at them
+        targets.push({ id: this.net.id, x: cp.x, y: cp.y, z: cp.z, vx, vz, hp: this.hp, maxHp: this.myMaxHp(), firing: this.firing, aimX: this.aiAimTmp.x, aimZ: this.aiAimTmp.z });
+      }
+      this.aiPrevX = cp.x; this.aiPrevZ = cp.z;
+      this.remotes.humanTargets(this.aiPeerBuf);
+      for (const p of this.aiPeerBuf) targets.push(p);
+      // NOISE the swarm can hear (host soldier v1): footsteps (quieter when crouched/prone, louder running; none
+      // when still), gunfire, and recent player explosions. This is WHAT reveals you — quiet + hidden = harder to find.
+      const noises = this.aiNoiseBuf; noises.length = 0;
+      if (this.hp > 0 && this.player instanceof Walker) {
+        const inp = this.input;
+        if (inp.isDown("keyw") || inp.isDown("keya") || inp.isDown("keys") || inp.isDown("keyd")) {
+          const run = inp.isDown("shiftleft") || inp.isDown("shiftright");
+          const st = this.player.stanceVal;
+          noises.push({ x: cp.x, z: cp.z, loud: st >= 2 ? 4 : st === 1 ? 7 : run ? 18 : 11 }); // footsteps
+        }
+        if (this.firing) noises.push({ x: cp.x, z: cp.z, loud: 40 }); // gunfire gives you away
+      }
+      for (let i = this.recentBlasts.length - 1; i >= 0; i--) { // player explosions echo for ~0.6 s
+        const rb = this.recentBlasts[i];
+        if (this.time - rb.t > 0.6) { this.recentBlasts.splice(i, 1); continue; }
+        noises.push({ x: rb.x, z: rb.z, loud: rb.loud });
+      }
+      const drops = this.aiDropBuf; drops.length = 0;
+      const booms = this.aiBoomBuf; booms.length = 0;
+      for (const f of s.tick(dt, targets, (bx, by, bz, tx, ty, tz) => this.aiCanSee(bx, by, bz, tx, ty, tz), Math.random, drops, booms,
+        (x, y, z) => this.grid.has(Math.floor(x / VOXEL), Math.floor(y / VOXEL), Math.floor(z / VOXEL)), noises)) // collide + hear
+        this.aiShoot(f.x, f.y, f.z, f.dx, f.dy, f.dz, f.targetId, f.blind);
+      for (const g of drops) this.aiDropGrenade(g.x, g.y, g.z); // bombers release falling grenades
+      for (const g of booms) this.aiDetonate(g);                // kamikazes reach the target and self-destruct
       this.aiBots.clear();
       for (const b of s.list) this.aiBots.set(b.id, { x: b.x, y: b.y, z: b.z });
+      this.hud.setCoopScore(this.sessionKills, s.wave);
+      this.checkTeamWipe(); // all players down → end the session
       this.aiBcast -= dt;
       if (this.aiBcast <= 0 && this.net.connected) {
         this.aiBcast = 0.07;
-        this.net.send({ t: "ai", b: s.list.map((b) => [b.id, +b.x.toFixed(2), +b.y.toFixed(2), +b.z.toFixed(2)]) });
+        this.net.send({ t: "ai", b: s.list.map((b) => [b.id, +b.x.toFixed(2), +b.y.toFixed(2), +b.z.toFixed(2)]), k: this.sessionKills, w: s.wave });
       }
     }
     this.renderBots();
@@ -427,19 +557,162 @@ export class Game {
     for (const [id, p] of this.aiBots) this.remotes.upsert(-id, p.x, p.y, p.z, 0, 0, 0, 1, 100, "drone", 100, 0, 0, 0);
   }
 
-  /** A bot fires: muzzle flash (broadcast so all see it) + host-authoritative chip damage to its target
-   *  (dodgeable — break line of sight to avoid the next shot). */
-  private aiShoot(x: number, y: number, z: number, dx: number, dy: number, dz: number, targetId: number): void {
-    this.muzzleFlash(new THREE.Vector3(x, y, z), new THREE.Vector3(dx, dy, dz), 0.3);
-    if (this.net.connected) this.net.send({ t: "aifire", x: +x.toFixed(1), y: +y.toFixed(1), z: +z.toFixed(1), dx: +dx.toFixed(2), dy: +dy.toFixed(2), dz: +dz.toFixed(2) });
-    if (targetId === this.net.id) { if (this.hp > 0 && Math.random() < 0.55) this.damageDrone(4); }
-    else if (this.net.connected) this.net.send({ t: "aihit", to: targetId, dmg: 4 });
+  /** Host-only: end the co-op session the moment EVERY soldier (host + human peers) is down (team wipe). */
+  private checkTeamWipe(): void {
+    if (this.matchOver) return;
+    const hps = [this.hp, ...this.remotes.peers().filter((p) => p.isHuman).map((p) => p.hp)];
+    if (allDead(hps)) this.endCoop();
   }
 
-  /** When the local player shoots, test the aim ray against known bot positions and damage the nearest hit. */
-  private aiHitscan(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): void {
-    if (this.mode !== "coop" || this.aiBots.size === 0) return;
-    let hitId = -1, hitT = 30;
+  /** End the co-op session: freeze the swarm, show the game-over overlay + final score, tell everyone. */
+  private endCoop(): void {
+    this.matchOver = true;
+    const wave = this.swarm?.wave ?? 0;
+    this.hud.hideDeath();
+    this.hud.showGameOver(this.sessionKills, wave);
+    this.releaseCursor();
+    this.audio.death(true);
+    if (this.net.connected) this.net.send({ t: "coopover", k: this.sessionKills, w: wave });
+  }
+
+  /** Frees the pointer lock so the mouse cursor reappears — used when a full-screen overlay with clickable
+   *  controls goes up (game-over, settings), otherwise the locked cursor can't reach the buttons. */
+  private releaseCursor(): void {
+    if (typeof document !== "undefined" && document.pointerLockElement) document.exitPointerLock();
+  }
+
+  /** A bot fires: muzzle flash (broadcast so all see it) + host-authoritative chip damage to its target
+   *  (dodgeable — break line of sight to avoid the next shot). */
+  private aiShoot(x: number, y: number, z: number, dx: number, dy: number, dz: number, targetId: number, blind = false): void {
+    this.muzzleFlash(new THREE.Vector3(x, y, z), new THREE.Vector3(dx, dy, dz), 0.3);
+    if (this.net.connected) this.net.send({ t: "aifire", x: +x.toFixed(1), y: +y.toFixed(1), z: +z.toFixed(1), dx: +dx.toFixed(2), dy: +dy.toFixed(2), dz: +dz.toFixed(2) });
+    if (targetId === this.net.id) {
+      // BLIND suppression only chips us if the bot can ACTUALLY see us — no through-wall damage (pure pressure).
+      const p = this.player.camera.position;
+      const sees = !blind || this.aiCanSee(x, y, z, p.x, p.y, p.z);
+      if (this.hp > 0 && sees && Math.random() < 0.55) this.damageDrone(4, x, z);
+    } else if (this.net.connected && !blind) { // peer target: only confirmed (sighted) shots deal damage
+      this.net.send({ t: "aihit", to: targetId, dmg: 4, x: +x.toFixed(1), z: +z.toFixed(1) });
+    }
+  }
+
+  /** A bomber drone RELEASES a grenade at (x,y,z) — it falls under gravity ("suelta, no tirada") and detonates
+   *  below, carving cover + hurting players but NOT the swarm (the `ai` flag skips bot friendly-fire). Host-
+   *  authoritative; peers get a ghost falling grenade via `aidrop`, and the blast via the `explode` broadcast. */
+  private aiDropGrenade(x: number, y: number, z: number): void {
+    this.projectiles.launchGrenade(new THREE.Vector3(x, y - 0.4, z), new THREE.Vector3(0, -1, 0), 1.5, false, 1, true);
+    if (this.net.connected) this.net.send({ t: "aidrop", x: +x.toFixed(1), y: +y.toFixed(1), z: +z.toFixed(1) });
+  }
+
+  /** A KAMIKAZE reached its target and self-destructs: an immediate area blast (carves cover, no bot friendly-
+   *  fire) + a hard hit on the target + wreckage. Host-authoritative; peers replay the blast (`explode`) and
+   *  drop the avatar (`aiboom`). The bot was already removed from the swarm by the sim. */
+  private aiDetonate(g: AiBoom): void {
+    this.explodeAt(g.x, g.y, g.z, 3.2, 1.4, this.net.connected, 0, false);
+    this.droneDeathFx(g.x, g.y, g.z);
+    this.aiBots.delete(g.id);
+    this.remotes.remove(-g.id);
+    if (g.targetId === this.net.id) { if (this.hp > 0) this.damageDrone(30, g.x, g.z); }
+    else if (this.net.connected) this.net.send({ t: "aihit", to: g.targetId, dmg: 30, x: +g.x.toFixed(1), z: +g.z.toFixed(1) });
+    if (this.net.connected) this.net.send({ t: "aiboom", bot: g.id, x: +g.x.toFixed(1), y: +g.y.toFixed(1), z: +g.z.toFixed(1) });
+  }
+
+  /** True if the straight line from a bot to a target is clear of solid voxels — so a bot can only shoot
+   *  the player when it actually has line of sight (no firing through walls). Uses the grid raycast. */
+  private aiCanSee(bx: number, by: number, bz: number, tx: number, ty: number, tz: number): boolean {
+    const dx = tx - bx, dy = ty - by, dz = tz - bz;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist < 0.5) return true;
+    const hit = this.grid.raycast(bx, by, bz, dx, dy, dz, dist);
+    if (hit !== null && hit.distance < dist - 0.6) return false;       // a wall blocks the sightline
+    return !this.smokeBlocks(bx, by, bz, tx, ty, tz);                  // …and so does a smoke cloud on the line
+  }
+
+  /** True if an active smoke cloud sits on the sightline a→b — blocks line of sight in BOTH directions. */
+  private smokeBlocks(ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean {
+    return this.smokeClouds.length > 0 && smokeOccludes(this.smokeClouds, this.time, ax, ay, az, bx, by, bz);
+  }
+
+  /** Adds a smoke cloud (LOS-blocking sphere + an initial visual puff). Shared by the thrower + the `smoke` msg. */
+  private addSmoke(x: number, y: number, z: number): void {
+    this.smokeClouds.push({ x, y, z, r: 7, until: this.time + 10 });
+    this.sink.burst(x, y, z, { count: 26, color: 0x9a9a9a, speed: 2.2, size: 14, life: 3.2, buoyancy: 0.6, windCoupling: 0.3, spread: 1.6, kind: "smoke", strength: 0.04 });
+  }
+
+  /** The thrown smoke grenade detonated (host or peer): deploy the cloud locally + tell everyone. */
+  private deploySmoke(x: number, y: number, z: number): void {
+    this.addSmoke(x, y, z);
+    this.audio.ui();
+    if (this.net.connected) this.net.send({ t: "smoke", x: +x.toFixed(1), y: +y.toFixed(1), z: +z.toFixed(1) });
+  }
+
+  /** Per-frame: drop expired clouds and keep each active one visually filled (a sustained ~10 s cloud). */
+  private smokeFrame(): void {
+    if (this.smokeClouds.length === 0) return;
+    for (let i = this.smokeClouds.length - 1; i >= 0; i--) if (this.smokeClouds[i].until <= this.time) this.smokeClouds.splice(i, 1);
+    if (this.smokeClouds.length === 0 || this.time < this.smokeFxAt) return;
+    this.smokeFxAt = this.time + 0.25;
+    for (const c of this.smokeClouds) this.sink.burst(c.x, c.y + 1, c.z, { count: 8, color: 0x9a9a9a, speed: 1.4, size: 13, life: 2.6, buoyancy: 0.5, windCoupling: 0.3, spread: 1.5, kind: "smoke", strength: 0.03 });
+  }
+
+  /** Launch the interceptor SWARM (replaces the net): ~5 homing mini-drones pop out of the soldier, each hunts
+   *  the nearest enemy drone, rams it and detonates. Local visual; the KILL is host-authoritative. */
+  private fireSwarm(origin: THREE.Vector3, dir: THREE.Vector3): void {
+    for (let i = 0; i < 5; i++) {
+      const jx = (Math.random() - 0.5) * 1.4, jz = (Math.random() - 0.5) * 1.4;
+      const mesh = new THREE.Mesh(this.miniGeo, this.miniMat);
+      mesh.position.set(origin.x + jx, origin.y - 0.2, origin.z + jz);
+      this.renderer.scene.add(mesh);
+      this.miniDrones.push({ mesh, x: origin.x + jx, y: origin.y - 0.2, z: origin.z + jz, vx: dir.x * 6 + jx * 3, vy: 3.5 + Math.random() * 2, vz: dir.z * 6 + jz * 3, life: 6 });
+    }
+    this.audio.ui();
+  }
+
+  /** Per-frame: each interceptor homes on the nearest enemy drone; on contact it kills it + a spark burst.
+   *  A killed bot is dropped from THIS frame's snapshot so two interceptors don't waste on the same drone. */
+  private miniDroneFrame(dt: number): void {
+    if (this.miniDrones.length === 0) return;
+    const bots = [...this.aiBots].map(([id, p]) => ({ id, x: p.x, y: p.y, z: p.z }));
+    for (let i = this.miniDrones.length - 1; i >= 0; i--) {
+      const m = this.miniDrones[i];
+      m.life -= dt;
+      const ti = bots.length > 0 ? pickTarget(m.x, m.z, bots) : -1;
+      if (ti >= 0) {
+        const t = bots[ti];
+        const s = homingStep(m.x, m.y, m.z, m.vx, m.vy, m.vz, t.x, t.y, t.z, 40, 26, dt);
+        m.x = s.x; m.y = s.y; m.z = s.z; m.vx = s.vx; m.vy = s.vy; m.vz = s.vz;
+        if (Math.hypot(t.x - m.x, t.y - m.y, t.z - m.z) < 1.5) { // rammed it → kill + detonate
+          this.sink.burst(m.x, m.y, m.z, { count: 10, color: 0x88ffdd, speed: 7, size: 4, life: 0.3, kind: "spark", strength: 0.02 });
+          this.killBot(t.id);
+          bots.splice(ti, 1); // don't let another interceptor chase the corpse this frame
+          this.despawnMini(i);
+          continue;
+        }
+      } else { // nothing to hunt → coast + drop
+        m.x += m.vx * dt; m.y += m.vy * dt; m.z += m.vz * dt; m.vy -= 6 * dt; m.life -= dt;
+      }
+      m.mesh.position.set(m.x, m.y, m.z);
+      if (m.life <= 0) this.despawnMini(i);
+    }
+  }
+
+  private despawnMini(i: number): void {
+    this.renderer.scene.remove(this.miniDrones[i].mesh);
+    this.miniDrones.splice(i, 1);
+  }
+
+  /** Instakill a bot rammed by an interceptor (host-authoritative; a peer reports it for the host to apply). */
+  private killBot(id: number): void {
+    if (this.hosting && this.swarm) { if (this.swarm.damageBot(id, 99)) this.onBotDead(id); }
+    else if (this.net.connected) this.net.send({ t: "aihitbot", bot: id, dmg: 99 });
+  }
+
+  /** Tests a shot ray (unit dir) against the co-op bots within `range` and damages the NEAREST — but ONLY if
+   *  no wall sits between the shooter and that bot (grid raycast), so a bullet can't pass through a wall to
+   *  hit a drone. Host applies the damage; a peer reports it. Returns whether a bot was hit. */
+  private hitBotAlongRay(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, range: number, botDmg: number): boolean {
+    if (this.mode !== "coop" || this.aiBots.size === 0) return false;
+    let hitId = -1, hitT = range;
     for (const [id, p] of this.aiBots) {
       const wx = p.x - ox, wy = p.y - oy, wz = p.z - oz;
       const t = wx * dx + wy * dy + wz * dz;                 // projection of the bot onto the ray
@@ -447,25 +720,73 @@ export class Game {
       const cx = ox + dx * t - p.x, cy = oy + dy * t - p.y, cz = oz + dz * t - p.z;
       if (cx * cx + cy * cy + cz * cz < 1.4) { hitId = id; hitT = t; } // within ~1.2 m of the line
     }
-    if (hitId < 0) return;
-    this.hud.hitMarker("hit"); this.audio.hitMarker(false);
-    if (this.hosting && this.swarm) { if (this.swarm.damageBot(hitId, 1)) this.onBotDead(hitId); }
-    else if (this.net.connected) this.net.send({ t: "aihitbot", bot: hitId });
+    if (hitId < 0) return false;
+    const wall = this.grid.raycast(ox, oy, oz, dx, dy, dz, hitT); // a wall nearer than the bot blocks the shot
+    if (wall && wallBlocks(hitT, wall.distance)) return false;
+    const bp = this.aiBots.get(hitId)!;
+    if (this.smokeBlocks(ox, oy, oz, bp.x, bp.y, bp.z)) return false; // …and you can't shoot a bot THROUGH smoke either
+    if (this.hosting && this.swarm) { if (this.swarm.damageBot(hitId, botDmg, dx, dz)) this.onBotDead(hitId); } // pass the shot dir → tanks shield their front
+    else if (this.net.connected) this.net.send({ t: "aihitbot", bot: hitId, dmg: botDmg });
+    return true;
   }
 
-  /** A bot died (host authority): drop its avatar everywhere, credit the shooter. */
+  /** When the local player fires a BULLET weapon, test the aim ray against the bots (nearest, wall-checked). */
+  private aiHitscan(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): void {
+    const spec = WEAPONS[this.weapon];
+    const ranges = spec.aiRanges;
+    const range = (this.scopedNow && ranges) ? ranges[Math.min(this.zoomLevel, ranges.length - 1)] : 30; // scoped → far, hip-fire → short
+    if (this.hitBotAlongRay(ox, oy, oz, dx, dy, dz, range, spec.botDmg ?? 1)) { this.hud.hitMarker("hit"); this.audio.hitMarker(false); }
+  }
+
+  /** A bot died (host authority): mini explosion + falling wreckage, drop its avatar, credit the shooter. */
   private onBotDead(id: number): void {
+    const p = this.aiBots.get(id);
     this.aiBots.delete(id);
     this.remotes.remove(-id);
     this.myKills++;
+    this.sessionKills++; // team total this session (host-authoritative → the co-op score)
     this.hud.hitMarker("kill");
-    if (this.net.connected) this.net.send({ t: "aidead", bot: id });
+    if (p) this.droneDeathFx(p.x, p.y, p.z);
+    if (this.net.connected) this.net.send({ t: "aidead", bot: id, x: p ? +p.x.toFixed(1) : 0, y: p ? +p.y.toFixed(1) : 0, z: p ? +p.z.toFixed(1) : 0 });
+  }
+
+  /** Mini explosion (flash + sparks + smoke) and a burst of GPU debris that RAINS DOWN — reads as the drone
+   *  blowing up and falling. Visual only (no terrain carve). Runs on every client via the `aidead` message. */
+  private droneDeathFx(x: number, y: number, z: number): void {
+    this.addFlash(x, y, z, 0.7);
+    this.sink.burst(x, y, z, { count: 12, color: 0xffb867, speed: 8, size: 5, life: 0.35, buoyancy: 0, windCoupling: 0.2, kind: "spark", strength: 0.02 });
+    this.sink.burst(x, y, z, { count: 8, color: 0x555a60, speed: 2.5, size: 11, life: 1.3, buoyancy: 1.6, windCoupling: 0.9, spread: 1.2, kind: "smoke", strength: 0.05 });
+    this.sink.burst(x, y, z, { count: 0, color: 0, speed: 6, life: 6, kind: "debris", colorType: 0.73, strength: 0.28 }); // metal wreckage falls to the ground
+    this.audio.death(false); // drone crash sound
+  }
+
+  // --- minimap -------------------------------------------------------------
+
+  /** Records a shot ray (shooter origin + normalized fire direction) for the minimap; caps the list. */
+  private recordShot(x: number, z: number, dx: number, dz: number): void {
+    const h = Math.hypot(dx, dz) || 1;
+    this.recentShots.push({ x, z, dx: dx / h, dz: dz / h, life: 1 });
+    if (this.recentShots.length > 24) this.recentShots.shift();
+  }
+
+  /** Per-frame: draw the HEADING-UP minimap (self at centre + friend/enemy blips within radius + fading shot
+   *  rays). Friend/enemy is by mode: co-op → drones are the enemy; PvP → the opposite role. */
+  private minimapFrame(dt: number): void {
+    const cp = this.player.camera.position, f = this.player.forward(this.tmpDir);
+    const blips: RadarBlip[] = this.remotes.radar().map((e) => ({
+      // co-op: the enemy is the drone swarm; PvP: anyone not on our team (works for drone-vs-drone too)
+      x: e.x, z: e.z, enemy: this.mode === "coop" ? !e.isHuman : e.team !== this.myTeam,
+    }));
+    for (let i = this.recentShots.length - 1; i >= 0; i--) {
+      this.recentShots[i].life -= dt / 1.5;
+      if (this.recentShots[i].life <= 0) this.recentShots.splice(i, 1);
+    }
+    this.hud.drawMinimap(cp.x, cp.z, Math.atan2(f.x, f.z), blips, this.recentShots, this.minimapBig);
   }
 
   private onNet(m: NetMsg): void {
     if (m.t === "hello") {
-      // got our network id → take the matching spawn point so players start apart
-      this.spawnIndex = (this.net.id - 1) % Game.SPAWNS.length;
+      // got our network id → spawn point is derived from it in spawnPlayerInBuilding (perimeter band)
       if (this.phase === "lobby") { this.broadcastLobby(); return; } // announce self; wait for the host to begin
       if (this.mode === "dvh" || this.mode === "vs" || this.mode === "coop") this.assignRoleAndController();
       this.spawnPlayerInBuilding();
@@ -476,6 +797,7 @@ export class Game {
     } else if (m.t === "lobby") {
       if (this.phase !== "lobby") return;
       this.lobby = m.role ? applyPick(this.lobby, m.id as number, m.role as Role) : applyJoin(this.lobby, m.id as number);
+      if (m.map && MAP_SIZES[m.map as MapSize]) this.pendingMapSize = m.map as MapSize; // joiner learns the room's map size
       if (m.mode && this.pendingMode !== m.mode) { // joiner learned the room's mode from the host
         this.pendingMode = m.mode as Mode;
         if (m.mode === "coop") this.myRole = "human"; // co-op: everyone's a soldier
@@ -483,20 +805,34 @@ export class Game {
       }
       this.refreshLobby();
     } else if (m.t === "begin") {
-      if (this.phase === "lobby") { if (m.mode) this.pendingMode = m.mode as Mode; this.beginMatch(); }
+      // first start (from the lobby) OR a host-driven RESTART after the match ended — but never mid-fight.
+      if (canBeginMatch(this.phase, this.matchOver)) { if (m.mode) this.pendingMode = m.mode as Mode; if (m.map && MAP_SIZES[m.map as MapSize]) this.pendingMapSize = m.map as MapSize; this.coopHardcore = !!m.hardcore; this.beginMatch(); }
     } else if (m.t === "ai") {
       if (this.mode === "coop" && !this.hosting) { // peers render the host's swarm from its broadcast
         this.aiBots.clear();
         for (const row of m.b as number[][]) this.aiBots.set(row[0], { x: row[1], y: row[2], z: row[3] });
+        this.sessionKills = (m.k as number) ?? this.sessionKills; // host-authoritative team score + wave
+        this.hud.setCoopScore(this.sessionKills, (m.w as number) ?? 0);
       }
     } else if (m.t === "aifire") {
       this.muzzleFlash(new THREE.Vector3(m.x as number, m.y as number, m.z as number), new THREE.Vector3(m.dx as number, m.dy as number, m.dz as number), 0.3);
+      this.recordShot(m.x as number, m.z as number, m.dx as number, m.dz as number); // minimap: a drone opened fire
+    } else if (m.t === "aidrop") { // a bomber released a grenade → show the falling bomb (ghost; blast arrives via `explode`)
+      this.projectiles.launchGrenade(new THREE.Vector3(m.x as number, (m.y as number) - 0.4, m.z as number), new THREE.Vector3(0, -1, 0), 1.5, true, 1, true);
+    } else if (m.t === "smoke") { // a soldier deployed a smoke cloud → everyone shares it (LOS block + FX)
+      this.addSmoke(m.x as number, m.y as number, m.z as number);
     } else if (m.t === "aihit") {
-      if ((m.to as number) === this.net.id && this.hp > 0) this.damageDrone(m.dmg as number); // host said a bot hit me
+      if ((m.to as number) === this.net.id && this.hp > 0) this.damageDrone(m.dmg as number, m.x as number, m.z as number); // host said a bot hit me
     } else if (m.t === "aihitbot") {
-      if (this.hosting && this.swarm && this.swarm.damageBot(m.bot as number, 1)) this.onBotDead(m.bot as number); // a peer shot a bot
+      if (this.hosting && this.swarm && this.swarm.damageBot(m.bot as number, (m.dmg as number) || 1)) this.onBotDead(m.bot as number); // a peer shot a bot (dmg: sniper=3, else 1)
     } else if (m.t === "aidead") {
       this.aiBots.delete(m.bot as number); this.remotes.remove(-(m.bot as number));
+      if (typeof m.x === "number") this.droneDeathFx(m.x as number, m.y as number, m.z as number); // peers see the blast + fall
+    } else if (m.t === "aiboom") { // a kamikaze detonated → drop its avatar + crash FX (blast arrives via `explode`)
+      this.aiBots.delete(m.bot as number); this.remotes.remove(-(m.bot as number));
+      this.droneDeathFx(m.x as number, m.y as number, m.z as number);
+    } else if (m.t === "coopover") {
+      this.matchOver = true; this.hud.hideDeath(); this.hud.showGameOver(m.k as number, m.w as number); this.releaseCursor(); // host declared team-wipe
     } else if (m.t === "needsync") {
       // a peer joined and asked for the world's destruction. If we have any, send our compact diff
       // (only real gameplay destruction, not window/door cuts) addressed to that joiner.
@@ -515,7 +851,8 @@ export class Game {
     } else if (m.t === "state") {
       this.remotes.upsert(m.id as number, m.x as number, m.y as number, m.z as number,
         m.qx as number, m.qy as number, m.qz as number, m.qw as number, m.hp as number, (m.role as Role) ?? "drone", (m.mhp as number) || MAX_HP,
-        (m.ry as number) || 0, (m.rp as number) || 0, ((m.st as number) || 0) as 0 | 1 | 2);
+        (m.ry as number) || 0, (m.rp as number) || 0, ((m.st as number) || 0) as 0 | 1 | 2,
+        (m.tm as number) || 0, (m.cls as string) || "");
       if (this.mode === "dvh" && typeof m.dk === "number") {
         const merged = reconcileKills({ drone: this.droneKills, human: this.humanKills }, { drone: m.dk as number, human: m.hk as number });
         this.droneKills = merged.drone; this.humanKills = merged.human;
@@ -523,8 +860,11 @@ export class Game {
       }
     } else if (m.t === "weapon") {
       this.fireRemoteWeapon(m);
+      this.recordShot(m.ox as number, m.oz as number, m.dx as number, m.dz as number); // minimap: a peer opened fire
     } else if (m.t === "explode") {
-      this.explodeAt(m.x as number, m.y as number, m.z as number, m.r as number, m.p as number, false, m.id as number);
+      this.explodeAt(m.x as number, m.y as number, m.z as number, m.r as number, m.p as number, false, m.id as number, true, m.tm as number | undefined);
+    } else if (m.t === "medkit") {
+      this.medkits.take(m.i as number, this.time); // a peer grabbed a medkit → hide it here too
     } else if (m.t === "ammo") {
       this.ammoCrates.take(m.i as number, this.time); // a peer grabbed a crate → hide it here too
     } else if (m.t === "hit") {
@@ -543,8 +883,8 @@ export class Game {
     } else if (m.t === "melee") {
       this.remotes.meleeAnim(m.id as number); // swing on the attacker's avatar
       const p = this.player.camera.position;
-      if (this.hp > 0 && meleeHit(m.ox as number, m.oy as number, m.oz as number, m.dx as number, m.dy as number, m.dz as number, p.x, p.y, p.z, m.range as number, 0.5)) {
-        this.recordDamager(m.id as number); this.damageDrone(m.dmg as number); this.audio.meleeHit();
+      if (this.hp > 0 && !this.friendlyFire(m.tm) && meleeHit(m.ox as number, m.oy as number, m.oz as number, m.dx as number, m.dy as number, m.dz as number, p.x, p.y, p.z, m.range as number, 0.5)) {
+        this.recordDamager(m.id as number); this.damageDrone(m.dmg as number, m.ox as number, m.oz as number); this.audio.meleeHit();
       }
     } else if (m.t === "leave") {
       if (this.phase === "lobby") { this.lobby = applyLeave(this.lobby, m.id as number); this.refreshLobby(); }
@@ -557,26 +897,40 @@ export class Game {
   private assignRoleAndController(): void {
     // Headless/non-lobby path: co-op → everyone's a soldier; PvP → auto-balance by id. The LOBBY path calls
     // applyChosenRole directly with the role the player picked.
+    this.myTeam = this.mode === "coop" ? 0 : this.autoTeam();
     this.applyChosenRole(this.mode === "coop" ? "human" : assignRole([], this.net.id));
   }
 
-  /** Applies a role: swaps the local controller (Walker human / flying drone Player), sets HP/weapon/camera. */
-  private applyChosenRole(role: Role): void {
+  /** Applies a role + class: swaps the local controller (Walker human / flying drone Player), then sets
+   *  the class HP / primary weapon / movement multipliers / camera. Class defaults to the current pick. */
+  private applyChosenRole(role: Role, cls: UnitClass = this.myClass): void {
     this.role = role;
+    this.myClass = cls;
     const wantWalker = role === "human";
     if (wantWalker !== (this.player instanceof Walker)) {
       this.player.dispose();
-      this.player = wantWalker ? new Walker(this.physics, this.grid) : new Player(this.physics);
+      this.player = wantWalker ? new Walker(this.physics, this.grid, PLAY_BOUNDS) : new Player(this.physics);
     }
-    this.hp = this.myMaxHp(); // humans spawn tankier than drones
-    this.weapon = roleLoadout(this.role)[0]; // start on the team's primary weapon
+    this.hp = this.myMaxHp(); // per-class max (heavy tank … scout fragile)
+    this.weapon = classLoadout(this.role, this.myClass)[0]; // start on the class primary
+    const mv = classMove(this.role, this.myClass);
+    this.player.setClassMods(mv.speedMul, mv.jumpMul); // scout runs, heavy lumbers, interceptor screams
     this.resupply();
     this.camFx.setRole(this.role); // FPV for drones, body-cam for humans
     this.hud.setHealth(this.hp, this.myMaxHp(), true);
+    // class badge (PvP only): show the chosen class + team; hidden in co-op/sandbox
+    this.hud.setClass(this.mode === "dvh" ? classStats(this.role, this.myClass).label : "", TEAM_LABEL[this.myTeam]);
   }
 
-  /** Local max HP: role-based in any versus mode (human tank, drone fragile), else the default. */
-  private myMaxHp(): number { return this.mode === "dvh" || this.mode === "vs" || this.mode === "coop" ? roleMaxHp(this.role) : MAX_HP; }
+  /** Local max HP: per-class in any versus/co-op mode (heavy tank … scout fragile), else the default. */
+  private myMaxHp(): number { return this.mode === "dvh" || this.mode === "vs" || this.mode === "coop" ? classMaxHp(this.role, this.myClass) : MAX_HP; }
+
+  /** PvP friendly-fire gate: in dvh, a shot/blast/melee tagged with OUR team does no damage to us. Co-op
+   *  and the sandbox keep friendly fire ON — and AI blasts (which carry no real player team) are never
+   *  gated, since they only occur in co-op. An untagged message (older peer) is treated as an enemy hit. */
+  private friendlyFire(srcTeam: unknown): boolean {
+    return this.mode === "dvh" && typeof srcTeam === "number" && srcTeam === this.myTeam;
+  }
 
   /** Scores a kill for the team opposing the victim, then checks for a match win. */
   private addKill(victim: Role): void {
@@ -609,7 +963,7 @@ export class Game {
     this.prevDroneHp = droneHp; this.prevHumanHp = humanHp;
     const state: MatchState = { droneObjsAlive, humanObjsAlive, droneKills: this.droneKills, humanKills: this.humanKills };
     const winner = checkWin(state, Game.KILL_LIMIT);
-    if (winner) { this.matchOver = true; this.hud.showWin(winner, this.role); }
+    if (winner) { this.matchOver = true; this.hud.showWin(winner, this.role); this.releaseCursor(); }
   }
 
   /** Spawns a GHOST of a weapon a remote player fired — it flies for the visuals but never mutates
@@ -618,13 +972,13 @@ export class Game {
     const o = new THREE.Vector3(m.ox as number, m.oy as number, m.oz as number);
     const d = new THREE.Vector3(m.dx as number, m.dy as number, m.dz as number);
     if (m.k === "bullet") {
-      this.projectiles.launchBullet(o, d, 120, true);
+      this.projectiles.launchBullet(o, d, WEAPONS[m.w as Weapon]?.bulletSpeed ?? 120, true); // sniper tracer is faster
       this.muzzleFlash(o, d, 0.34); // enemy gunfire is visible/spottable at range
-      const base = (m.dmg as number) || 0; // a bullet in our line of fire hurts us (any team — "a todos")
-      if (base > 0 && this.hp > 0 && this.bulletHitsMe(o, d)) {
+      const base = (m.dmg as number) || 0; // a bullet in our line of fire hurts us — unless it's a teammate's (PvP)
+      if (base > 0 && this.hp > 0 && !this.friendlyFire(m.tm) && this.bulletHitsMe(o, d)) {
         const p = this.player.camera.position;
         const dmg = base * bulletFalloff((m.w as string) || "", Math.hypot(p.x - o.x, p.y - o.y, p.z - o.z));
-        this.recordDamager(m.id as number); this.damageDrone(Math.round(dmg)); // range-scaled (shotgun close = lethal, far = weak)
+        this.recordDamager(m.id as number); this.damageDrone(Math.round(dmg), o.x, o.z); // range-scaled (shotgun close = lethal, far = weak)
       }
     } else if (m.k === "grenade") this.projectiles.launchGrenade(o, d, 22, true);
     else if (m.k === "missile") this.projectiles.launchRocket(o, d, 52, true);
@@ -637,7 +991,7 @@ export class Game {
    *  a rare disagreement self-corrects on the next state tick. */
   private predictHit(o: THREE.Vector3, d: THREE.Vector3): void {
     if (!this.net.connected) return;
-    this.remotes.enemyPositions(this.role === "human", this.mode === "free" || this.mode === "coop", this.enemyBuf);
+    this.remotes.enemyPositions(this.myTeam, this.mode === "free" || this.mode === "coop", this.enemyBuf);
     if (this.enemyBuf.length === 0) return;
     const wall = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 220);
     const maxD = wall ? wall.distance : 220;
@@ -676,8 +1030,9 @@ export class Game {
   private netUpdate(dt: number): void {
     this.remotes.prune();
     { const cp = this.player.camera.position; this.remotes.update(dt, cp.x, cp.z); } // ease peers + LOD distant skins
-    // respawn works in every mode, even offline (blasts/debris can kill you in the sandbox too)
-    if (this.hp <= 0 && this.time >= this.respawnAt) {
+    // respawn works in every mode, even offline (blasts/debris can kill you in the sandbox too) — but never
+    // once the match/session is over (dvh win or co-op team-wipe), and never past an infinite respawn (permadeath)
+    if (this.hp <= 0 && this.time >= this.respawnAt && !this.matchOver) {
       this.hp = this.myMaxHp();
       this.spawnPlayerInBuilding();
       this.resupply(); // full ammo + battery on respawn
@@ -696,6 +1051,7 @@ export class Game {
       qx: +q.x.toFixed(3), qy: +q.y.toFixed(3), qz: +q.z.toFixed(3), qw: +q.w.toFixed(3),
       ry: +this.player.lookYaw.toFixed(3), rp: +this.player.lookPitch.toFixed(3), st: this.player.stanceVal,
       hp: this.hp, mhp: this.myMaxHp(), role: this.role, // role → avatar; mhp → correct health bar
+      tm: this.myTeam, cls: this.myClass, // team → friend/enemy + FF; class → avatar tint/label
       dk: this.droneKills, hk: this.humanKills, // scoreboard → max-merged by peers (self-healing)
     };
     this.net.send(this.lastState);
@@ -703,17 +1059,36 @@ export class Game {
 
   /** Applies damage to our own drone (blasts + fast debris, in every mode) — computed locally on
    *  each client and broadcast via the periodic state message, so health stays consistent. */
-  private damageDrone(amount: number): void {
+  private damageDrone(amount: number, srcX?: number, srcZ?: number): void {
     if (this.hp <= 0) return;
+    this.bandageT = 0; // taking a hit interrupts an in-progress bandage (no partial heal)
     this.hp = Math.max(0, this.hp - amount);
     this.trauma = addTrauma(this.trauma, Math.min(0.6, amount / 60)); // taking a hit jolts the view + flashes the HUD
     this.hud.damageFlash(Math.min(1, amount / 50));
+    if (srcX !== undefined && srcZ !== undefined) { // point an on-screen arc at where the hit came from
+      const cp = this.player.camera.position, f = this.player.forward(this.tmpDir);
+      this.hud.damageArrow(bearing(Math.atan2(f.x, f.z), cp.x, cp.z, srcX, srcZ), Math.min(1, amount / 40));
+    }
     this.hud.setHealth(this.hp, this.myMaxHp(), true);
     if (this.hp > 0) this.audio.hit(); else this.audio.death(this.role === "human"); // drones crash, not grunt
     if (this.hp <= 0) {
-      this.respawnAt = this.time + 3;
-      this.hud.flash("Derribado — reapareces en 3s");
       this.myDeaths++;
+      if (this.mode === "coop") {
+        // Co-op survival: permadeath, or if you were the LAST soldier standing → no respawn (team-wipe ends it).
+        // Otherwise wait a growing countdown (10 s + 5 s per prior death) while a teammate keeps the run alive.
+        const teammateAlive = this.remotes.peers().some((p) => p.isHuman && p.hp > 0);
+        if (this.coopHardcore || !teammateAlive) {
+          this.respawnAt = Infinity;
+          this.hud.flash(this.coopHardcore ? "☠ Eliminado (permadeath)" : "☠ Derribado…");
+        } else {
+          const d = respawnDelay(this.myDeaths);
+          this.respawnAt = this.time + d;
+          this.hud.flash(`Derribado — reapareces en ${d}s`);
+        }
+      } else {
+        this.respawnAt = this.time + 3;
+        this.hud.flash("Derribado — reapareces en 3s");
+      }
       if (this.mode !== "free") {
         // Attribute the kill: the most-recent damager (last ~6 s) is the killer; earlier ones assist.
         let killer = 0, killerT = -1; const assist: number[] = [];
@@ -826,7 +1201,7 @@ export class Game {
 
   /** Opens the visual-settings panel (O key or gear). Releases the pointer lock so the cursor drives the UI. */
   private openSettings(): void {
-    if (typeof document !== "undefined" && document.pointerLockElement) document.exitPointerLock();
+    this.releaseCursor();
     this.hud.showSettings(this.settings, {
       setQuality: (q) => this.setQuality(q),
       setResAuto: (b) => this.setResAuto(b),
@@ -918,14 +1293,21 @@ export class Game {
   /** Per-frame audio: the drone's rotor hum tracks its speed; a human plays footstep/jump/land events. */
   private audioFrame(): void {
     if (this.player instanceof Player) {
-      this.audio.setRotor(this.mode === "free" || this.hp > 0 ? 1 : 0, this.player.speed(), 0.032); // your own rotor: quiet
+      // your OWN drone: you're inside it → centred + bright, tracks your throttle
+      this.audio.setRotor(this.mode === "free" || this.hp > 0 ? 1 : 0, this.player.speed(), 0.032, 0, 4200);
     } else {
       const w = this.player;
-      // a human on the ground HEARS enemy drones — the closer one gets, the louder its rotor
       const p = w.camera.position;
-      const dist = this.remotes.nearestDroneDist(p.x, p.y, p.z);
-      const AUD = 50; // metres of audibility
-      this.audio.setRotor(dist < AUD ? Math.min(1, 1 - dist / AUD) : 0, 30, 0.14);
+      // a human HEARS enemy drones spatially: near = LOUD + BRIGHT + revved, far = a quiet MUFFLED hum, and it's
+      // PANNED to whichever side the nearest drone is on (relative to where you're looking). AUD tighter → no
+      // faraway droning.
+      const n = this.remotes.nearestDrone(p.x, p.y, p.z);
+      const AUD = 34;
+      if (n) {
+        const f = w.forward(this.tmpDir);
+        const brg = bearing(Math.atan2(f.x, f.z), p.x, p.z, n.x, n.z); // where the drone is vs your facing
+        this.audio.setRotor(rotorLevel(n.dist, AUD), rotorPitch(n.dist, AUD), 0.14, rotorPan(brg), rotorCutoff(n.dist, AUD) * frontBrightness(brg));
+      } else this.audio.setRotor(0, 16, 0.14);
       if (w.audioStep) { this.audio.footstep(w.audioRun); w.audioStep = false; }
       if (w.audioJump) { this.audio.jump(); w.audioJump = false; }
       if (w.audioLand) { this.audio.land(); w.audioLand = false; }
@@ -1109,10 +1491,9 @@ export class Game {
       RAPIER.ColliderDesc.cuboid(200, 0.5, 200).setTranslation(0, -0.5, 0).setFriction(0.95).setCollisionGroups(GROUP_GROUND),
       ground,
     );
-    // grassy terrain: a big subdivided plane — flat under the city, gently rolling beyond it, and
-    // mottled with muted greens so it reads as grass/ground without a texture. Purely visual; the
-    // physics floor above stays a flat slab, and the displacement never rises under the buildings.
-    // Higher SEG so the 3.5 m streets resolve. Flat under the city, rolling hills only well beyond it.
+    // grassy terrain: a big subdivided plane — DEAD FLAT everywhere (city + the field out to the forest ring),
+    // mottled with muted greens so it reads as grass/ground without a texture. Purely visual; the physics floor
+    // above is a flat slab. Higher SEG so the 3.5 m streets resolve. No displacement → the whole map is level.
     const SEG = 160, SIZE = 400;
     const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
     const pos = geo.attributes.position as THREE.BufferAttribute;
@@ -1122,9 +1503,7 @@ export class Game {
     for (let i = 0; i < pos.count; i++) {
       const wx = pos.getX(i), wz = -pos.getY(i);                                  // plane local → world XZ
       const cls = groundClass(wx / VOXEL, wz / VOXEL);                            // street / plot / outside
-      const edge = cls === "outside" ? Math.max(0, Math.abs(wx) - 95, Math.abs(wz) - 80) : 0;
-      pos.setZ(i, Math.min(edge / 60, 1) * 4 * noise(wx, wz));                    // rolling hills only outside the city
-      const n = 0.5 + 0.5 * noise(wx * 1.7, wz * 1.7);
+      const n = 0.5 + 0.5 * noise(wx * 1.7, wz * 1.7);                            // colour mottle only — no height
       if (cls === "street") tint.copy(asphalt).multiplyScalar(0.82 + 0.18 * n);   // dark asphalt with faint lane variation
       else if (cls === "plot") tint.copy(concrete).multiplyScalar(0.8 + 0.2 * n); // concrete apron under buildings
       else tint.copy(grass).multiplyScalar(0.72 + 0.28 * n);                      // mottled grass beyond the city
@@ -1147,6 +1526,7 @@ export class Game {
   /** Rebuilds the whole world from a seed so every client in a room is byte-identical (full sync).
    *  VS drops the loose crates (dynamic props would diverge across clients). */
   private rebuildWorld(seed: number, withProps: boolean): void {
+    setMapSize(this.mapSize); // rescale the world to the room's chosen size BEFORE building (like setWorldSeed)
     setWorldSeed(seed);
     this.worldSeed = seed >>> 0; // same seed drives world gen AND every per-event destruction RNG
     for (const p of this.props) { this.physics.world.removeRigidBody(p.body); this.renderer.scene.remove(p.mesh); }
@@ -1156,6 +1536,7 @@ export class Game {
     if (this.mode === "dvh") {
       buildObjectives(this.grid); // a destructible core per team
       this.droneKills = 0; this.humanKills = 0; this.matchOver = false; this.hud.hideWin();
+      this.prevDroneHp = 1; this.prevHumanHp = 1; // fresh bases → reset the under-attack alert baselines
     }
     (this.interiorLights ??= new InteriorLights(this.renderer.scene)).build(placedBuildings(), this.interiorLightBudget());
     this.ensureFlashlight(); // pre-create at intensity 0 so the first F toggle causes no light-count recompile
@@ -1172,14 +1553,29 @@ export class Game {
     // Ammo-supply crates for the soldiers, on a deterministic per-room grid (same on every client). Only
     // in combat modes — the free sandbox has no ammo, so no crates. Rebuilding resets every crate to live.
     this.ammoCrates.build(this.mode !== "free" ? ammoBoxSites(this.worldSeed) : []);
+    this.medkits.build(this.mode !== "free" ? medkitSites(this.worldSeed) : []);
+    this.recentBlasts.length = 0; // fresh world → drop stale explosion noise
+    this.smokeClouds.length = 0;  // drop any smoke still hanging from the ended match (would block LOS into the replay)
     if (withProps) this.spawnInitialProps();
     this.spawnPlayerInBuilding();
   }
 
-  /** Drops the player at its assigned spawn point, facing the building centre. */
+  /** Drops the player in the clear perimeter band, scaled to the map size + player count (PvP splits the
+   *  teams to opposite sides; co-op spreads around all edges), facing the city centre. */
   private spawnPlayerInBuilding(): void {
-    const [x, y, z] = Game.SPAWNS[this.spawnIndex % Game.SPAWNS.length];
-    this.player.spawn(x, y, z, Math.atan2(36 - x, 27 - z)); // face the lobby centre (≈36,27)
+    const team: 0 | 1 | null = this.mode === "dvh" ? this.myTeam : null;
+    const slots = MAP_SIZES[this.mapSize].players;
+    const s = playerSpawn(CITY_VOX.x1, CITY_VOX.z1, VOXEL, team, Math.max(0, this.net.id - 1), slots);
+    this.player.spawn(s.x, s.y, s.z, s.yaw);
+  }
+
+  /** Auto-balanced team for a player who didn't pick one: split by JOIN ORDER in the roster (even index →
+   *  Rojo, odd → Azul) so two players always land on opposite sides — robust to id gaps from reconnects,
+   *  unlike raw id parity. Deterministic across clients (same roster → same split). Headless → id parity. */
+  private autoTeam(): Team {
+    const ids = this.lobby.players.map((p) => p.id).sort((a, b) => a - b);
+    const idx = ids.indexOf(this.net.id);
+    return (idx >= 0 ? idx % 2 : this.net.id % 2) as Team;
   }
 
   private spawnCrate(x: number, y: number, z: number): void {
@@ -1331,17 +1727,18 @@ export class Game {
     for (const ck of drop) this.mesher.disposeChunk(ck);
   }
 
-  private explodeAt(x: number, y: number, z: number, radius: number, power: number, broadcast = false, by = 0): void {
+  private explodeAt(x: number, y: number, z: number, radius: number, power: number, broadcast = false, by = 0, hitBots = true, srcTeam?: number): void {
     // Quantize to the wire precision AT SOURCE, so this client carves with the EXACT numbers every peer
     // receives — otherwise a <1cm float mismatch flips crater-edge voxels (the lobe test at carve.ts is a
     // hard cutoff) and the per-event RNG seed diverges. Math.round (not toFixed → stable on negatives).
     x = q2(x) / 100; y = q2(y) / 100; z = q2(z) / 100; radius = q2(radius) / 100;
+    if (broadcast && hitBots && this.hosting) this.recentBlasts.push({ x, z, t: this.time, loud: Math.min(80, 28 + radius * 12) }); // host-only (it prunes + reads); PLAYER blast → loud noise, AI blasts (hitBots=false) don't lure the swarm
     const seed = eventSeed(this.worldSeed, EVT.EXPLODE, q2(x), q2(y), q2(z), q2(radius), power | 0);
     // A player-initiated blast is authoritative: broadcast its (already quantized) position so EVERY
     // client carves identically. Cascades (gas chains, collapse) are deterministic on the synced grid,
     // so they run locally on each client and are NOT broadcast (broadcast stays false for those calls).
     if (broadcast && this.net.connected) {
-      this.net.send({ t: "explode", x, y, z, r: radius, p: power });
+      this.net.send({ t: "explode", x, y, z, r: radius, p: power, tm: this.myTeam }); // tm → PvP friendly-fire gate
     }
     { const pp = this.player.camera.position; const d = Math.hypot(pp.x - x, pp.y - y, pp.z - z);
       this.audio.explosion(power, d);
@@ -1359,7 +1756,20 @@ export class Game {
       const p = this.player.camera.position;
       const dr = radius * 1.5;
       const dist = Math.hypot(p.x - x, p.y - y, p.z - z);
-      if (dist < dr) { this.recordDamager(by); this.damageDrone(Math.round((1 - dist / dr) * 55)); }
+      if (dist < dr && !this.friendlyFire(srcTeam)) { this.recordDamager(by); this.damageDrone(Math.round((1 - dist / dr) * 55), x, z); }
+    }
+    // co-op (host, player weapons only): the blast SHREDS any AI drone in range — the soldier's missile +
+    // grenade launcher now actually kill bots. `hitBots` is false for a DRONE's own grenade (no friendly fire).
+    if (hitBots && this.hosting && this.swarm) this.explodeBots(x, y, z, radius * 1.4);
+  }
+
+  /** Host-authoritative: damage every AI bot within `r` of a blast (distance-scaled), killing those it drops. */
+  private explodeBots(x: number, y: number, z: number, r: number): void {
+    for (const [id, p] of [...this.aiBots]) { // snapshot: onBotDead mutates aiBots mid-loop
+      const dist = Math.hypot(p.x - x, p.y - y, p.z - z);
+      if (dist >= r) continue;
+      const dmg = Math.max(1, Math.ceil((1 - dist / r) * 8)); // core → 8 (clears even tanky late-wave bots), edge → 1
+      if (this.swarm!.damageBot(id, dmg)) this.onBotDead(id);
     }
   }
 
@@ -1489,7 +1899,12 @@ export class Game {
     const dir = this.player.forward(this.tmpDir).clone();
 
     // Combat modes (vs/dvh) use the per-team weapon loadout + ammo, not the sandbox tools.
-    if (this.mode !== "free") { this.fireWeapon(origin, dir); return; }
+    if (this.mode !== "free") {
+      // right-click aims a SCOPED weapon down sights (applyAds reconciles it); other weapons keep firing.
+      if (button === 2 && this.player instanceof Walker && WEAPONS[this.weapon].scope) { this.ads = true; return; }
+      this.fireWeapon(origin, dir);
+      return;
+    }
 
     if (button === 2 && this.tool !== "build" && this.tool !== "erase") {
       this.shoot(origin, dir);
@@ -1543,7 +1958,8 @@ export class Game {
     if (this.projectiles.bulletCount > 40) return; // held-fire safety: don't stack unbounded bullet bodies
     const origin = this.player.camera.position;
     const dir = this.player.forward(this.tmpDir).clone();
-    if (this.mode !== "free") { this.fireWeapon(origin, dir); return; } // cooldown-gated → full-auto
+    // cooldown-gated → full-auto, EXCEPT a bolt-action weapon (sniper): one shot per trigger pull, no auto-repeat.
+    if (this.mode !== "free") { if (!WEAPONS[this.weapon].boltAction) this.fireWeapon(origin, dir); return; }
     if (this.tool === "shoot" && this.time >= this.bulletReadyAt) {
       this.bulletReadyAt = this.time + 0.09; // ~11 rounds/sec
       this.shoot(origin, dir);
@@ -1555,8 +1971,8 @@ export class Game {
     if (region) this.markRegion(region[0], region[1], region[2], region[3], region[4], region[5]);
   }
 
-  private shoot(origin: THREE.Vector3, dir: THREE.Vector3, dmg = 0): void {
-    this.projectiles.launchBullet(origin, dir);
+  private shoot(origin: THREE.Vector3, dir: THREE.Vector3, dmg = 0, speed = 120): void {
+    this.projectiles.launchBullet(origin, dir, speed);
     this.aiHitscan(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z); // damage co-op AI drones on the shot line
     this.muzzleFlash(origin, dir, 0.22); // subtle first-person muzzle glow (pool keeps one alive during auto-fire)
     this.trauma = addTrauma(this.trauma, 0.03); // light per-shot kick
@@ -1569,7 +1985,7 @@ export class Game {
   private broadcastWeapon(k: string, o: THREE.Vector3, d: THREE.Vector3, dmg = 0): void {
     if (!this.net.connected) return;
     this.net.send({
-      t: "weapon", k, dmg, w: this.weapon, // w = weapon id, so the victim can apply range falloff
+      t: "weapon", k, dmg, w: this.weapon, tm: this.myTeam, // w = weapon id (falloff); tm = shooter team (PvP FF gate)
       ox: +o.x.toFixed(2), oy: +o.y.toFixed(2), oz: +o.z.toFixed(2),
       dx: +d.x.toFixed(3), dy: +d.y.toFixed(3), dz: +d.z.toFixed(3),
     });
@@ -1585,15 +2001,18 @@ export class Game {
     this.weaponReadyAt = this.time + spec.cooldown;
     const w = roleWeapon(this.role);
     switch (spec.fire) {
-      case "bullet":    this.shoot(origin, dir, spec.playerDmg ?? 0); break;
+      case "bullet":    this.shoot(origin, dir, spec.playerDmg ?? 0, spec.bulletSpeed ?? 120); break;
       case "shotgun":   this.fireShotgun(origin, dir, spec.pellets ?? 8, spec.playerDmg ?? 0); break;
       case "grenade":   this.projectiles.launchGrenade(origin.clone(), dir, 22, false, w.powerMul); this.broadcastWeapon("grenade", origin, dir); break;
       case "explosive": this.projectiles.launchRocket(origin.clone(), dir, 52, false, w.powerMul); this.broadcastWeapon("missile", origin, dir); break;
       case "net":       this.fireNet(origin, dir); break;
+      case "smoke":     this.projectiles.launchGrenade(origin.clone(), dir, 16, false, 1, false, true); this.audio.ui(); break;
+      case "swarm":     this.fireSwarm(origin, dir); break;
       case "kamikaze":  this.kamikaze(origin); break;
     }
     this.audio.shot(this.weapon); // muzzle report for the fired weapon
-    this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon]);
+    if (spec.boltAction) this.audio.boltCycle(); // bolt-action: rack the next round (a beat after the shot)
+    this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon], classLoadout(this.role, this.myClass));
   }
 
   /** Shotgun: a tight bullet spread. Each pellet's grid hit is broadcast, so peers stay in sync. */
@@ -1601,6 +2020,7 @@ export class Game {
     // Seeded spread (was Math.random) so every pellet is lockstep-reproducible; each pellet's grid hit
     // is still broadcast as a `hit` for grid convergence, but the pattern itself is now deterministic.
     const rng = new Rng(eventSeed(this.worldSeed, EVT.SHOTGUN, q2(origin.x), q2(origin.y), q2(origin.z), q3(dir.x), q3(dir.y), q3(dir.z)));
+    let hitBot = false;
     for (let i = 0; i < pellets; i++) {
       const d = new THREE.Vector3(
         dir.x + rng.centered(0.09),
@@ -1608,7 +2028,10 @@ export class Game {
         dir.z + rng.centered(0.09),
       ).normalize();
       this.projectiles.launchBullet(origin, d);
+      // co-op: each pellet can down a bot up close (wall-checked); the shotgun now actually hits drones
+      if (this.hitBotAlongRay(origin.x, origin.y, origin.z, d.x, d.y, d.z, 30, 1)) hitBot = true;
     }
+    if (hitBot) { this.hud.hitMarker("hit"); this.audio.hitMarker(false); }
     this.muzzleFlash(origin, dir, 0.34); // bigger pop for the shotgun
     this.trauma = addTrauma(this.trauma, 0.12); // heavy shotgun kick
     if (dmg > 0) this.predictHit(origin, dir);
@@ -1636,7 +2059,7 @@ export class Game {
     const o = this.player.camera.position, d = this.player.forward(this.tmpDir).clone();
     if (this.net.connected) {
       this.net.send({
-        t: "melee", dmg: 55, range: 2.4,
+        t: "melee", dmg: 55, range: 2.4, tm: this.myTeam,
         ox: +o.x.toFixed(2), oy: +o.y.toFixed(2), oz: +o.z.toFixed(2),
         dx: +d.x.toFixed(3), dy: +d.y.toFixed(3), dz: +d.z.toFixed(3),
       });
@@ -1645,9 +2068,27 @@ export class Game {
 
   private selectWeapon(w: Weapon): void {
     this.weapon = w;
+    this.zoomLevel = 0; // a fresh weapon starts at its base zoom stop
     this.audio.weaponSwitch();
-    this.hud.setWeapon(this.role, w, this.ammo[w]);
+    this.hud.setWeapon(this.role, w, this.ammo[w], classLoadout(this.role, this.myClass));
     this.hud.flash(`${WEAPONS[w].icon} ${WEAPONS[w].name}`);
+  }
+
+  private scopedNow = false; // last applied scope state — the HUD overlay is only touched on a transition
+  private zoomLevel = 0;     // scoped zoom-stop index (the wheel cycles it while aiming); reset on weapon switch
+  private scopeFov = 0;      // the active scope FOV (drives the optical scope render pass) while scopedNow
+  /** Reconcile aim-down-sights each frame from the raw RMB intent: only a LIVING SOLDIER holding a SCOPED
+   *  weapon actually scopes in. Switching weapons, dying, or being a drone drops it (self-healing). */
+  private applyAds(): void {
+    const w = this.player;
+    const mags = WEAPONS[this.weapon].zoomMags;
+    const scoped = w instanceof Walker && this.ads && this.hp > 0 && !!mags;
+    // scope FOV that yields the requested ×mag INSIDE the small scope circle (see SCOPE_CIRCLE_R): a higher
+    // mag → a narrower FOV → more magnification within the glass. The main view FOV is untouched.
+    const mag = mags ? mags[Math.min(this.zoomLevel, mags.length - 1)] : 1;
+    this.scopeFov = scoped ? (HUMAN_FOV * SCOPE_CIRCLE_R) / mag : 0;
+    if (w instanceof Walker) w.setAds(scoped ? this.scopeFov : null);
+    if (scoped !== this.scopedNow) { this.scopedNow = scoped; this.hud.setScope(scoped); }
   }
 
   private megaBombReadyAt = 0; // cooldown: one 9k-voxel blast is a big rebuild, don't let B spam it
@@ -1678,7 +2119,7 @@ export class Game {
    *  whether anything was below full, so a crate isn't wasted on an already-stocked soldier. NO battery. */
   private resupplyAmmo(): boolean {
     let gained = false;
-    for (const w of roleLoadout(this.role)) {
+    for (const w of classLoadout(this.role, this.myClass)) {
       const spec = WEAPONS[w], cur = this.ammo[w];
       if (cur.mag < spec.magSize || cur.reserve < spec.maxReserve) gained = true;
       this.ammo[w] = fullAmmo(spec);
@@ -1690,6 +2131,29 @@ export class Game {
   private resupply(): void {
     this.resupplyAmmo();
     this.battery = BATTERY_MAX;
+    this.bandages = BANDAGE_MAX; // bandages restock at the base + on respawn
+  }
+
+  /** Channeled self-heal (soldier only): hold B, standing still and not firing, for BANDAGE_DUR seconds to
+   *  spend one bandage and restore BANDAGE_HEAL HP. Moving, firing or taking a hit cancels it (no partial). */
+  private bandageFrame(dt: number): void {
+    if (this.mode === "free") return;
+    if (!(this.player instanceof Walker)) { this.bandageT = 0; this.bandaging = false; this.hud.setBandages(-1, false, 0); return; } // drones don't bandage
+    const inp = this.input;
+    const still = !(inp.isDown("keyw") || inp.isDown("keya") || inp.isDown("keys") || inp.isDown("keyd") || inp.isDown("space"));
+    const active = inp.isDown("keyb")
+      && this.bandages > 0 && this.hp > 0 && this.hp < this.myMaxHp() && still && !this.firing;
+    const r = bandageStep(this.bandageT, active, dt);
+    this.bandageT = r.t;
+    this.bandaging = active;
+    if (r.done) {
+      this.hp = Math.min(this.myMaxHp(), this.hp + BANDAGE_HEAL);
+      this.bandages--;
+      this.audio.ui();
+      this.hud.setHealth(this.hp, this.myMaxHp(), true);
+      this.hud.flash("🩹 Vendado");
+    }
+    this.hud.setBandages(this.bandages, this.bandaging, this.bandageT / BANDAGE_DUR);
   }
 
   /** Soldiers (on foot) resupply AMMO by walking over a street crate. The pickup is broadcast so every
@@ -1704,7 +2168,23 @@ export class Game {
     this.ammoCrates.take(i, this.time);
     if (this.net.connected) this.net.send({ t: "ammo", i });
     this.hud.flash("📦 Munición reabastecida");
-    this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon]);
+    this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon], classLoadout(this.role, this.myClass));
+    this.audio.ui();
+  }
+
+  /** Soldiers restock BANDAGES by walking over a red medkit crate (broadcast like ammo so peers hide the
+   *  same one; respawns on a cooldown). Drones don't bandage. */
+  private medkitFrame(): void {
+    if (this.mode === "free") return;
+    this.medkits.update(this.time);                               // tick respawns on every client
+    if (!(this.player instanceof Walker) || this.hp <= 0 || this.bandages >= BANDAGE_MAX) return;
+    const p = this.player.camera.position;
+    const i = this.medkits.nearestLive(p.x, p.z);
+    if (i < 0) return;
+    this.medkits.take(i, this.time);
+    this.bandages = Math.min(BANDAGE_MAX, this.bandages + 2);
+    if (this.net.connected) this.net.send({ t: "medkit", i });
+    this.hud.flash("🩹 Botiquín recogido");
     this.audio.ui();
   }
 
@@ -1727,9 +2207,9 @@ export class Game {
     this.combatHudT -= dt;
     if (this.combatHudT <= 0) {
       this.combatHudT = 0.15;
-      this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon]);
+      this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon], classLoadout(this.role, this.myClass));
       this.hud.setKDA(this.myKills, this.myAssists, this.myDeaths);
-      this.hud.setTeam(this.remotes.peers(), this.role);
+      this.hud.setTeam(this.remotes.peers(), this.myTeam);
     }
   }
 
@@ -1851,6 +2331,13 @@ export class Game {
   }
 
   private onWheel(sign: number): void {
+    // while aiming a scoped weapon, the wheel cycles its zoom stops (e.g. 1.8× ↔ 3.6×) instead of the brush
+    if (this.scopedNow) {
+      const mags = WEAPONS[this.weapon].zoomMags!;
+      this.zoomLevel = (this.zoomLevel + (sign > 0 ? 1 : -1) + mags.length) % mags.length;
+      this.hud.flash(`🔭 ${mags[this.zoomLevel]}×`);
+      return;
+    }
     this.brush = Math.max(0, Math.min(3, this.brush - sign));
     this.hud.flash(`Brocha ${this.brush * 2 + 1}³`);
   }
@@ -1872,13 +2359,14 @@ export class Game {
   }
 
   private onKey(code: string): void {
+    if (code === "tab") { this.minimapBig = !this.minimapBig; return; } // enlarge/shrink the minimap
     if (code === "keyo") { this.openSettings(); return; } // visual settings panel (all modes)
     if (code === "keyk") { this.cycleQuality(); return; } // graphics quality (all modes)
     if (code === "keym") { this.hud.flash(this.audio.toggleMute() ? "🔇 Silencio" : "🔊 Sonido"); return; } // mute toggle
     if (code === "keyf") { this.toggleFlashlight(); return; } // flashlight (all modes/roles)
     if (this.mode !== "free") {
-      // Combat (vs/dvh): digit keys pick from the team weapon loadout (drone: 1-3, human: 1-4).
-      const lo = roleLoadout(this.role);
+      // Combat (vs/dvh): digit keys pick from the CLASS weapon loadout.
+      const lo = classLoadout(this.role, this.myClass);
       const idx = ["digit1", "digit2", "digit3", "digit4", "digit5", "digit6"].indexOf(code);
       if (idx >= 0 && idx < lo.length) { this.selectWeapon(lo[idx]); return; }
       if (code === "keyv") { this.meleeAttack(); return; } // melee (humans)
@@ -1990,7 +2478,9 @@ export class Game {
     if (this.acc > FIXED_DT) this.acc = 0;
 
     const _tctrl = performance.now();
-    this.player.update(dt, this.input); // player controller — the drone's KinematicCharacterController queries the building colliders
+    this.applyAds(); // reconcile scope zoom + overlay before the controller eases its FOV this frame
+    if (this.hp > 0) this.player.update(dt, this.input); // FREEZE while dead: the body only moves inside update(),
+    // so skipping it holds the player in place (no drift/look) until respawn repositions them
     if (this.firing && this.input.locked) this.autoFire(); // hold LMB → machine-gun the primary weapon
     // fall damage (human, >1 storey) always — a human only exists in the combat modes anyway. Drone
     // ram-impact (fast into a wall) only in combat, so the sandbox doesn't punish flying/building.
@@ -2061,7 +2551,12 @@ export class Game {
     const _tfx = performance.now();
     this.combatFrame(dt); // team weapons: base recharge, drone battery, HUD panels
     this.ammoFrame();     // soldier ammo-crate pickups on the streets + crate respawns
+    this.medkitFrame();   // soldier medkit pickups (bandage restock) + crate respawns
+    this.bandageFrame(dt); // soldier channeled self-heal (hold B)
     this.aiFrame(dt);     // co-op: the host simulates + broadcasts the enemy drone swarm; peers render it
+    this.smokeFrame();    // sustain active smoke clouds + drop expired ones (LOS blockers)
+    this.miniDroneFrame(dt); // fly the soldier's interceptor swarm toward the nearest drones
+    this.minimapFrame(dt); // heading-up radar: friends/enemies in range + shot rays
     this.audioFrame();
     this.interiorLights?.update(this.time); // flicker the interior lights
     this.scenery?.update(dt);               // drift the clouds
@@ -2072,7 +2567,8 @@ export class Game {
       battery: this.battery,
     });
     this.hud.update(dt);
-    if (this.hp <= 0) this.hud.showDeath(this.respawnAt - this.time); else this.hud.hideDeath(); // death overlay + live respawn countdown
+    // death overlay + live respawn countdown — but NOT once the session is over (the game-over screen is up)
+    if (!this.matchOver) { if (this.hp <= 0) this.hud.showDeath(this.respawnAt - this.time); else this.hud.hideDeath(); }
     this.statsT -= dt; // the stats readout doesn't need a 60Hz DOM write
     if (this.statsT <= 0) {
       this.statsT = 0.16;
@@ -2113,6 +2609,7 @@ export class Game {
       if (sh.roll !== 0) cam.rotateZ(sh.roll);
       this.gpuTimer.begin();
       this.renderer.render(this.player.camera);
+      if (this.scopedNow) this.renderer.renderScope(this.player.camera, this.scopeFov); // optical zoom inside the scope circle only
       this.gpuTimer.end();
       if (sh.roll !== 0) cam.rotateZ(-sh.roll);
       cam.position.x -= sh.dx; cam.position.y -= sh.dy; cam.position.z -= sh.dz;

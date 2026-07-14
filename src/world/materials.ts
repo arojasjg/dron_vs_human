@@ -29,7 +29,7 @@ export interface MaterialDef {
 
 export const MATERIALS: Record<MaterialId, MaterialDef> = {
   wood: {
-    id: "wood", name: "Madera", color: 0xa9743b, roughness: 0.85, metalness: 0.0,
+    id: "wood", name: "Madera", color: 0xb27b3e, roughness: 0.8, metalness: 0.0,
     density: 550, strength: 35, hp: 2, restitution: 0.15, friction: 0.9, opacity: 1, shatters: false,
   },
   concrete: {
@@ -37,15 +37,15 @@ export const MATERIALS: Record<MaterialId, MaterialDef> = {
     density: 2400, strength: 130, hp: 4, restitution: 0.05, friction: 0.95, opacity: 1, shatters: false,
   },
   brick: {
-    id: "brick", name: "Ladrillo", color: 0xa64b36, roughness: 0.9, metalness: 0.0,
+    id: "brick", name: "Ladrillo", color: 0xb5503a, roughness: 0.84, metalness: 0.0,
     density: 1900, strength: 95, hp: 3, restitution: 0.08, friction: 0.9, opacity: 1, shatters: false,
   },
   // Windows carry a faint interior glow (emissive) so the skyline reads as inhabited even in shade — a big
   // "living city" cue at zero fill cost, and it survives the loss of IBL reflections on the pane.
   glass: {
-    id: "glass", name: "Vidrio", color: 0x9fd6e6, roughness: 0.05, metalness: 0.0,
+    id: "glass", name: "Vidrio", color: 0x9fd6e6, roughness: 0.05, metalness: 0.15,
     density: 2500, strength: 10, hp: 1, restitution: 0.1, friction: 0.4, opacity: 0.35, shatters: true,
-    emissive: 0x1c3a45, emissiveIntensity: 1.0,
+    emissive: 0x214654, emissiveIntensity: 1.15,
   },
   // metalness dropped 0.9→0.6 + roughness 0.3→0.45: without IBL a near-pure metal has nothing to reflect
   // and reads almost black — a broader rough highlight from the direct sun keeps it looking like brushed steel.
@@ -81,15 +81,15 @@ export const MATERIALS: Record<MaterialId, MaterialDef> = {
   // Glossy vehicle paint — physically like sheet metal (so destruction is unchanged), only the colour
   // + a car-paint sheen differ. A vehicle picks one per body (seeded) for a varied street.
   car_red: {
-    id: "car_red", name: "Rojo", color: 0xb23a2e, roughness: 0.35, metalness: 0.45,
+    id: "car_red", name: "Rojo", color: 0xc23528, roughness: 0.24, metalness: 0.6,
     density: 7800, strength: 320, hp: 5, restitution: 0.2, friction: 0.6, opacity: 1, shatters: false,
   },
   car_blue: {
-    id: "car_blue", name: "Azul", color: 0x2f5b8a, roughness: 0.35, metalness: 0.45,
+    id: "car_blue", name: "Azul", color: 0x2f5f96, roughness: 0.24, metalness: 0.6,
     density: 7800, strength: 320, hp: 5, restitution: 0.2, friction: 0.6, opacity: 1, shatters: false,
   },
   car_teal: {
-    id: "car_teal", name: "Verde", color: 0x2f7f6e, roughness: 0.35, metalness: 0.45,
+    id: "car_teal", name: "Verde", color: 0x2f8574, roughness: 0.24, metalness: 0.6,
     density: 7800, strength: 320, hp: 5, restitution: 0.2, friction: 0.6, opacity: 1, shatters: false,
   },
   // Rubber tyre — dark, matte, tough.
@@ -99,7 +99,7 @@ export const MATERIALS: Record<MaterialId, MaterialDef> = {
   },
   // Tree foliage — light, weak, shatters into leaf dust. A tree's canopy breaks off with almost any hit.
   leaves: {
-    id: "leaves", name: "Follaje", color: 0x4a7a3a, roughness: 0.9, metalness: 0.0,
+    id: "leaves", name: "Follaje", color: 0x4f8a3c, roughness: 0.88, metalness: 0.0,
     density: 300, strength: 18, hp: 1, restitution: 0.0, friction: 0.8, opacity: 1, shatters: true,
   },
   // Conifer needles — a darker, cooler green for pines. Physically identical to leaves (so destruction is

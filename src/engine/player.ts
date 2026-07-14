@@ -5,8 +5,8 @@ import type { Input } from "./input";
 import { droneBank, hoverSway, speedFov, DRONE_FOV_BASE, DRONE_FOV_BOOST } from "./cameraFeel";
 
 const SENS = 0.0022;
-const CRUISE = 9.0;        // m/s normal flight speed
-const BOOST = 20.0;        // m/s with shift held
+const CRUISE = 18.0;       // m/s normal flight speed
+const BOOST = 40.0;        // m/s with shift held
 const RESPONSE = 6.5;      // how fast velocity chases the target (drone inertia: lower = floatier)
 const VERT_SCALE = 0.65;   // a drone climbs/descends slower than it translates (rotor thrust limit)
 const EYE = 0.0;     // camera sits at the drone body centre
@@ -29,6 +29,7 @@ export class Player {
   private lastBlocked = 0;   // fraction of the last move blocked by a wall (1 = fully stopped)
   private lastSpeedH = 0;    // horizontal speed on the last frame (m/s)
   private time = 0;          // accumulates dt for the idle hover sway
+  private speedMul = 1;      // per-class flight-speed multiplier (interceptor > 1, armor < 1)
 
   private readonly world: RAPIER.World;
   private readonly body: RAPIER.RigidBody;
@@ -93,6 +94,10 @@ export class Player {
   /** Current 3D speed (m/s) — drives the drone's battery drain (faster = more). */
   speed(): number { return Math.hypot(this.vel.x, this.vel.y, this.vel.z); }
 
+  /** Per-class flight tuning: scales cruise/boost speed (1 = the base drone). jumpMul is ignored
+   *  (drones don't jump) — the signature matches Walker.setClassMods so Game can call it uniformly. */
+  setClassMods(speedMul: number, _jumpMul: number): void { this.speedMul = speedMul; }
+
   // Uniform aim/stance accessors so Game broadcasts the same fields for drone + human (drone: no stance).
   get lookYaw(): number { return this.yaw; }
   get lookPitch(): number { return this.pitch; }
@@ -121,7 +126,7 @@ export class Player {
     if (input.isDown("keyc")) dy -= 1; // descend (C — Ctrl would trigger browser Ctrl+W/Ctrl+digit)
 
     const len = Math.hypot(dx, dy, dz);
-    const speed = (input.isDown("shiftleft") || input.isDown("shiftright")) ? BOOST : CRUISE;
+    const speed = ((input.isDown("shiftleft") || input.isDown("shiftright")) ? BOOST : CRUISE) * this.speedMul;
     const tx = len > 1e-4 ? (dx / len) * speed : 0;
     const ty = len > 1e-4 ? (dy / len) * speed * VERT_SCALE : 0; // drones climb/descend slower
     const tz = len > 1e-4 ? (dz / len) * speed : 0;
@@ -139,9 +144,10 @@ export class Player {
     const dH = Math.hypot(desired.x, desired.z), aH = Math.hypot(corr.x, corr.z);
     this.lastBlocked = dH > 1e-4 ? 1 - aH / dH : 0;
     this.lastSpeedH = Math.hypot(this.vel.x, this.vel.z);
-    // crash → bleed off speed so a wall-pinned drone isn't hit every frame. INVARIANT: this 12 must
-    // stay BELOW falldamage's IMPACT_MIN (14) — the re-eased speed then never re-crosses 14 → one hit.
-    if (this.lastBlocked > 0.6 && this.lastSpeedH > 12) this.vel.multiplyScalar(0.15);
+    // crash → bleed off speed so a wall-pinned drone isn't hit every frame. INVARIANT: this 20 must stay
+    // ABOVE CRUISE (18, so a cruise into a wall just stops) and BELOW falldamage's IMPACT_MIN (26) — the
+    // re-eased speed (BOOST 40 × 0.15 = 6) then never re-crosses 26 → one hit per boost-crash.
+    if (this.lastBlocked > 0.6 && this.lastSpeedH > 20) this.vel.multiplyScalar(0.15);
     const t = this.body.translation();
     const np = { x: t.x + corr.x, y: t.y + corr.y, z: t.z + corr.z };
     this.body.setNextKinematicTranslation(np);

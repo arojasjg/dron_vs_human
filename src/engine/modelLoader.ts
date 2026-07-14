@@ -10,6 +10,7 @@ export interface ModelInstance {
   scene: THREE.Group;                              // a skinned clone, ready to add to the world
   mixer: THREE.AnimationMixer;                     // advance() it each frame
   actions: Map<string, THREE.AnimationAction>;     // one action per animation clip, keyed by clip name
+  materials: THREE.MeshStandardMaterial[];         // this instance's OWN standard materials → tint without touching the shared cache
 }
 
 const loader = new GLTFLoader();
@@ -36,16 +37,28 @@ export async function instanceModel(url: string): Promise<ModelInstance | null> 
   const gltf = await loadGltf(url);
   if (!gltf) return null;
   const scene = cloneSkinned(gltf.scene) as THREE.Group;
+  // cloneSkinned shares geometry AND materials by reference, so tinting a clone would tint EVERY instance.
+  // Clone each mesh's material(s) per instance and collect the standard ones so the caller can recolour this
+  // avatar's team/class accent (emissive) in isolation — a cheap per-instance material clone, geometry stays shared.
+  const materials: THREE.MeshStandardMaterial[] = [];
   scene.traverse((o) => {
-    if (!(o as THREE.Mesh).isMesh) return;
-    o.castShadow = true;
-    o.receiveShadow = true; // so a soldier standing in building shade is grounded, not pasted on
-    o.frustumCulled = false;
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true; // so an avatar standing in building shade is grounded, not pasted on
+    mesh.frustumCulled = false;
+    const mat = mesh.material;
+    if (Array.isArray(mat)) {
+      mesh.material = mat.map((m) => { const c = m.clone(); if ((c as THREE.MeshStandardMaterial).isMeshStandardMaterial) materials.push(c as THREE.MeshStandardMaterial); return c; });
+    } else if (mat) {
+      const c = mat.clone(); mesh.material = c;
+      if ((c as THREE.MeshStandardMaterial).isMeshStandardMaterial) materials.push(c as THREE.MeshStandardMaterial);
+    }
   });
   const mixer = new THREE.AnimationMixer(scene);
   const actions = new Map<string, THREE.AnimationAction>();
   for (const clip of gltf.animations) actions.set(clip.name, mixer.clipAction(clip));
-  return { scene, mixer, actions };
+  return { scene, mixer, actions, materials };
 }
 
 /** Case-insensitive lookup of an action by any of the given clip-name candidates (models vary in naming). */

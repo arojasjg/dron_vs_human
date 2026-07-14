@@ -10,7 +10,7 @@ export function humanFallDamage(fallDistance: number): number {
   return Math.round((fallDistance - FALL_SAFE) * FALL_DMG_PER_M);
 }
 
-const IMPACT_MIN = 14;            // m/s — a fast ram; CRUISE (9) is safe, BOOST (20) hurts
+const IMPACT_MIN = 26;            // m/s — a fast ram; CRUISE (18) is safe, BOOST (40) hurts
 const IMPACT_BLOCK_MIN = 0.6;     // fraction of the intended move that was blocked (a real wall hit)
 const IMPACT_DMG_PER_MS = 6;      // HP lost per m/s over the threshold
 

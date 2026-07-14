@@ -11,7 +11,7 @@ import type { VoxelGrid } from "../world/voxelGrid";
 const SENS = 0.0022;
 const HALF = 0.55, RADIUS = 0.3; // capsule → ~1.7 m tall human
 const EYE = 0.6;                 // camera above the capsule centre (roughly eye level)
-const WALK = 4.5, RUN = 7.5;     // m/s
+const WALK = 9.0, RUN = 15.0;    // m/s
 const JUMP = 4.6;                // m/s launch → ~1 m hop
 const STEP = 0.35;               // max autostep height (climbs the 0.25 m voxel stairs)
 const CAM_SMOOTH = 0.30;         // camera-height easing → smooth stair descent (body stays on the steps)
@@ -20,6 +20,11 @@ const FEET = HALF + RADIUS;      // capsule centre -> foot contact point
 const CLIMB_DUR = 0.8;           // seconds to clamber through a window (movement locked meanwhile)
 
 const _add = new THREE.Vector3();
+
+/** World-space rectangle the human is confined to (the forest ring's inner faces). Keeps a soldier from
+ *  escaping the sealed map by climbing a perimeter building and jumping the treeline. Omitted in unit
+ *  tests (no confinement). Structural type → the game passes PLAY_BOUNDS from the world builder. */
+export interface PlayBounds { minX: number; maxX: number; minZ: number; maxZ: number; }
 
 /**
  * Walking-human controller: gravity + jump + capsule-vs-voxel collision. Uses a Rapier kinematic
@@ -44,6 +49,10 @@ export class Walker {
   private proneWasDown = false;
   private smoothEye = EYE;  // eased eye height so changing stance glides instead of snapping
   private readonly grid?: VoxelGrid; // read by the window-vault detector (optional; tests omit it)
+  private readonly bounds?: PlayBounds; // playable-area seal (optional; tests omit it → no confinement)
+  private adsFov: number | null = null; // aim-down-sights zoom FOV (scoped weapon); null = hip-fire (base FOV)
+  private speedMul = 1;              // per-class walk/run multiplier (scout > 1, heavy < 1)
+  private jumpMul = 1;               // per-class jump multiplier
   private climbing = false;          // mid window-vault: movement input is ignored, body is scripted
   private climbT = 0;
   private climbFrom = { x: 0, y: 0, z: 0 };
@@ -60,9 +69,10 @@ export class Walker {
   private readonly controller: RAPIER.KinematicCharacterController;
   private readonly onResize: () => void;
 
-  constructor(physics: Physics, grid?: VoxelGrid) {
+  constructor(physics: Physics, grid?: VoxelGrid, bounds?: PlayBounds) {
     this.world = physics.world;
     this.grid = grid;
+    this.bounds = bounds;
     const aspect = typeof window !== "undefined" ? window.innerWidth / window.innerHeight : 1.5;
     this.camera = new THREE.PerspectiveCamera(HUMAN_FOV, aspect, 0.05, 250);
 
@@ -123,7 +133,7 @@ export class Walker {
    * and `isGrounded` after the world steps.
    */
   move(dt: number, vx: number, vz: number, jump: boolean): void {
-    if (jump && !this.jumpWasDown && this.grounded) { this.vy = JUMP; this.audioJump = true; } // only on a fresh press
+    if (jump && !this.jumpWasDown && this.grounded) { this.vy = JUMP * this.jumpMul; this.audioJump = true; } // only on a fresh press
     this.jumpWasDown = jump;
     this.vy += GRAVITY * dt;
     // snap-to-ground would yank a small upward jump step back down, so disable it while rising;
@@ -148,14 +158,34 @@ export class Walker {
     } else {
       this.fallPeakY = Math.max(this.fallPeakY, t.y);
     }
-    this.body.setNextKinematicTranslation({ x: t.x + m.x, y: t.y + m.y, z: t.z + m.z });
+    let nx = t.x + m.x, nz = t.z + m.z;
+    // Hard playable-area seal: the hedge stops you on the ground, but a roof-jump could clear it — clamp the
+    // XZ target to the ring's inner faces (radius-inset) so no climb/jump at any height carries you out.
+    const b = this.bounds;
+    if (b) {
+      nx = Math.min(b.maxX - RADIUS, Math.max(b.minX + RADIUS, nx));
+      nz = Math.min(b.maxZ - RADIUS, Math.max(b.minZ + RADIUS, nz));
+    }
+    this.body.setNextKinematicTranslation({ x: nx, y: t.y + m.y, z: nz });
   }
+
+  /** Aim-down-sights: pass a scoped weapon's zoom FOV to scope in, or null to zoom back out. Steadies the
+   *  aim (look sensitivity scales down with the zoom) and slows the walk while scoped. */
+  setAds(fov: number | null): void { this.adsFov = fov; }
+  /** Per-class movement tuning: scales walk/run speed and jump launch (1 = the base soldier). */
+  setClassMods(speedMul: number, jumpMul: number): void { this.speedMul = speedMul; this.jumpMul = jumpMul; }
+  /** Whether the sights are (nearly) scoped in — the game gates the scope overlay on this. */
+  get aiming(): boolean { return this.adsFov != null; }
 
   update(dt: number, input: Input): void {
     if (input.locked) {
       const d = input.consumeMouseDelta();
-      this.yaw -= d.x * SENS;
-      this.pitch -= d.y * SENS;
+      // aiming a scope STEADIES the look: sensitivity scales with the optical zoom (the scope circle
+      // magnifies, so a small turn moves a lot inside it). The main camera FOV is left UNCHANGED — the
+      // zoom is a separate circular scope render (renderer.renderScope), so the periphery stays 1×.
+      const sens = SENS * ((this.adsFov ?? HUMAN_FOV) / HUMAN_FOV);
+      this.yaw -= d.x * sens;
+      this.pitch -= d.y * sens;
       const lim = Math.PI / 2 - 0.02;
       this.pitch = Math.max(-lim, Math.min(lim, this.pitch));
     }
@@ -191,7 +221,8 @@ export class Walker {
     const si = stanceInfo(this.stance);
 
     const len = Math.hypot(dx, dz);
-    const speed = ((input.isDown("shiftleft") || input.isDown("shiftright")) ? RUN : WALK) * si.speedMul;
+    const adsSlow = this.adsFov != null ? 0.55 : 1; // scoped in → move slower (steady the shot)
+    const speed = ((input.isDown("shiftleft") || input.isDown("shiftright")) ? RUN : WALK) * si.speedMul * adsSlow * this.speedMul;
     const vx = len > 1e-4 ? (dx / len) * speed : 0;
     const vz = len > 1e-4 ? (dz / len) * speed : 0;
 
@@ -209,7 +240,7 @@ export class Walker {
     const stepIdx = Math.floor(this.bobPhase / Math.PI);          // one footfall per π of walk phase
     if (stepIdx !== this.prevStepIdx && this.grounded && spd > 0.6) this.audioStep = true;
     this.prevStepIdx = stepIdx;
-    this.audioRun = spd > 6;
+    this.audioRun = spd > 12;
     const bob = headBob(this.bobPhase, spd, RUN);
     this.smoothEye += (si.eye - this.smoothEye) * (1 - Math.exp(-8 * dt)); // glide between stance eye heights
     this.camera.position.set(p.x + bob.dx * rx, this.smoothCamY + this.smoothEye + bob.dy, p.z + bob.dx * rz);

@@ -2,10 +2,10 @@
 // physics world, a renderer, or the network. game.ts wires these into firing/HUD/recharge.
 import type { Role } from "./roles";
 
-export type Weapon = "mg" | "grenade" | "kamikaze" | "shotgun" | "glauncher" | "net";
+export type Weapon = "mg" | "grenade" | "kamikaze" | "shotgun" | "glauncher" | "net" | "sniper" | "smoke" | "swarm" | "smg" | "lmg" | "dmr";
 
 /** How a weapon fires — game.ts maps each kind to a Projectiles call (or a self-detonation). */
-export type FireKind = "bullet" | "shotgun" | "grenade" | "explosive" | "net" | "kamikaze";
+export type FireKind = "bullet" | "shotgun" | "grenade" | "explosive" | "net" | "kamikaze" | "smoke" | "swarm";
 
 export interface WeaponSpec {
   name: string;        // HUD label (Spanish)
@@ -16,6 +16,12 @@ export interface WeaponSpec {
   maxReserve: number;  // spare rounds, refilled at the team base
   pellets?: number;    // shotgun: projectiles per shot
   playerDmg?: number;  // HP a direct bullet hit deals to a player (bullet/shotgun weapons)
+  scope?: boolean;      // right-click aims down a scope (optical zoom inside the circle + steadier aim)
+  zoomMags?: number[];  // ADS magnification factors (e.g. 5 = 5×); the wheel cycles them while scoped
+  aiRanges?: number[];  // co-op: hitscan reach (m) vs bots at each matching zoom level (more zoom = longer reach)
+  botDmg?: number;      // co-op: HP dealt to an AI bot per hitscan hit (default 1 — a bot has 3)
+  bulletSpeed?: number; // tracer projectile speed (m/s, visual only — the hit is hitscan). Default 120
+  boltAction?: boolean; // fires ONE round per trigger pull (no auto-fire while held) + a bolt-cycle reload sound
 }
 
 export const WEAPONS: Record<Weapon, WeaponSpec> = {
@@ -23,10 +29,19 @@ export const WEAPONS: Record<Weapon, WeaponSpec> = {
   mg:        { name: "Metralleta",    icon: "🔫", fire: "bullet",    cooldown: 0.08, magSize: 40, maxReserve: 200, playerDmg: 11 },
   grenade:   { name: "Granada",       icon: "💣", fire: "grenade",   cooldown: 1.2,  magSize: 2,  maxReserve: 4 },
   kamikaze:  { name: "Kamikaze",      icon: "☢️", fire: "kamikaze",  cooldown: 0.0,  magSize: 1,  maxReserve: 0 },
-  // Human arsenal — MG, spread shotgun, explosive grenade launcher, and a net to catch a drone.
+  // Human arsenal — MG, spread shotgun, explosive grenade launcher, a net to catch a drone, and a
+  // scoped bolt-action sniper: slow + small mag, but one clean hit downs a drone (80 HP) at any range.
   shotgun:   { name: "Escopeta",      icon: "🎯", fire: "shotgun",   cooldown: 0.8,  magSize: 6,  maxReserve: 30, pellets: 9, playerDmg: 50 },
   glauncher: { name: "Lanzagranadas", icon: "🎆", fire: "explosive", cooldown: 1.0,  magSize: 4,  maxReserve: 12 },
-  net:       { name: "Lanzarredes",   icon: "🕸️", fire: "net",       cooldown: 2.5,  magSize: 2,  maxReserve: 4 },
+  net:       { name: "Lanzarredes",   icon: "🕸️", fire: "net",       cooldown: 2.5,  magSize: 2,  maxReserve: 4 }, // DORMANT: replaced by the swarm in the human loadout
+  sniper:    { name: "Francotirador", icon: "🔭", fire: "bullet",    cooldown: 1.3,  magSize: 5,  maxReserve: 20, playerDmg: 85, scope: true, zoomMags: [5, 10], aiRanges: [70, 110], botDmg: 3, bulletSpeed: 340, boltAction: true },
+  smoke:     { name: "Granada de humo", icon: "💨", fire: "smoke",   cooldown: 3.0,  magSize: 2,  maxReserve: 4 }, // deploys a sightline-blocking cloud
+  swarm:     { name: "Enjambre",      icon: "🐝", fire: "swarm",     cooldown: 6.0,  magSize: 1,  maxReserve: 3 }, // ~5 homing interceptor mini-drones
+  // Class weapons — assigned per class (roles.ts), not by role. All fire "bullet" so they reuse the
+  // existing hitscan/broadcast path (no new net message type). Their identities live in the stats:
+  smg:       { name: "Subfusil",      icon: "⚡", fire: "bullet",    cooldown: 0.05, magSize: 30,  maxReserve: 240, playerDmg: 8,  botDmg: 1 }, // scout/interceptor: shreds up close, useless far (falloff)
+  lmg:       { name: "Ametralladora", icon: "💢", fire: "bullet",    cooldown: 0.10, magSize: 100, maxReserve: 300, playerDmg: 15, botDmg: 2 }, // heavy: sustained suppression, huge mag
+  dmr:       { name: "Tiro medido",   icon: "🎖️", fire: "bullet",    cooldown: 0.45, magSize: 12,  maxReserve: 72,  playerDmg: 45, botDmg: 2, scope: true, zoomMags: [3], aiRanges: [55], bulletSpeed: 240 }, // marksman/artillery: semi-auto punch between mg and sniper
 };
 
 /** Melee reach test: is target (p) within `range` metres of attacker (a) AND inside the swing cone
@@ -61,14 +76,21 @@ export function rayHitsSphere(
  *  strafing drone) and fades with range; the MG is flat at all ranges. An unknown weapon → 1.0, so an
  *  older client that doesn't tag its shots degrades to the previous behaviour (version-safe). Pure. */
 export function bulletFalloff(weapon: string, dist: number): number {
-  if (weapon !== "shotgun") return 1;
-  if (dist <= 8) return 2.4;                               // point-blank punch → out-DPSes the MG up close
-  if (dist >= 30) return 0.3;                              // ineffective past mid-range
-  return 2.4 + (0.3 - 2.4) * ((dist - 8) / (30 - 8));      // linear taper 2.4 → 0.3
+  if (weapon === "shotgun") {
+    if (dist <= 8) return 2.4;                              // point-blank punch → out-DPSes the MG up close
+    if (dist >= 30) return 0.3;                             // ineffective past mid-range
+    return 2.4 + (0.3 - 2.4) * ((dist - 8) / (30 - 8));     // linear taper 2.4 → 0.3
+  }
+  if (weapon === "smg") {                                   // scout/interceptor niche: lethal close, feeble far
+    if (dist <= 10) return 1.3;                             // out-DPSes the mg up close
+    if (dist >= 28) return 0.35;                            // falls off hard past mid-range
+    return 1.3 + (0.35 - 1.3) * ((dist - 10) / (28 - 10));  // linear taper 1.3 → 0.35
+  }
+  return 1;                                                 // mg/lmg/dmr/sniper flat; unknown → version-safe 1.0
 }
 
 const DRONE_LOADOUT: Weapon[] = ["mg", "grenade", "kamikaze"];
-const HUMAN_LOADOUT: Weapon[] = ["mg", "shotgun", "glauncher", "net"];
+const HUMAN_LOADOUT: Weapon[] = ["mg", "shotgun", "glauncher", "swarm", "sniper", "smoke"];
 
 /** The weapons a team may carry (drones deliberately get fewer — "pocas armas"). */
 export function roleLoadout(role: Role): Weapon[] {

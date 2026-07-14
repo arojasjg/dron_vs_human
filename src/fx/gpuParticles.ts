@@ -190,6 +190,7 @@ const RENDER_FRAG = DEBRIS_COLOR + /* glsl */ `
       base = mix(vec3(1.0, 0.55, 0.12), vec3(1.0, 0.96, 0.75), smoothstep(0.16, 0.0, r2));
     }
     float a = clamp(vLife*1.6, 0.0, 1.0) * smoothstep(0.25, 0.0, r2);
+    if (vType < 0.4) a *= 0.6; // dust + smoke: more translucent so the cloud reads as soft haze, not an opaque wall
     gl_FragColor = vec4(base, a);
   }
 `;

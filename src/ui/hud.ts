@@ -1,8 +1,15 @@
 import { MATERIALS, type MaterialId } from "../world/materials";
-import type { Role } from "../net/roles";
+import { classList, classStats, classLoadout, TEAM_LABEL, type Role } from "../net/roles";
 import { WEAPONS, roleLoadout, type Weapon, type Ammo } from "../net/weapons";
+import { MAP_SIZES } from "../build/prefabs";
+import { ClassPreview } from "./classPreview";
 import type { Quality } from "../engine/quality";
 import type { VisualSettings } from "../engine/settings";
+import { toRadar, compassMarks } from "./radar";
+
+/** A minimap dot (a friend/enemy avatar) and a recent shot ray (from a shooter toward its fire direction). */
+export interface RadarBlip { x: number; z: number; enemy: boolean; }
+export interface RadarShot { x: number; z: number; dx: number; dz: number; life: number; }
 
 export type Tool = "shoot" | "grenade" | "cannon" | "missile" | "build" | "erase";
 // Selectable modes: "coop" (soldiers vs an AI drone swarm) and "dvh" (PvP, drone vs human). "vs"/"free" remain
@@ -14,14 +21,24 @@ export interface MenuCallbacks {
   create: (mode: Mode) => void;
   join: (code: string) => void;
 }
-/** Lobby callbacks: pick your role (PvP), the host starts the match, or leave back to the menu. */
+/** Lobby callbacks: pick your role/team/class (PvP), the host starts the match, or leave back to the menu. */
 export interface LobbyCallbacks {
   pick: (role: Role) => void;
   start: () => void;
   leave: () => void;
+  toggleHardcore?: () => void; // co-op host: flip permadeath vs respawn-while-a-teammate-lives
+  pickTeam?: (team: 0 | 1) => void; // PvP: choose Rojo/Azul (independent of role)
+  pickClass?: (cls: string) => void; // PvP: choose the class within the chosen role
+  pickMapSize?: (size: string) => void; // host: choose the map size preset (all modes)
 }
 /** One roster row for the lobby list. */
 export interface LobbyRow { id: number; role: Role | null; }
+
+/** End-of-match overlay callbacks: replay the match, or drop back to the start menu. */
+export interface GameOverCallbacks {
+  restart: () => void;
+  menu: () => void;
+}
 
 /** Callbacks the settings menu invokes on the game. `auto` returns the detected settings so the menu can
  *  repaint its controls to match. */
@@ -56,6 +73,7 @@ const HELP = `
 `;
 
 export class Hud {
+  private readonly minimap: HTMLCanvasElement;
   private readonly tool: HTMLElement;
   private readonly mat: HTMLElement;
   private readonly stats: HTMLElement;
@@ -68,6 +86,11 @@ export class Hud {
   private readonly win: HTMLElement;
   private readonly score: HTMLElement;
   private readonly weaponEl: HTMLElement;
+  private classEl!: HTMLElement;          // class indicator next to the weapon bar
+  private bandageEl!: HTMLElement;        // bandage count + channel progress
+  private lobbyCb: LobbyCallbacks | null = null; // held so updateLobby can wire the rebuilt class buttons
+  private gameOverCb: GameOverCallbacks | null = null; // held so the game-over overlay's buttons stay wired across replays
+  private preview: ClassPreview | null = null;   // lobby 3D class preview (dvh only; disposed on match start)
   private readonly battery: HTMLElement;
   private readonly batteryFill: HTMLElement;
   private readonly kda: HTMLElement;
@@ -92,6 +115,8 @@ export class Hud {
     this.win = document.getElementById("hud-win")!;
     this.score = document.getElementById("hud-score")!;
     this.weaponEl = document.getElementById("hud-weapon")!;
+    this.classEl = document.getElementById("hud-class")!;
+    this.bandageEl = document.getElementById("hud-bandage")!;
     this.battery = document.getElementById("hud-battery")!;
     this.batteryFill = document.getElementById("hud-battery-fill")!;
     this.kda = document.getElementById("hud-kda")!;
@@ -100,18 +125,63 @@ export class Hud {
     this.hit = document.getElementById("hud-hit")!;
     this.death = document.getElementById("hud-death")!;
     this.killfeedEl = document.getElementById("hud-killfeed")!;
+    this.minimap = document.getElementById("hud-minimap") as HTMLCanvasElement;
     this.help.innerHTML = HELP;
   }
 
-  /** Death overlay with a live respawn countdown (seconds left). Idempotent — safe to call every frame. */
-  showDeath(secondsLeft: number): void {
-    const s = Math.max(0, Math.ceil(secondsLeft));
-    const html = `☠ Derribado<small>Reapareces en ${s}…</small>`;
-    if (this.death.innerHTML !== html) this.death.innerHTML = html;
-    if (this.death.style.display !== "flex") this.death.style.display = "flex";
+  /** Draws the HEADING-UP minimap: a radar disc with the player at the centre (arrow = ahead), friends
+   *  (green) / enemies (red) within `range`, and fading shot rays. `big` doubles the size + range. */
+  drawMinimap(cx: number, cz: number, heading: number, blips: RadarBlip[], shots: RadarShot[], big: boolean): void {
+    const size = big ? 330 : 158, range = big ? 130 : 55, r = size / 2;
+    if (this.minimap.width !== size) { this.minimap.width = this.minimap.height = size; }
+    this.minimap.style.width = this.minimap.style.height = `${size}px`;
+    const g = this.minimap.getContext("2d")!;
+    g.clearRect(0, 0, size, size);
+    g.beginPath(); g.arc(r, r, r - 1, 0, Math.PI * 2); g.fillStyle = "rgba(4,12,8,.62)"; g.fill();
+    g.lineWidth = 1; g.strokeStyle = "rgba(107,255,158,.28)"; g.stroke();
+    g.strokeStyle = "rgba(107,255,158,.12)"; g.beginPath(); g.arc(r, r, r * 0.5, 0, Math.PI * 2); g.stroke();
+    for (const s of shots) { // shot rays: origin dot + a short line toward the fire direction
+      const from = toRadar(heading, cx, cz, s.x, s.z, range, size);
+      if (!from) continue;
+      const to = toRadar(heading, cx, cz, s.x + s.dx * 8, s.z + s.dz * 8, range, size);
+      g.strokeStyle = `rgba(255,182,56,${Math.min(0.9, s.life)})`; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(from[0], from[1]); g.lineTo(to ? to[0] : from[0], to ? to[1] : from[1]); g.stroke();
+      g.fillStyle = `rgba(255,182,56,${Math.min(1, s.life)})`; g.beginPath(); g.arc(from[0], from[1], 2.6, 0, Math.PI * 2); g.fill();
+    }
+    for (const b of blips) {
+      const p = toRadar(heading, cx, cz, b.x, b.z, range, size);
+      if (!p) continue;
+      g.fillStyle = b.enemy ? "#ff5236" : "#6bff9e";
+      g.beginPath(); g.arc(p[0], p[1], big ? 4 : 3, 0, Math.PI * 2); g.fill();
+    }
+    // compass: N/S/E/O around the edge, rotating with the heading so each letter points at its true world
+    // direction (the N is amber to orient at a glance). Heading-up → whichever way you face is at the top.
+    g.font = `${big ? 13 : 10}px ui-monospace, "Cascadia Code", Consolas, monospace`;
+    g.textAlign = "center"; g.textBaseline = "middle";
+    for (const m of compassMarks(heading, size, big ? 15 : 11)) {
+      g.fillStyle = m.label === "N" ? "#ffb638" : "rgba(107,255,158,.6)";
+      g.fillText(m.label, m.x, m.y);
+    }
+    g.fillStyle = "#c9ffe0"; // player arrow at the centre, pointing up (= ahead)
+    g.beginPath(); g.moveTo(r, r - 6); g.lineTo(r - 4.5, r + 5); g.lineTo(r + 4.5, r + 5); g.closePath(); g.fill();
   }
 
-  hideDeath(): void { if (this.death.style.display !== "none") this.death.style.display = "none"; }
+  /** Death overlay: fades the screen to dark FAST (~0.22s via the CSS transition) + a live respawn countdown.
+   *  Idempotent — safe to call every frame. */
+  showDeath(secondsLeft: number): void {
+    const finite = isFinite(secondsLeft) && secondsLeft >= 0; // <0 / ∞ → no respawn coming (permadeath / last up)
+    const html = finite
+      ? `☠ Derribado<small>Reapareces en ${Math.max(0, Math.ceil(secondsLeft))}…</small>`
+      : `☠ Derribado<small>Espectando…</small>`;
+    if (this.death.innerHTML !== html) this.death.innerHTML = html;
+    if (this.death.style.display !== "flex") this.death.style.display = "flex";
+    if (this.death.style.opacity !== "1") this.death.style.opacity = "1"; // trigger the fade-to-dark
+  }
+
+  hideDeath(): void {
+    if (this.death.style.opacity !== "0") this.death.style.opacity = "0";
+    if (this.death.style.display !== "none") this.death.style.display = "none"; // snap back clear on respawn
+  }
 
   /** Appends a killfeed line (auto-fades via CSS; keeps the last ~4). `mine` highlights our own kills. */
   killfeed(text: string, mine = false): void {
@@ -130,6 +200,18 @@ export class Hud {
     void this.dmg.offsetWidth;                    // force reflow so the fade restarts
     this.dmg.style.transition = "opacity .4s ease-out";
     this.dmg.style.opacity = "0";
+  }
+
+  /** A red arc at the screen edge pointing at where the hit came from. `angle`: 0 = ahead (top), + = right,
+   *  ±π = behind (bottom). Rotating the full-screen glow places it at that bearing; it then fades out. */
+  damageArrow(angle: number, intensity: number): void {
+    const el = document.getElementById("hud-dmgdir")!;
+    el.style.transition = "none";
+    el.style.transform = `rotate(${angle}rad)`;
+    el.style.opacity = String(Math.min(0.9, 0.4 + intensity * 0.5));
+    void el.offsetWidth;                          // reflow so the fade restarts each hit
+    el.style.transition = "opacity .7s ease-out";
+    el.style.opacity = "0";
   }
 
   /** A crosshair hit marker: a quick white X on a confirmed hit, red + bigger on a kill. */
@@ -162,27 +244,59 @@ export class Hud {
     this.modeEl.style.display = "block";
   }
 
+  /** Wires the end-of-match overlay's buttons (Replay / Menu). Called once by the game so the buttons stay
+   *  live across every game-over → replay cycle. */
+  onGameOver(cb: GameOverCallbacks): void { this.gameOverCb = cb; }
+
+  /** Builds the game-over card: the result message + the two action buttons (🔄 replay / 🏠 menu), wired to
+   *  the stored callbacks, and shows the overlay. Shared by the PvP win and co-op game-over screens. */
+  private renderGameOver(msg: string): void {
+    this.win.innerHTML =
+      `<div class="wcard"><div class="wmsg">${msg}</div>` +
+      `<div class="wact">` +
+      `<button id="hud-win-restart">🔄 Jugar de nuevo</button>` +
+      `<button id="hud-win-menu">🏠 Menú</button>` +
+      `</div></div>`;
+    (document.getElementById("hud-win-restart") as HTMLButtonElement).onclick = () => this.gameOverCb?.restart();
+    (document.getElementById("hud-win-menu") as HTMLButtonElement).onclick = () => this.gameOverCb?.menu();
+    this.win.style.display = "flex";
+  }
+
   /** Match-over overlay for Drones vs Humans. */
   showWin(winner: Role, myRole: Role): void {
     const team = winner === "drone" ? "los Drones 🤖" : "los Humanos 🧍";
     const head = winner === myRole ? "🏆 ¡Victoria!" : "☠ Derrota";
-    this.win.innerHTML = `${head}<br><span style="font-size:20px; font-weight:400">Ganaron ${team}</span>`;
-    this.win.style.display = "flex";
+    this.renderGameOver(`${head}<br><span class="wsub">Ganaron ${team}</span>`);
   }
 
   hideWin(): void { this.win.style.display = "none"; }
+
+  /** Co-op survival readout (reuses the score panel): drones killed this session + current wave. Called every
+   *  frame → idempotent: only touches the DOM when the numbers actually change. */
+  setCoopScore(kills: number, wave: number): void {
+    const html = `🤖 Drones eliminados <b>${kills}</b> &nbsp;·&nbsp; 🌊 Oleada <b>${Math.max(1, wave)}</b>`;
+    if (this.score.innerHTML !== html) this.score.innerHTML = html;
+    if (this.score.style.display !== "block") this.score.style.display = "block";
+  }
+
+  /** Co-op session-over overlay (reuses the win overlay): final drones-killed + waves survived. */
+  showGameOver(kills: number, wave: number): void {
+    this.renderGameOver(`☠ Fin de la partida<br>` +
+      `<span class="wsub">Drones eliminados: <b>${kills}</b> · Oleadas: <b>${Math.max(1, wave)}</b></span>`);
+  }
 
   setHealth(hp: number, max: number, show: boolean): void {
     this.health.style.display = show ? "block" : "none";
     const f = Math.max(0, Math.min(1, hp / max));
     this.healthFill.style.width = `${f * 100}%`;
-    this.healthFill.style.background = f > 0.5 ? "#35dd45" : f > 0.25 ? "#ddc233" : "#dd3a30";
+    this.healthFill.style.background = f > 0.5 ? "#6bff9e" : f > 0.25 ? "#ffb638" : "#ff5236";
     this.healthText.textContent = `${Math.ceil(hp)} HP`;
   }
 
-  /** Weapon bar: every loadout weapon as a numbered icon (active one lit) + the active ammo (mag/reserve). */
-  setWeapon(role: Role, active: Weapon, ammo: Ammo): void {
-    const slots = roleLoadout(role).map((w, i) =>
+  /** Weapon bar: every loadout weapon as a numbered icon (active one lit) + the active ammo (mag/reserve).
+   *  `loadout` overrides the role default so the CLASS arsenal renders (falls back to the role loadout). */
+  setWeapon(role: Role, active: Weapon, ammo: Ammo, loadout: Weapon[] = roleLoadout(role)): void {
+    const slots = loadout.map((w, i) =>
       `<span class="wslot${w === active ? " on" : ""}">${WEAPONS[w].icon}<i>${i + 1}</i></span>`).join("");
     const spec = WEAPONS[active];
     const low = ammo.mag === 0 && ammo.reserve === 0;
@@ -191,13 +305,21 @@ export class Hud {
     this.weaponEl.style.display = "block";
   }
 
+  /** Scope overlay: blurred/dimmed surroundings + a crisp ring & reticle (hiding the hip-fire dot) while ADS. */
+  setScope(on: boolean): void {
+    const v = on ? "1" : "0";
+    document.getElementById("hud-scope")!.style.opacity = v;
+    document.getElementById("hud-scope-ring")!.style.opacity = v;
+    document.getElementById("crosshair")!.style.display = on ? "none" : "block";
+  }
+
   /** Drone battery gauge. Pass frac < 0 to hide it (humans). */
   setBattery(frac: number): void {
     if (frac < 0) { this.battery.style.display = "none"; return; }
     this.battery.style.display = "block";
     const f = Math.max(0, Math.min(1, frac));
     this.batteryFill.style.width = `${f * 100}%`;
-    this.batteryFill.style.background = f > 0.5 ? "#38d0ff" : f > 0.2 ? "#ddc233" : "#dd3a30";
+    this.batteryFill.style.background = f > 0.5 ? "#38e6ff" : f > 0.2 ? "#ffb638" : "#ff5236";
   }
 
   /** Personal scoreboard: kills / assists / deaths. */
@@ -207,16 +329,34 @@ export class Hud {
   }
 
   /** Teammates' health (same team as `myRole`), as a small list of name + a mini health bar. */
-  setTeam(peers: { id: number; hp: number; maxHp: number; isHuman: boolean }[], myRole: Role): void {
-    const mine = peers.filter((p) => p.isHuman === (myRole === "human"));
+  setTeam(peers: { id: number; hp: number; maxHp: number; isHuman: boolean; team: number }[], myTeam: number): void {
+    const mine = peers.filter((p) => p.team === myTeam && p.id > 0); // AI bots (negative ids) are never teammates
     if (mine.length === 0) { this.team.style.display = "none"; return; }
-    const icon = myRole === "human" ? "🧍" : "🤖";
-    this.team.innerHTML = `<div class="thead">Equipo ${icon}</div>` + mine.map((p) => {
+    const tname = TEAM_LABEL[myTeam === 1 ? 1 : 0];
+    this.team.innerHTML = `<div class="thead">Equipo ${tname}</div>` + mine.map((p) => {
       const f = Math.max(0, Math.min(1, p.hp / p.maxHp));
-      const col = f > 0.5 ? "#35dd45" : f > 0.25 ? "#ddc233" : "#dd3a30";
+      const col = f > 0.5 ? "#6bff9e" : f > 0.25 ? "#ffb638" : "#ff5236";
+      const icon = p.isHuman ? "🧍" : "🤖";
       return `<div class="trow">${icon} P${p.id}<div class="tbar"><div style="width:${f * 100}%;background:${col}"></div></div></div>`;
     }).join("");
     this.team.style.display = "block";
+  }
+
+  /** Combat HUD: the current class + team badge next to the weapon bar (PvP). Empty label hides it. */
+  setClass(label: string, teamLabel: string): void {
+    if (!label) { this.classEl.style.display = "none"; return; }
+    this.classEl.innerHTML = `<b>${label}</b> <span>· ${teamLabel}</span>`;
+    this.classEl.style.display = "block";
+  }
+
+  /** Bandage HUD: charge count (🩹 ×N) + a channel progress bar while healing. `count < 0` hides it (drones). */
+  setBandages(count: number, healing: boolean, progress: number): void {
+    if (count < 0) { this.bandageEl.style.display = "none"; return; }
+    const bar = healing
+      ? `<div class="bnd-bar"><i style="width:${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%"></i></div><span class="bnd-do">VENDANDO</span>`
+      : `<span class="bnd-hint">B — vendar</span>`;
+    this.bandageEl.innerHTML = `<b>🩹 ×${count}</b> ${bar}`;
+    this.bandageEl.style.display = "flex";
   }
 
   /** Start overlay: pick a mode to CREATE a room (host, gets a random code), or type a code to JOIN one. */
@@ -236,19 +376,36 @@ export class Hud {
   /** Pre-match lobby: shows the shareable code, the roster, a role picker (PvP only), and — for the host —
    *  a Start button. `showLobby` wires it; `updateLobby` repaints the roster/host controls as peers change. */
   showLobby(code: string, mode: Mode, cb: LobbyCallbacks): void {
+    this.lobbyCb = cb;
     const el = (id: string) => document.getElementById(id)!;
     el("lobby-code").textContent = code;
     el("lobby-title").textContent = mode === "coop" ? "🪖 Co-op vs IA" : "⚔ Jugador vs Jugador";
-    el("lobby-roles").style.display = mode === "dvh" ? "flex" : "none"; // role choice only in PvP
+    el("lobby-roles").style.display = mode === "dvh" ? "flex" : "none"; // role/team only in PvP (co-op forces soldier)
+    el("lobby-team").style.display = mode === "dvh" ? "flex" : "none";
+    // class choice + 3D preview in BOTH PvP and co-op (co-op = pick your soldier class vs the AI)
+    const classy = mode === "dvh" || mode === "coop";
+    el("lobby-classes").style.display = classy ? "flex" : "none";
+    el("lobby-mode").style.display = mode === "coop" ? "flex" : "none"; // death rule only in co-op
+    el("lobby-mapsize").style.display = "flex"; // map size — every mode, host-only (enabled state set in updateLobby)
+    for (const b of Array.from(document.querySelectorAll("#lobby-mapsize button[data-s]")) as HTMLButtonElement[])
+      b.onclick = () => cb.pickMapSize?.(b.dataset.s!);
+    // two panels with the live 3D class preview whenever a class is chosen (PvP + co-op). Recreate the preview
+    // fresh (showLobby can run twice as the mode is learned); it's disposed on hideLobby / match start.
+    el("lobby-side").style.display = classy ? "flex" : "none";
+    this.preview?.dispose(); this.preview = null;
+    if (classy) this.preview = new ClassPreview(el("lobby-preview") as HTMLCanvasElement);
     (el("lobby-copy") as HTMLButtonElement).onclick = () => { void navigator.clipboard?.writeText(code); this.flash("Código copiado"); };
     for (const b of Array.from(document.querySelectorAll("#lobby-roles button[data-r]")) as HTMLButtonElement[])
       b.onclick = () => cb.pick(b.dataset.r as Role);
+    for (const b of Array.from(document.querySelectorAll("#lobby-team button[data-t]")) as HTMLButtonElement[])
+      b.onclick = () => cb.pickTeam?.(Number(b.dataset.t) as 0 | 1);
+    (el("lobby-hardcore") as HTMLButtonElement).onclick = () => cb.toggleHardcore?.();
     (el("lobby-start") as HTMLButtonElement).onclick = () => cb.start();
     (el("lobby-leave") as HTMLButtonElement).onclick = () => cb.leave();
     el("hud-lobby").style.display = "flex";
   }
 
-  updateLobby(rows: LobbyRow[], myId: number, hostId: number, myRole: Role | null): void {
+  updateLobby(rows: LobbyRow[], myId: number, hostId: number, myRole: Role | null, myTeam = 0, myClass = "", myMap = "large"): void {
     const list = document.getElementById("lobby-list")!;
     list.innerHTML = rows.map((p) => {
       const icon = p.role === "drone" ? "🤖" : p.role === "human" ? "🧍" : "❓";
@@ -258,11 +415,64 @@ export class Hud {
     const isHost = myId === hostId;
     (document.getElementById("lobby-start") as HTMLElement).style.display = isHost ? "inline-block" : "none";
     (document.getElementById("lobby-wait") as HTMLElement).style.display = isHost ? "none" : "inline";
+    (document.getElementById("lobby-hardcore") as HTMLButtonElement).disabled = !isHost; // only the host sets the rule
     for (const b of Array.from(document.querySelectorAll("#lobby-roles button[data-r]")) as HTMLButtonElement[])
       b.classList.toggle("on", b.dataset.r === myRole);
+    for (const b of Array.from(document.querySelectorAll("#lobby-team button[data-t]")) as HTMLButtonElement[])
+      b.classList.toggle("on", b.dataset.t === String(myTeam));
+    for (const b of Array.from(document.querySelectorAll("#lobby-mapsize button[data-s]")) as HTMLButtonElement[]) {
+      const preset = MAP_SIZES[b.dataset.s as keyof typeof MAP_SIZES];
+      if (preset) b.textContent = `${preset.label} · ${preset.players}`; // label + target players (kept in sync)
+      b.classList.toggle("on", b.dataset.s === myMap);
+      b.disabled = !isHost; // only the host chooses the map size; joiners see the choice
+    }
+    // class buttons depend on the chosen role → rebuild them (with the leading "Clase:" label) and wire each
+    const classes = document.getElementById("lobby-classes")!;
+    if (myRole) {
+      classes.innerHTML = `<span>Clase:</span>` + classList(myRole).map((c) =>
+        `<button data-c="${c.id}"${c.id === myClass ? ' class="on"' : ""}>${c.label}</button>`).join("");
+      for (const b of Array.from(classes.querySelectorAll("button[data-c]")) as HTMLButtonElement[])
+        b.onclick = () => this.lobbyCb?.pickClass?.(b.dataset.c!);
+      // refresh the class-detail panel + swap the 3D preview model to the selected class (dvh only)
+      this.renderClassDetail(myRole, myClass || "assault");
+      if (this.preview) { this.preview.resize(); this.preview.setClass(myRole, myClass || "assault"); }
+    }
   }
 
-  hideLobby(): void { (document.getElementById("hud-lobby") as HTMLElement).style.display = "none"; }
+  /** Fills the lobby side panel with the class's stat bars, weapons and pros/cons (PvP class preview). */
+  private renderClassDetail(role: Role, cls: string): void {
+    const detail = document.getElementById("lobby-detail");
+    if (!detail) return;
+    const st = classStats(role, cls);
+    const roleIcon = role === "drone" ? "🤖" : "🧍";
+    const bar = (label: string, v: number, k = "") =>
+      `<div class="cd-stat ${k}"><span>${label}</span><div class="cd-bar"><i style="width:${(v / 5) * 100}%"></i></div></div>`;
+    const wpns = classLoadout(role, cls).map((w, i) => {
+      const s = WEAPONS[w];
+      const dmg = s.playerDmg != null ? `${s.playerDmg} daño` : s.fire;
+      const rpm = s.cooldown > 0 ? ` · ${Math.round(60 / s.cooldown)} RPM` : "";
+      return `<div class="cd-wpn${i === 0 ? " pri" : ""}"><span class="cd-wico">${s.icon}</span><div class="cd-wtxt"><b>${s.name}</b><i>${dmg}${rpm}</i></div></div>`;
+    }).join("");
+    const tags = (arr: string[], k: string, mark: string) =>
+      `<div class="cd-tags">${arr.map((t) => `<span class="${k}">${mark} ${t}</span>`).join("")}</div>`;
+    detail.innerHTML =
+      `<div class="cd-name">${roleIcon} ${st.label} <span>· ${role === "drone" ? "DRON" : "SOLDADO"}</span></div>` +
+      bar("Blindaje", st.profile.armor, "cd-arm") + bar("Movilidad", st.profile.mobility, "cd-mob") +
+      bar("Alcance", st.profile.range) + bar("Fuego", st.profile.firepower) +
+      `<div class="cd-sec">Armamento</div>${wpns}` +
+      tags(st.pros, "cd-pro", "✓") + tags(st.cons, "cd-con", "✗");
+  }
+
+  /** Co-op lobby: reflect the chosen death rule on the toggle button. */
+  setHardcore(on: boolean): void {
+    const b = document.getElementById("lobby-hardcore");
+    if (b) b.textContent = on ? "💀 Permadeath" : "🔁 Reaparecer";
+  }
+
+  hideLobby(): void {
+    this.preview?.dispose(); this.preview = null; // free the preview's WebGL context before the match renders
+    (document.getElementById("hud-lobby") as HTMLElement).style.display = "none";
+  }
 
   /** Wires the always-visible gear button (opens the settings panel). Called once by the game. */
   onGear(open: () => void): void {
@@ -344,133 +554,290 @@ export class Hud {
 function inject(): void {
   const style = document.createElement("style");
   style.textContent = `
-    #hud { position: fixed; inset: 0; pointer-events: none; font-family: system-ui, sans-serif; color: #eef2f6; z-index: 10; }
-    #hud .panel { position: absolute; background: rgba(12,16,22,.62); border: 1px solid rgba(255,255,255,.08);
-      border-radius: 10px; padding: 10px 13px; font-size: 13px; line-height: 1.5; backdrop-filter: blur(6px); }
-    #hud-help { top: 14px; left: 14px; max-width: 360px; }
-    #hud-help hr { border: none; border-top: 1px solid rgba(255,255,255,.12); margin: 7px 0; }
-    #hud-help b { color: #9fd0ff; font-weight: 600; }
-    #hud-stats { top: 14px; right: 14px; font-variant-numeric: tabular-nums; }
-    #hud-bottom { bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 14px; align-items: center; }
-    #hud-bottom .tag { color: #9fb3c8; font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
-    #hud .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px;
-      vertical-align: -1px; border: 1px solid rgba(255,255,255,.4); }
-    #hud-toast { bottom: 70px; left: 50%; transform: translateX(-50%); transition: opacity .3s; opacity: 0;
-      background: rgba(20,28,40,.8); padding: 8px 16px; border-radius: 20px; font-size: 13px; }
-    #crosshair { position: absolute; top: 50%; left: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px;
-      border-radius: 50%; background: rgba(255,255,255,.85); box-shadow: 0 0 0 1.5px rgba(0,0,0,.5); }
-    #hud-dmg { position: fixed; inset: 0; pointer-events: none; opacity: 0;
-      box-shadow: inset 0 0 150px 34px rgba(200,20,20,.78); }
+    #hud { --bg: rgba(6,14,10,.72); --bg2: rgba(4,10,7,.9); --bg-solid: #070f0b;
+      --edge: rgba(107,255,158,.24); --edge2: rgba(107,255,158,.12); --tick: rgba(107,255,158,.5);
+      --phos: #6bff9e; --phos-dim: #3f8c63; --amber: #ffb638; --red: #ff5236; --cyan: #38e6ff;
+      --ink: #c9ffe0; --muted: #5f9a7c;
+      --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "DejaVu Sans Mono", monospace;
+      position: fixed; inset: 0; pointer-events: none; font-family: var(--mono); color: var(--ink);
+      z-index: 10; letter-spacing: .02em; }
+    #hud-crt { position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: .55;
+      box-shadow: inset 0 0 200px 46px rgba(0,0,0,.30);
+      background:
+        linear-gradient(var(--phos),var(--phos)) left 14px top 14px/22px 2px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) left 14px top 14px/2px 22px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) right 14px top 14px/22px 2px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) right 14px top 14px/2px 22px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) left 14px bottom 14px/22px 2px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) left 14px bottom 14px/2px 22px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) right 14px bottom 14px/22px 2px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) right 14px bottom 14px/2px 22px no-repeat,
+        repeating-linear-gradient(0deg, transparent 0 2px, rgba(0,0,0,.10) 2px 3px); }
+    #hud .panel { position: absolute; padding: 9px 12px; font-size: 12px; line-height: 1.5; color: var(--ink);
+      border: 1px solid var(--edge); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+      box-shadow: inset 0 0 22px rgba(0,0,0,.4), 0 2px 10px rgba(0,0,0,.35);
+      background:
+        linear-gradient(var(--tick),var(--tick)) left top/8px 1.5px no-repeat,
+        linear-gradient(var(--tick),var(--tick)) left top/1.5px 8px no-repeat,
+        linear-gradient(var(--tick),var(--tick)) right top/8px 1.5px no-repeat,
+        linear-gradient(var(--tick),var(--tick)) right top/1.5px 8px no-repeat,
+        linear-gradient(var(--tick),var(--tick)) left bottom/8px 1.5px no-repeat,
+        linear-gradient(var(--tick),var(--tick)) left bottom/1.5px 8px no-repeat,
+        linear-gradient(var(--tick),var(--tick)) right bottom/8px 1.5px no-repeat,
+        linear-gradient(var(--tick),var(--tick)) right bottom/1.5px 8px no-repeat,
+        var(--bg); }
+    #hud-help { top: 14px; left: 14px; max-width: 366px; }
+    #hud-help hr { border: none; border-top: 1px solid var(--edge2); margin: 7px 0; }
+    #hud-help b { color: var(--phos); font-weight: 700; }
+    #hud-stats { top: 14px; right: 14px; font-variant-numeric: tabular-nums; color: var(--muted); letter-spacing: .06em; }
+    #hud-bottom { bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 16px; align-items: center; }
+    #hud-bottom .tag { color: var(--phos-dim); font-size: 10px; text-transform: uppercase; letter-spacing: .16em; }
+    #hud .sw { display: inline-block; width: 12px; height: 12px; margin-right: 6px;
+      vertical-align: -1px; border: 1px solid rgba(107,255,158,.4); }
+    #hud-toast { bottom: 74px; left: 50%; transform: translateX(-50%); transition: opacity .3s; opacity: 0;
+      background: var(--bg2); border: 1px solid var(--edge); padding: 8px 18px; font-size: 12px;
+      letter-spacing: .12em; text-transform: uppercase; color: var(--phos); }
+    #crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+      background:
+        linear-gradient(var(--phos),var(--phos)) 50% 0/2px 7px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) 50% 100%/2px 7px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) 0 50%/7px 2px no-repeat,
+        linear-gradient(var(--phos),var(--phos)) 100% 50%/7px 2px no-repeat,
+        radial-gradient(circle at 50% 50%, var(--phos) 0 1px, transparent 1.6px) no-repeat;
+      filter: drop-shadow(0 0 2px rgba(0,0,0,.85)); }
+    #hud-dmg { position: fixed; inset: 0; pointer-events: none; opacity: 0; z-index: 11;
+      box-shadow: inset 0 0 150px 34px rgba(255,60,40,.78); }
+    #hud-dmgdir { position: fixed; inset: 0; pointer-events: none; opacity: 0; z-index: 11;
+      background: radial-gradient(ellipse 55% 30% at 50% -8%, rgba(255,82,54,.85), transparent 72%); }
+    #hud-minimap { position: absolute; bottom: 96px; right: 14px; pointer-events: none;
+      filter: drop-shadow(0 2px 10px rgba(0,0,0,.6)); }
+    /* Outside the scope circle the periphery stays 1× (NOT magnified) — we dim it + gently blur it
+       (backdrop-filter), masked so the centre circle (the optical scope render) stays crisp. The transparent
+       hole radius (30vh) matches the WebGL scope circle (SCOPE_CIRCLE_R 0.6) so its magnified edge isn't blurred. */
+    #hud-scope { position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity .1s; z-index: 12;
+      backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); background: rgba(4,8,6,.5);
+      -webkit-mask: radial-gradient(circle at 50% 50%, transparent 0 30vh, #000 33.5vh);
+      mask: radial-gradient(circle at 50% 50%, transparent 0 30vh, #000 33.5vh); }
+    #hud-scope-ring { position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity .1s; z-index: 13; }
+    #hud-scope-ring::before { content: ""; position: absolute; left: 50%; top: 50%; width: 60vh; height: 60vh; margin: -30vh 0 0 -30vh;
+      border-radius: 50%; border: 2px solid rgba(0,0,0,.85); box-shadow: inset 0 0 26px 8px rgba(0,0,0,.32), 0 0 0 1px rgba(107,255,158,.22); }
+    #hud-scope-ring::after { content: ""; position: absolute; left: 50%; top: 50%; width: 58vh; height: 58vh; margin: -29vh 0 0 -29vh;
+      background: linear-gradient(rgba(107,255,158,.5),rgba(107,255,158,.5)) 50% 0/1px 100% no-repeat,
+        linear-gradient(rgba(107,255,158,.5),rgba(107,255,158,.5)) 0 50%/100% 1px no-repeat; }
     #hud-hit { position: absolute; top: 50%; left: 50%; width: 20px; height: 20px; margin: -10px 0 0 -10px; opacity: 0; }
     #hud-hit::before, #hud-hit::after { content: ""; position: absolute; left: 50%; top: 50%; width: 2px; height: 7px;
-      margin: -3.5px 0 0 -1px; background: #fff; box-shadow: 0 0 2px #000; }
+      margin: -3.5px 0 0 -1px; background: var(--phos); box-shadow: 0 0 3px rgba(0,0,0,.8); }
     #hud-hit::before { transform: rotate(45deg); } #hud-hit::after { transform: rotate(-45deg); }
-    #hud-hit.kill::before, #hud-hit.kill::after { background: #ff5a4d; height: 9px; margin-top: -4.5px; }
-    #hud-mode { top: 14px; left: 50%; transform: translateX(-50%); display: none; font-size: 12px;
-      letter-spacing: .4px; }
-    #hud-health { bottom: 70px; left: 50%; transform: translateX(-50%); display: none; width: 240px;
-      text-align: center; padding: 7px 10px; }
-    #hud-health-bar { height: 12px; border-radius: 6px; background: rgba(255,255,255,.12); overflow: hidden; }
-    #hud-health-fill { height: 100%; width: 100%; background: #35dd45; transition: width .12s, background .12s; }
-    #hud-health-text { font-size: 11px; margin-top: 3px; font-variant-numeric: tabular-nums; }
-    #hud-weapon { bottom: 108px; left: 50%; transform: translateX(-50%); display: none; text-align: center; padding: 6px 10px; }
-    #hud-weapon .wbar { display: flex; gap: 6px; justify-content: center; margin-bottom: 4px; }
-    #hud-weapon .wslot { position: relative; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
-      font-size: 18px; border-radius: 8px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); opacity: .5; }
-    #hud-weapon .wslot.on { opacity: 1; background: rgba(90,150,255,.28); border-color: rgba(120,180,255,.75); box-shadow: 0 0 10px rgba(90,150,255,.45); }
-    #hud-weapon .wslot i { position: absolute; bottom: -3px; right: 1px; font-size: 9px; font-style: normal; color: #9fb3c8; }
-    #hud-weapon .wammo { font-size: 13px; font-variant-numeric: tabular-nums; }
-    #hud-weapon .wammo b { font-size: 16px; } #hud-weapon .wammo span { color: #9fb3c8; } #hud-weapon .wammo.empty { color: #dd3a30; }
-    #hud-battery { bottom: 16px; left: 14px; width: 150px; }
-    #hud-battery .cap { font-size: 10px; color: #9fb3c8; display: block; margin-bottom: 3px; }
-    #hud-battery-bar { height: 10px; border-radius: 5px; background: rgba(255,255,255,.12); overflow: hidden; }
-    #hud-battery-fill { height: 100%; width: 100%; background: #38d0ff; transition: width .2s, background .2s; }
+    #hud-hit.kill::before, #hud-hit.kill::after { background: var(--red); height: 9px; margin-top: -4.5px; }
+    #hud-mode { top: 14px; left: 50%; transform: translateX(-50%); display: none; font-size: 11px;
+      letter-spacing: .16em; text-transform: uppercase; color: var(--phos-dim); }
+    #hud-health { bottom: 70px; left: 50%; transform: translateX(-50%); display: none; width: 260px;
+      text-align: center; padding: 8px 12px; }
+    #hud-health-bar { position: relative; height: 12px; background: rgba(0,0,0,.45); border: 1px solid var(--edge2); overflow: hidden; }
+    #hud-health-fill { height: 100%; width: 100%; background: #6bff9e; transition: width .12s, background .12s;
+      box-shadow: 0 0 10px rgba(107,255,158,.4); }
+    #hud-health-bar::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+      background: repeating-linear-gradient(90deg, transparent 0 9px, var(--bg-solid) 9px 11px); }
+    #hud-health-text { font-size: 11px; margin-top: 4px; letter-spacing: .14em; text-transform: uppercase;
+      color: var(--phos); font-variant-numeric: tabular-nums; }
+    #hud-weapon { bottom: 112px; left: 50%; transform: translateX(-50%); display: none; text-align: center; padding: 8px 12px; }
+    #hud-weapon .wbar { display: flex; gap: 7px; justify-content: center; margin-bottom: 6px; }
+    #hud-weapon .wslot { position: relative; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+      font-size: 18px; background: rgba(6,14,10,.8); border: 1px solid var(--edge2); opacity: .5; filter: grayscale(.35);
+      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%); }
+    #hud-weapon .wslot.on { opacity: 1; background: rgba(107,255,158,.14); border-color: var(--phos);
+      box-shadow: 0 0 14px rgba(107,255,158,.4); filter: none; }
+    #hud-weapon .wslot i { position: absolute; bottom: -1px; right: 2px; font-size: 9px; font-style: normal; color: var(--phos-dim); }
+    #hud-weapon .wslot.on i { color: var(--phos); }
+    #hud-weapon .wammo { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; font-variant-numeric: tabular-nums; color: var(--ink); }
+    #hud-weapon .wammo b { font-size: 16px; color: var(--amber); } #hud-weapon .wammo span { color: var(--muted); }
+    #hud-weapon .wammo.empty { color: var(--red); } #hud-weapon .wammo.empty b { color: var(--red); }
+    #hud-battery { bottom: 16px; left: 14px; width: 160px; }
+    #hud-battery .cap { font-size: 9px; color: var(--phos-dim); display: block; margin-bottom: 4px; letter-spacing: .16em; text-transform: uppercase; }
+    #hud-battery-bar { position: relative; height: 10px; background: rgba(0,0,0,.45); border: 1px solid var(--edge2); overflow: hidden; }
+    #hud-battery-fill { height: 100%; width: 100%; background: #38e6ff; transition: width .2s, background .2s;
+      box-shadow: 0 0 10px rgba(56,230,255,.4); }
+    #hud-battery-bar::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+      background: repeating-linear-gradient(90deg, transparent 0 9px, var(--bg-solid) 9px 11px); }
     #hud-kda { top: 48px; right: 14px; display: none; font-variant-numeric: tabular-nums; }
-    #hud-kda .tag { color: #9fb3c8; font-size: 10px; margin: 0 3px 0 9px; } #hud-kda .tag:first-child { margin-left: 0; }
-    #hud-team { top: 92px; right: 14px; display: none; min-width: 132px; }
-    #hud-team .thead { font-size: 10px; color: #9fb3c8; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .5px; }
-    #hud-team .trow { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-top: 3px; }
-    #hud-team .tbar { flex: 1; height: 7px; border-radius: 4px; background: rgba(255,255,255,.12); overflow: hidden; }
+    #hud-kda .tag { color: var(--phos-dim); font-size: 9px; letter-spacing: .14em; text-transform: uppercase; margin: 0 3px 0 10px; }
+    #hud-kda .tag:first-child { margin-left: 0; }
+    #hud-kda b { color: var(--ink); }
+    #hud-team { top: 92px; right: 14px; display: none; min-width: 140px; }
+    #hud-team .thead { font-size: 9px; color: var(--phos-dim); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .16em; }
+    #hud-team .trow { display: flex; align-items: center; gap: 7px; font-size: 11px; margin-top: 4px; }
+    #hud-team .tbar { flex: 1; height: 6px; background: rgba(107,255,158,.12); overflow: hidden; }
     #hud-team .tbar div { height: 100%; }
     #hud-menu { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-      pointer-events: auto; background: rgba(6,9,14,.72); backdrop-filter: blur(3px); }
-    #hud-menu .card { background: rgba(16,22,30,.96); border: 1px solid rgba(255,255,255,.1);
-      border-radius: 14px; padding: 26px 30px; text-align: center; max-width: 380px; }
-    #hud-menu h1 { margin: 0 0 4px; font-size: 22px; }
-    #hud-menu p { margin: 0 0 16px; color: #9fb3c8; font-size: 13px; }
-    #hud-menu .row { display: flex; gap: 12px; justify-content: center; margin-bottom: 14px; }
-    #hud-menu button { pointer-events: auto; cursor: pointer; border: 1px solid rgba(255,255,255,.15);
-      border-radius: 10px; padding: 14px 20px; font-size: 15px; color: #eef2f6; background: rgba(40,52,68,.9);
-      flex: 1; }
-    #hud-menu button b { display: block; font-size: 16px; margin-bottom: 3px; }
-    #hud-menu button small { color: #9fb3c8; font-size: 11px; font-weight: 400; }
-    #hud-btn-vs { background: rgba(80,30,34,.9); border-color: rgba(255,90,80,.4); }
-    #hud-btn-dvh { background: rgba(30,48,80,.9); border-color: rgba(90,150,255,.45); }
+      pointer-events: auto; backdrop-filter: blur(3px);
+      background:
+        radial-gradient(60% 55% at 50% 42%, rgba(16,46,34,.5), transparent 70%),
+        repeating-linear-gradient(90deg, rgba(107,255,158,.05) 0 1px, transparent 1px 46px),
+        repeating-linear-gradient(0deg, rgba(107,255,158,.04) 0 1px, transparent 1px 46px),
+        rgba(3,7,5,.82); }
+    #hud-menu .card { background: linear-gradient(180deg, rgba(10,20,15,.96), rgba(5,11,8,.96));
+      border: 1px solid var(--edge); padding: 30px 34px; text-align: center; max-width: 440px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.6), inset 0 0 60px rgba(0,0,0,.4);
+      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%); }
+    #hud-menu h1 { margin: 0 0 6px; font-size: 30px; font-weight: 800; letter-spacing: .24em; color: var(--phos);
+      text-shadow: 0 0 18px rgba(107,255,158,.5); padding-left: .24em; }
+    #hud-menu p { margin: 0 0 20px; color: var(--phos-dim); font-size: 11px; letter-spacing: .28em; text-transform: uppercase; }
+    #hud-menu .row { display: flex; gap: 14px; justify-content: center; margin-bottom: 16px; }
+    #hud-menu button { pointer-events: auto; cursor: pointer; border: 1px solid var(--edge); color: var(--ink);
+      background: linear-gradient(180deg, rgba(10,22,16,.9), rgba(6,14,10,.9)); padding: 16px 18px; font-size: 13px;
+      font-family: var(--mono); flex: 1; text-align: left; transition: border-color .16s, box-shadow .16s, transform .16s;
+      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%); }
+    #hud-menu button:hover { border-color: var(--phos); box-shadow: inset 0 0 26px rgba(107,255,158,.12), 0 0 20px rgba(107,255,158,.16); transform: translateY(-2px); }
+    #hud-menu button b { display: block; font-size: 15px; margin-bottom: 5px; color: var(--phos); letter-spacing: .04em; }
+    #hud-menu button small { color: var(--muted); font-size: 11px; font-weight: 400; line-height: 1.5; }
+    #hud-btn-vs { background: linear-gradient(180deg, rgba(30,10,8,.9), rgba(16,6,5,.9)); border-color: rgba(255,82,54,.4); }
+    #hud-btn-vs b { color: var(--red); }
+    #hud-btn-dvh { border-color: rgba(255,182,56,.35); } #hud-btn-dvh b { color: var(--amber); }
     #hud-score { position: absolute; top: 40px; left: 50%; transform: translateX(-50%); display: none;
-      font-size: 13px; white-space: nowrap; }
+      font-size: 12px; white-space: nowrap; letter-spacing: .08em; }
+    #hud-score b { color: var(--phos); } #hud-score small { color: var(--muted); }
     #hud-win { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-      font: 700 34px system-ui, sans-serif; color: #fff; background: rgba(0,0,0,.55);
-      pointer-events: none; text-align: center; text-shadow: 0 2px 14px #000; }
+      font-family: var(--mono); font-weight: 800; font-size: 34px; letter-spacing: .1em; text-transform: uppercase;
+      color: var(--phos); background: radial-gradient(rgba(4,16,10,.6), rgba(0,0,0,.82));
+      pointer-events: auto; text-align: center; text-shadow: 0 0 18px rgba(107,255,158,.4); }
+    #hud-win .wcard { display: flex; flex-direction: column; align-items: center; gap: 30px; }
+    #hud-win .wmsg { line-height: 1.28; }
+    #hud-win .wsub { font-size: 20px; font-weight: 400; }
+    #hud-win .wact { display: flex; gap: 16px; }
+    #hud-win .wact button { pointer-events: auto; cursor: pointer; font-family: var(--mono); font-size: 14px;
+      font-weight: 700; letter-spacing: .12em; text-transform: uppercase; padding: 13px 26px; color: var(--ink);
+      background: linear-gradient(180deg, rgba(10,20,15,.92), rgba(5,11,8,.92)); border: 1px solid var(--edge);
+      text-shadow: none; transition: transform .12s, border-color .12s, box-shadow .12s, color .12s;
+      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%); }
+    #hud-win .wact button:hover { border-color: var(--phos); color: var(--phos);
+      box-shadow: inset 0 0 22px rgba(107,255,158,.12), 0 0 18px rgba(107,255,158,.18); transform: translateY(-2px); }
+    #hud-win-restart { border-color: var(--phos) !important; color: var(--phos) !important; }
     #hud-death { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center;
-      justify-content: center; gap: 6px; font: 700 40px system-ui, sans-serif; color: #ffd7d0;
-      background: radial-gradient(rgba(60,0,0,.35), rgba(90,0,0,.72)); pointer-events: none; text-shadow: 0 2px 16px #000; }
-    #hud-death small { font-size: 17px; font-weight: 500; color: #ffb3a8; }
+      justify-content: center; gap: 8px; font-family: var(--mono); font-weight: 800; font-size: 40px;
+      letter-spacing: .06em; text-transform: uppercase; color: #ff9a88;
+      background: radial-gradient(rgba(30,4,2,.66), rgba(0,0,0,.95)); pointer-events: none; text-shadow: 0 0 18px rgba(255,60,40,.5);
+      opacity: 0; transition: opacity .22s ease-out; }
+    #hud-death small { font-size: 16px; font-weight: 500; color: #ff7a68; letter-spacing: .16em; }
     #hud-killfeed { position: absolute; top: 52px; right: 14px; display: flex; flex-direction: column;
       align-items: flex-end; gap: 4px; pointer-events: none; }
-    #hud-killfeed div { background: rgba(15,20,30,.72); padding: 3px 9px; border-radius: 6px; font-size: 12px;
-      color: #e6eef7; white-space: nowrap; animation: kf 4s forwards; }
-    #hud-killfeed div.mine { border: 1px solid rgba(120,180,255,.6); }
+    #hud-killfeed div { background: var(--bg2); border: 1px solid var(--edge2); padding: 3px 9px; font-size: 11px;
+      letter-spacing: .04em; color: var(--ink); white-space: nowrap; animation: kf 4s forwards; }
+    #hud-killfeed div.mine { border-color: var(--phos); box-shadow: 0 0 10px rgba(107,255,158,.2); color: var(--phos); }
     @keyframes kf { 0%{opacity:0; transform:translateX(8px)} 8%{opacity:1; transform:none} 82%{opacity:1} 100%{opacity:0} }
-    #hud-menu .room { display: flex; gap: 8px; align-items: center; justify-content: center; font-size: 12px; color: #9fb3c8; }
-    #hud-room { pointer-events: auto; background: rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.15);
-      border-radius: 7px; padding: 6px 9px; color: #eef2f6; font-size: 13px; width: 130px; }
+    #hud-menu .room { display: flex; gap: 10px; align-items: center; justify-content: center; font-size: 11px;
+      color: var(--phos-dim); letter-spacing: .16em; text-transform: uppercase; }
+    #hud-room { pointer-events: auto; background: rgba(0,0,0,.4); border: 1px solid var(--edge);
+      color: var(--ink); padding: 8px 10px; font-size: 13px; width: 140px; font-family: var(--mono);
+      letter-spacing: .3em; text-align: center; }
+    #hud-room::placeholder { color: var(--phos-dim); letter-spacing: .3em; }
+    #hud-btn-join { flex: 0 0 auto; text-align: center; padding: 8px 16px; font-size: 12px; text-transform: uppercase;
+      letter-spacing: .16em; background: rgba(107,255,158,.1); border-color: var(--phos); color: var(--phos); clip-path: none; }
     #hud-gear { position: absolute; top: 12px; right: 150px; pointer-events: auto; cursor: pointer; width: 34px; height: 34px;
-      border-radius: 9px; border: 1px solid rgba(255,255,255,.14); background: rgba(12,16,22,.62); color: #cfe0f2;
-      font-size: 17px; line-height: 1; backdrop-filter: blur(6px); }
-    #hud-gear:hover { background: rgba(40,52,68,.9); }
+      border: 1px solid var(--edge); background: var(--bg); color: var(--phos);
+      font-size: 16px; line-height: 1; backdrop-filter: blur(3px);
+      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%); }
+    #hud-gear:hover { background: rgba(107,255,158,.14); border-color: var(--phos); box-shadow: 0 0 12px rgba(107,255,158,.3); }
     #hud-settings { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-      pointer-events: auto; background: rgba(6,9,14,.72); backdrop-filter: blur(3px); }
-    #hud-settings .scard { background: rgba(16,22,30,.97); border: 1px solid rgba(255,255,255,.1);
-      border-radius: 14px; padding: 22px 26px; width: 340px; }
-    #hud-settings h2 { margin: 0 0 14px; font-size: 18px; }
-    #hud-settings .srow { display: flex; align-items: center; justify-content: space-between; margin: 14px 0 6px; font-size: 13px; }
-    #hud-settings .slabel { color: #cfe0f2; } #hud-settings .slabel b { color: #9fd0ff; font-variant-numeric: tabular-nums; }
+      pointer-events: auto; backdrop-filter: blur(3px);
+      background:
+        repeating-linear-gradient(90deg, rgba(107,255,158,.05) 0 1px, transparent 1px 46px),
+        repeating-linear-gradient(0deg, rgba(107,255,158,.04) 0 1px, transparent 1px 46px),
+        rgba(3,7,5,.82); }
+    #hud-settings .scard { background: linear-gradient(180deg, rgba(10,20,15,.97), rgba(5,11,8,.97));
+      border: 1px solid var(--edge); padding: 26px 28px; width: 360px; box-shadow: 0 20px 60px rgba(0,0,0,.6);
+      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%); }
+    #hud-settings h2 { margin: 0 0 16px; font-size: 16px; letter-spacing: .16em; text-transform: uppercase; color: var(--phos); }
+    #hud-settings .srow { display: flex; align-items: center; justify-content: space-between; margin: 14px 0 6px; font-size: 12px; }
+    #hud-settings .slabel { color: var(--ink); letter-spacing: .06em; text-transform: uppercase; font-size: 11px; }
+    #hud-settings .slabel b { color: var(--phos); font-variant-numeric: tabular-nums; }
     #hud-settings .sbtns { display: flex; gap: 6px; }
-    #hud-settings .sbtns button { pointer-events: auto; cursor: pointer; border: 1px solid rgba(255,255,255,.14);
-      border-radius: 8px; padding: 6px 12px; font-size: 13px; color: #eef2f6; background: rgba(40,52,68,.7); }
-    #hud-settings .sbtns button.on { background: rgba(90,150,255,.3); border-color: rgba(120,180,255,.75); }
-    #hud-settings .schk { display: flex; align-items: center; gap: 5px; color: #9fb3c8; cursor: pointer; }
-    #hud-settings .srange { width: 100%; margin: 2px 0 4px; accent-color: #5a96ff; cursor: pointer; }
+    #hud-settings .sbtns button { pointer-events: auto; cursor: pointer; border: 1px solid var(--edge); font-family: var(--mono);
+      padding: 7px 13px; font-size: 12px; color: var(--ink); background: rgba(10,22,16,.7); text-transform: uppercase; letter-spacing: .1em; }
+    #hud-settings .sbtns button.on { background: rgba(107,255,158,.16); border-color: var(--phos); color: var(--phos); }
+    #hud-settings .schk { display: flex; align-items: center; gap: 6px; color: var(--phos-dim); cursor: pointer; text-transform: uppercase; font-size: 11px; letter-spacing: .1em; }
+    #hud-settings .srange { width: 100%; margin: 2px 0 4px; accent-color: var(--phos); cursor: pointer; }
     #hud-settings .srange:disabled { opacity: .4; }
-    #hud-settings .sactions { display: flex; gap: 10px; margin-top: 20px; }
-    #hud-settings .sactions button { pointer-events: auto; cursor: pointer; flex: 1; border: 1px solid rgba(255,255,255,.15);
-      border-radius: 10px; padding: 11px; font-size: 14px; color: #eef2f6; background: rgba(40,52,68,.9); }
-    #hud-settings .sprimary { background: rgba(30,48,80,.9); border-color: rgba(90,150,255,.5); }
+    #hud-settings .sactions { display: flex; gap: 10px; margin-top: 22px; }
+    #hud-settings .sactions button { pointer-events: auto; cursor: pointer; flex: 1; border: 1px solid var(--edge); font-family: var(--mono);
+      padding: 11px; font-size: 12px; color: var(--ink); background: rgba(10,22,16,.8); text-transform: uppercase; letter-spacing: .12em;
+      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%); }
+    #hud-settings .sprimary { background: rgba(107,255,158,.14); border-color: var(--phos); color: var(--phos); }
     #hud-lobby { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-      pointer-events: auto; background: rgba(6,9,14,.78); backdrop-filter: blur(3px); }
-    #hud-lobby .lcard { background: rgba(16,22,30,.97); border: 1px solid rgba(255,255,255,.1); border-radius: 14px;
-      padding: 24px 30px; width: 380px; text-align: center; }
-    #hud-lobby h1 { margin: 0 0 10px; font-size: 22px; }
-    #hud-lobby .lcode { font-size: 15px; color: #cfe0f2; }
-    #hud-lobby .lcode b { font-size: 30px; letter-spacing: 4px; color: #7fd0ff; font-variant-numeric: tabular-nums;
-      margin: 0 8px; vertical-align: -2px; }
-    #hud-lobby .lcode button, #hud-lobby #lobby-roles button, #hud-lobby .lactions button { pointer-events: auto;
-      cursor: pointer; border: 1px solid rgba(255,255,255,.15); border-radius: 8px; color: #eef2f6;
-      background: rgba(40,52,68,.85); padding: 6px 12px; font-size: 13px; }
-    #hud-lobby .lhint { color: #9fb3c8; font-size: 12px; margin: 8px 0 14px; }
-    #hud-lobby .lroles { display: flex; gap: 8px; align-items: center; justify-content: center; margin-bottom: 14px; font-size: 13px; color: #9fb3c8; }
-    #hud-lobby #lobby-roles button.on { background: rgba(90,150,255,.32); border-color: rgba(120,180,255,.8); }
-    #hud-lobby .llist { display: flex; flex-direction: column; gap: 5px; margin: 10px 0 18px; min-height: 40px; }
-    #hud-lobby .lrow { background: rgba(255,255,255,.05); border-radius: 7px; padding: 6px 10px; font-size: 13px; }
+      pointer-events: auto; backdrop-filter: blur(3px);
+      background:
+        radial-gradient(60% 55% at 50% 42%, rgba(16,46,34,.5), transparent 70%),
+        repeating-linear-gradient(90deg, rgba(107,255,158,.05) 0 1px, transparent 1px 46px),
+        repeating-linear-gradient(0deg, rgba(107,255,158,.04) 0 1px, transparent 1px 46px),
+        rgba(3,7,5,.86); }
+    #hud-lobby .lcard { background: linear-gradient(180deg, rgba(10,20,15,.97), rgba(5,11,8,.97));
+      border: 1px solid var(--edge); padding: 28px 32px; width: 400px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,.6);
+      clip-path: polygon(0 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%); }
+    #hud-lobby h1 { margin: 0 0 12px; font-size: 20px; letter-spacing: .16em; text-transform: uppercase; color: var(--phos); }
+    #hud-lobby .lcode { font-size: 12px; color: var(--phos-dim); letter-spacing: .16em; text-transform: uppercase; }
+    #hud-lobby .lcode b { font-size: 30px; letter-spacing: .4em; color: var(--amber); font-variant-numeric: tabular-nums;
+      margin: 0 8px; vertical-align: -2px; text-shadow: 0 0 12px rgba(255,182,56,.4); text-transform: none; }
+    #hud-lobby .lcode button, #hud-lobby .lroles button, #hud-lobby .lactions button { pointer-events: auto;
+      cursor: pointer; border: 1px solid var(--edge); color: var(--ink); font-family: var(--mono);
+      background: rgba(10,22,16,.8); padding: 7px 13px; font-size: 12px; text-transform: uppercase; letter-spacing: .1em; }
+    #hud-lobby .lhint { color: var(--muted); font-size: 11px; margin: 10px 0 16px; letter-spacing: .1em; }
+    #hud-lobby .lroles { display: flex; gap: 8px; align-items: center; justify-content: center; margin-bottom: 16px; font-size: 11px; color: var(--phos-dim); text-transform: uppercase; letter-spacing: .1em; }
+    #hud-lobby .lclasses { flex-wrap: wrap; }
+    #hud-lobby .lroles button.on { background: rgba(107,255,158,.18); border-color: var(--phos); color: var(--phos); }
+    #hud-lobby #lobby-team button.tred { color: #ff6a6a; } #hud-lobby #lobby-team button.tblue { color: #6a9aff; }
+    #hud-lobby #lobby-team button.tred.on { background: rgba(255,82,54,.2); border-color: #ff5236; color: #ff8a7a; }
+    #hud-lobby #lobby-team button.tblue.on { background: rgba(74,138,255,.2); border-color: #4a8aff; color: #8ab0ff; }
+    #hud-lobby #lobby-mapsize button:disabled { opacity: .4; cursor: default; }
+    /* two-panel PvP lobby: left card + right class-preview side panel */
+    #hud-lobby .lwrap { display: flex; gap: 16px; align-items: stretch; justify-content: center; max-width: 94vw; }
+    #hud-lobby #lobby-side { width: 300px; display: flex; flex-direction: column; gap: 10px; text-align: left;
+      background: linear-gradient(180deg, rgba(10,20,15,.97), rgba(5,11,8,.97)); border: 1px solid var(--edge); padding: 16px 18px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.6); clip-path: polygon(18px 0, 100% 0, 100% 100%, 0 100%, 0 18px); }
+    #hud-lobby #lobby-preview { width: 100%; height: 220px; display: block; cursor: grab; touch-action: none;
+      background: radial-gradient(70% 60% at 50% 40%, rgba(16,46,34,.5), rgba(3,7,5,.2)); border: 1px solid var(--edge2); }
+    #hud-lobby #lobby-preview:active { cursor: grabbing; }
+    #hud-lobby #lobby-detail { display: flex; flex-direction: column; gap: 9px; }
+    #hud-lobby .cd-name { font-size: 16px; letter-spacing: .14em; text-transform: uppercase; color: var(--phos); }
+    #hud-lobby .cd-name span { color: var(--muted); font-size: 10px; letter-spacing: .1em; }
+    #hud-lobby .cd-stat { display: flex; align-items: center; gap: 8px; font-size: 9px; letter-spacing: .12em; text-transform: uppercase; color: var(--phos-dim); }
+    #hud-lobby .cd-stat > span { width: 62px; flex: none; }
+    #hud-lobby .cd-bar { position: relative; flex: 1; height: 9px; background: rgba(0,0,0,.45); border: 1px solid var(--edge2); overflow: hidden; }
+    #hud-lobby .cd-bar > i { display: block; height: 100%; background: var(--phos); box-shadow: 0 0 8px rgba(107,255,158,.4); }
+    #hud-lobby .cd-bar::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+      background: repeating-linear-gradient(90deg, transparent 0 var(--seg, 9px), var(--bg-solid) var(--seg, 9px) calc(var(--seg, 9px) + 2px)); }
+    #hud-lobby .cd-arm > i { background: var(--amber); box-shadow: 0 0 8px rgba(255,182,56,.4); }
+    #hud-lobby .cd-mob > i { background: var(--cyan); box-shadow: 0 0 8px rgba(56,230,255,.4); }
+    #hud-lobby .cd-sec { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
+    #hud-lobby .cd-wpn { display: flex; align-items: center; gap: 8px; background: rgba(107,255,158,.05); border: 1px solid var(--edge2); padding: 5px 8px; }
+    #hud-lobby .cd-wpn.pri { border-color: var(--phos); background: rgba(107,255,158,.12); }
+    #hud-lobby .cd-wico { font-size: 16px; }
+    #hud-lobby .cd-wtxt b { font-size: 11px; color: var(--ink); letter-spacing: .04em; }
+    #hud-lobby .cd-wtxt i { display: block; font-size: 9px; color: var(--muted); font-style: normal; letter-spacing: .06em; font-variant-numeric: tabular-nums; }
+    #hud-lobby .cd-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+    #hud-lobby .cd-pro, #hud-lobby .cd-con { font-size: 9px; letter-spacing: .06em; padding: 3px 7px; border: 1px solid var(--edge2); text-transform: uppercase; }
+    #hud-lobby .cd-pro { color: var(--phos); border-color: rgba(107,255,158,.4); }
+    #hud-lobby .cd-con { color: var(--red); border-color: rgba(255,82,54,.4); }
+    #hud-class { bottom: 156px; left: 50%; transform: translateX(-50%); display: none; text-align: center;
+      padding: 4px 12px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
+    #hud-class b { color: var(--amber); } #hud-class span { color: var(--phos-dim); }
+    #hud-bandage { bottom: 16px; left: 182px; display: none; align-items: center; gap: 8px; padding: 6px 10px;
+      font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    #hud-bandage b { color: var(--phos); font-size: 13px; }
+    #hud-bandage .bnd-hint { color: var(--muted); font-size: 9px; }
+    #hud-bandage .bnd-do { color: var(--amber); font-size: 9px; }
+    #hud-bandage .bnd-bar { position: relative; width: 60px; height: 8px; background: rgba(0,0,0,.45); border: 1px solid var(--edge2); overflow: hidden; }
+    #hud-bandage .bnd-bar i { display: block; height: 100%; background: var(--phos); box-shadow: 0 0 8px rgba(107,255,158,.4); }
+    #hud-lobby .llist { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 20px; min-height: 40px; }
+    #hud-lobby .lrow { background: rgba(107,255,158,.05); border: 1px solid var(--edge2); padding: 7px 10px; font-size: 12px; letter-spacing: .06em; }
     #hud-lobby .lactions { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
-    #hud-lobby #lobby-wait { color: #9fb3c8; font-size: 12px; }
-    #hud-lobby .sprimary { background: rgba(30,60,40,.92); border-color: rgba(90,220,140,.5); font-size: 15px; padding: 10px 18px; }
+    #hud-lobby #lobby-wait { color: var(--muted); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    #hud-lobby .sprimary { background: rgba(107,255,158,.16); border-color: var(--phos); color: var(--phos); font-size: 14px; padding: 10px 20px; }
   `;
   document.head.appendChild(style);
 
   const hud = document.createElement("div");
   hud.id = "hud";
   hud.innerHTML = `
+    <div id="hud-crt"></div>
     <div id="hud-help" class="panel"></div>
     <div id="hud-stats" class="panel"></div>
     <div id="hud-mode" class="panel"></div>
@@ -484,13 +851,18 @@ function inject(): void {
       <div id="hud-health-text">100 HP</div>
     </div>
     <div id="hud-weapon" class="panel"></div>
+    <div id="hud-class" class="panel"></div>
+    <div id="hud-bandage" class="panel"></div>
     <div id="hud-battery" class="panel"><span class="cap">🔋 Batería</span><div id="hud-battery-bar"><div id="hud-battery-fill"></div></div></div>
     <div id="hud-kda" class="panel"></div>
     <div id="hud-team" class="panel"></div>
     <div id="hud-toast" class="panel"></div>
     <div id="crosshair"></div>
+    <div id="hud-scope"></div>
+    <div id="hud-scope-ring"></div>
     <div id="hud-hit"></div>
     <div id="hud-dmg"></div>
+    <div id="hud-dmgdir"></div>
     <div id="hud-menu">
       <div class="card">
         <h1>PARTICLES</h1>
@@ -503,6 +875,7 @@ function inject(): void {
       </div>
     </div>
     <div id="hud-lobby">
+      <div class="lwrap">
       <div class="lcard">
         <h1 id="lobby-title">Sala</h1>
         <div class="lcode">Código <b id="lobby-code">—</b> <button id="lobby-copy">copiar</button></div>
@@ -510,12 +883,27 @@ function inject(): void {
         <div id="lobby-roles" class="lroles"><span>Tu bando:</span>
           <button data-r="drone">🤖 Dron</button><button data-r="human">🧍 Soldado</button>
         </div>
+        <div id="lobby-team" class="lroles" style="display:none"><span>Equipo:</span>
+          <button data-t="0" class="tred">● Rojo</button><button data-t="1" class="tblue">● Azul</button>
+        </div>
+        <div id="lobby-classes" class="lroles lclasses" style="display:none"><span>Clase:</span></div>
+        <div id="lobby-mapsize" class="lroles" style="display:none"><span>Mapa:</span>
+          <button data-s="small">Pequeño · 6</button><button data-s="medium">Mediano · 16</button><button data-s="large">Grande · 50</button>
+        </div>
+        <div id="lobby-mode" class="lroles" style="display:none"><span>Al morir:</span>
+          <button id="lobby-hardcore">🔁 Reaparecer</button>
+        </div>
         <div id="lobby-list" class="llist"></div>
         <div class="lactions">
           <button id="lobby-leave">Salir</button>
           <span id="lobby-wait">Esperando al anfitrión…</span>
           <button id="lobby-start" class="sprimary">▶ Iniciar</button>
         </div>
+      </div>
+      <div id="lobby-side">
+        <canvas id="lobby-preview"></canvas>
+        <div id="lobby-detail"></div>
+      </div>
       </div>
     </div>
     <button id="hud-gear" title="Ajustes visuales (O)">⚙</button>
@@ -542,6 +930,7 @@ function inject(): void {
     <div id="hud-win"></div>
     <div id="hud-death"></div>
     <div id="hud-killfeed"></div>
+    <canvas id="hud-minimap"></canvas>
   `;
   document.body.appendChild(hud);
 }

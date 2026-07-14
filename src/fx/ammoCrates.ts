@@ -46,13 +46,15 @@ export class AmmoCrates {
   private crates: CrateState[] = [];
   private mesh: THREE.InstancedMesh | null = null;
   private readonly geo = new THREE.BoxGeometry(CRATE_SIZE, CRATE_SIZE, CRATE_SIZE);
-  private readonly mat = new THREE.MeshStandardMaterial({
-    color: 0x5a6b2e, roughness: 0.7, metalness: 0.2, emissive: 0x39461a, emissiveIntensity: 0.55,
-  });
+  private readonly mat: THREE.MeshStandardMaterial;
   private readonly dummy = new THREE.Object3D();
   private dirty = false;
 
-  constructor(private readonly scene: THREE.Scene) {}
+  /** `color` tints the crate (default olive ammo box); pass a red for medkits. `emissive` defaults to a
+   *  darker shade of the base colour so both pickup types glow. */
+  constructor(private readonly scene: THREE.Scene, color = 0x5a6b2e, emissive = 0x39461a) {
+    this.mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.2, emissive, emissiveIntensity: 0.55 });
+  }
 
   /** (Re)builds the crate set from placement sites — all live. Empty list clears the crates. */
   build(sites: readonly AmmoSite[]): void {

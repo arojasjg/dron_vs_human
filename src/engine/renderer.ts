@@ -6,6 +6,12 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RENDER_DIST } from "../config";
 import type { QualityConfig } from "./quality";
 
+// Scope-circle radius in screen-HEIGHT units (0.6 ≈ 30vh radius / 60vh across, matched to the HUD ring/mask).
+// Because the magnified scene is squeezed into a circle SCOPE_CIRCLE_R× the screen height, the achieved
+// magnification is mainFOV·SCOPE_CIRCLE_R / scopeFOV — so a ×N zoom needs scopeFOV = mainFOV·SCOPE_CIRCLE_R / N.
+// (Grow this AND the HUD's #hud-scope mask + #hud-scope-ring vh values together, or they desync.)
+export const SCOPE_CIRCLE_R = 0.6;
+
 export class Renderer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene: THREE.Scene;
@@ -172,6 +178,49 @@ export class Renderer {
     } else {
       this.renderer.render(this.scene, camera);
     }
+  }
+
+  // --- optical sniper scope (built lazily on first use) -------------------------------------------------
+  private scopeRT: THREE.WebGLRenderTarget | null = null;
+  private scopeCam: THREE.PerspectiveCamera | null = null;
+  private scopeOverlay: THREE.Scene | null = null;
+  private scopeQuadCam: THREE.OrthographicCamera | null = null;
+  private scopeCircle: THREE.Mesh | null = null;
+
+  /** Draws the sniper scope: renders the scene ONCE MORE through a narrow-FOV camera co-located with the
+   *  player's view (into a small square RT), then composites that RT onto the frame as a centred circle. So
+   *  the MAGNIFICATION lives only inside the scope glass — the main frame (periphery) stays 1×. Call AFTER
+   *  render(). `zoomFov` is the scope FOV (lower = more zoom); `radius` is the circle radius in screen-height
+   *  units (0.44 ≈ 22vh, matched to the HUD scope ring). The narrow frustum sees few objects → cheap. */
+  renderScope(camera: THREE.PerspectiveCamera, zoomFov: number, radius = SCOPE_CIRCLE_R): void {
+    if (!this.scopeRT) {
+      this.scopeRT = new THREE.WebGLRenderTarget(512, 512);
+      this.scopeRT.texture.colorSpace = THREE.SRGBColorSpace;
+      this.scopeCam = new THREE.PerspectiveCamera(zoomFov, 1, camera.near, camera.far);
+      this.scopeOverlay = new THREE.Scene();
+      this.scopeQuadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+      this.scopeQuadCam.position.z = 1;
+      this.scopeCircle = new THREE.Mesh(
+        new THREE.CircleGeometry(1, 64),
+        new THREE.MeshBasicMaterial({ map: this.scopeRT.texture, toneMapped: false }),
+      );
+      this.scopeOverlay.add(this.scopeCircle);
+    }
+    const sc = this.scopeCam!;
+    camera.getWorldPosition(sc.position);
+    camera.getWorldQuaternion(sc.quaternion);
+    sc.fov = zoomFov; sc.near = camera.near; sc.far = camera.far; sc.updateProjectionMatrix();
+    this.renderer.setRenderTarget(this.scopeRT);
+    this.renderer.render(this.scene, sc);
+    this.renderer.setRenderTarget(null);
+    const aspect = window.innerWidth / window.innerHeight;
+    const q = this.scopeQuadCam!;
+    q.left = -aspect; q.right = aspect; q.updateProjectionMatrix();
+    this.scopeCircle!.scale.setScalar(radius);
+    this.renderer.autoClear = false;
+    this.renderer.clearDepth();
+    this.renderer.render(this.scopeOverlay!, q);
+    this.renderer.autoClear = true;
   }
 }
 

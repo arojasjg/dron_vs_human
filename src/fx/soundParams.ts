@@ -17,6 +17,7 @@ export const WEAPON_SFX: Record<string, ShotSfx> = {
   glauncher: { crackFreq: 600,  bodyFreq: 100, decay: 0.16, gain: 0.5 },
   net:       { crackFreq: 900,  bodyFreq: 220, decay: 0.2,  gain: 0.35 }, // airy whoosh
   bullet:    { crackFreq: 1700, bodyFreq: 150, decay: 0.09, gain: 0.45 }, // generic tracer (remote)
+  sniper:    { crackFreq: 1350, bodyFreq: 70,  decay: 0.3,  gain: 1.0 },  // heavy, deep rifle CRACK + long tail
 };
 
 /** Explosion synth params scale with blast power (a grenade ≈ 360, a rocket ≈ 520, kamikaze ≈ 900). */
