@@ -18,6 +18,22 @@ export function bearing(heading: number, vx: number, vz: number, tx: number, tz:
   return wrapAngle(Math.atan2(tx - vx, tz - vz) - heading);
 }
 
+/** Frontal-scanner cone test: is an enemy at (ex,ez) within `range` metres of the viewer at (px,pz) AND inside
+ *  the forward cone about (fdx,fdz)? `minDot` = cos(half-angle): 1 = dead ahead only, 0 = the whole front
+ *  hemisphere, −1 = everywhere. A coincident point (enemy on top of you) counts as inside; a zero forward
+ *  vector scans nothing. Pure — no DOM/three. Used by the frontal scanner to pick who to reveal. */
+export function inScanCone(
+  px: number, pz: number, fdx: number, fdz: number, ex: number, ez: number, range: number, minDot: number,
+): boolean {
+  const dx = ex - px, dz = ez - pz;
+  const d = Math.hypot(dx, dz);
+  if (d > range) return false;
+  if (d < 1e-6) return true;      // on top of us → inside
+  const fl = Math.hypot(fdx, fdz);
+  if (fl < 1e-6) return false;    // no forward direction → can't scan
+  return (dx * fdx + dz * fdz) / (d * fl) >= minDot;
+}
+
 /** Projects a world point onto a HEADING-UP radar of pixel size `size` (radius size/2) covering `range` metres.
  *  Returns [mx,my] with origin top-left, the viewer at the centre and "ahead" toward the top — or null if the
  *  point is beyond `range` (nothing to draw). */

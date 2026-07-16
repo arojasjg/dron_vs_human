@@ -80,18 +80,39 @@ export const WAVE_DIRS: Cardinal[] = ["N", "S", "E", "O"];
  *  (not a full ring around it), rotating N→S→E→O by wave so each wave comes from a different side and flies
  *  in. Convention matches the minimap (bearing 0 = +Z): N=−Z, S=+Z, E=+X, O=−X. `margin` voxels out sits in
  *  the clear band inside the forest ring. Pure. */
+export function cardinalPoint(
+  dir: Cardinal, cityX1: number, cityZ1: number, voxel: number, margin = 20,
+): { cx: number; cz: number } {
+  const midX = cityX1 * 0.5 * voxel, midZ = cityZ1 * 0.5 * voxel;
+  const off = margin * voxel;
+  switch (dir) {
+    case "N": return { cx: midX, cz: -off };                       // north edge (−Z)
+    case "S": return { cx: midX, cz: cityZ1 * voxel + off };       // south edge (+Z)
+    case "E": return { cx: cityX1 * voxel + off, cz: midZ };       // east edge (+X)
+    default:  return { cx: -off, cz: midZ };                       // west edge (−X)
+  }
+}
+
 export function cardinalSpawn(
   cityX1: number, cityZ1: number, voxel: number, wave: number, margin = 20,
 ): { cx: number; cz: number; dir: Cardinal } {
   const dir = WAVE_DIRS[((wave % 4) + 4) % 4];
-  const midX = cityX1 * 0.5 * voxel, midZ = cityZ1 * 0.5 * voxel;
-  const off = margin * voxel;
-  switch (dir) {
-    case "N": return { cx: midX, cz: -off, dir };                       // north edge (−Z)
-    case "S": return { cx: midX, cz: cityZ1 * voxel + off, dir };       // south edge (+Z)
-    case "E": return { cx: cityX1 * voxel + off, cz: midZ, dir };       // east edge (+X)
-    default:  return { cx: -off, cz: midZ, dir };                       // west edge (−X)
+  return { ...cardinalPoint(dir, cityX1, cityZ1, voxel, margin), dir };
+}
+
+/** The cardinal whose spawn point is FARTHEST from (px,pz) — so the first wave never lands on a player who
+ *  just spawned in the perimeter band. Later waves keep the rotation (by then players have moved inward, so
+ *  every side reads as "far"); the opening wave alone is steered across the map. Pure. */
+export function farthestCardinal(
+  px: number, pz: number, cityX1: number, cityZ1: number, voxel: number, margin = 20,
+): Cardinal {
+  let best: Cardinal = "N", bestD = -1;
+  for (const dir of WAVE_DIRS) {
+    const p = cardinalPoint(dir, cityX1, cityZ1, voxel, margin);
+    const d = (p.cx - px) * (p.cx - px) + (p.cz - pz) * (p.cz - pz);
+    if (d > bestD) { bestD = d; best = dir; }
   }
+  return best;
 }
 
 /** Where a PLAYER spawns, scaled to the map size + player count. Points sit in the CLEAR perimeter band just

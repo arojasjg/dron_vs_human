@@ -11,6 +11,12 @@ const MAT_MAP: Record<string, SfxMaterial> = {
   car_red: "metal", car_blue: "metal", car_teal: "metal", tire: "dirt",
 };
 
+// Which recorded sample each firearm plays (missing clip → the distinct per-weapon synth in shot() runs instead).
+const SHOT_SAMPLE: Record<string, string> = {
+  mg: "shot_rifle", bullet: "shot_rifle", shotgun: "shot_heavy",
+  smg: "shot_smg", lmg: "shot_lmg", dmr: "shot_dmr", sniper: "shot_sniper", glauncher: "shot_glauncher",
+};
+
 export class GameAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
@@ -36,8 +42,12 @@ export class GameAudio {
       if (!AC) return;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = 0.55;
-      this.master.connect(this.ctx.destination);
+      this.master.gain.value = 0.62;
+      // Master-bus compressor: glues the mix and TAMES PEAKS when many sounds stack (a loud shot/blast ducks the
+      // running sum instead of clipping) — the "ducking" glue for a busy battle. Cheap, always on.
+      const comp = this.ctx.createDynamicsCompressor();
+      comp.threshold.value = -18; comp.knee.value = 22; comp.ratio.value = 3.4; comp.attack.value = 0.003; comp.release.value = 0.2;
+      this.master.connect(comp); comp.connect(this.ctx.destination);
       // one reusable 2 s white-noise buffer feeds every burst/rotor
       const buf = this.ctx.createBuffer(1, Math.floor(this.ctx.sampleRate * 2), this.ctx.sampleRate);
       const d = buf.getChannelData(0);
@@ -66,7 +76,10 @@ export class GameAudio {
     if (!this.ctx) return;
     const base = import.meta.env.BASE_URL || "/";
     const names = ["shot_rifle", "shot_heavy", "explosion", "rotor", "impact_concrete", "impact_metal",
-      "impact_glass", "voxel_break", "footstep", "land", "melee", "melee_hit", "hit", "death"];
+      "impact_glass", "voxel_break", "footstep", "land", "melee", "melee_hit", "hit", "death",
+      // new realistic-SFX slots — drop the matching .mp3 in public/sfx/ and they auto-play (else the synth below runs)
+      "shot_smg", "shot_lmg", "shot_dmr", "shot_sniper", "shot_glauncher", "explosion_big", "collapse",
+      "scan_ping", "heal", "pickup"];
     for (const n of names) {
       fetch(`${base}sfx/${n}.mp3`).then((r) => (r.ok ? r.arrayBuffer() : Promise.reject()))
         .then((b) => this.ctx!.decodeAudioData(b)).then((buf) => this.samples.set(n, buf)).catch(() => {});
@@ -92,7 +105,7 @@ export class GameAudio {
 
   toggleMute(): boolean {
     this.muted = !this.muted;
-    if (this.master) this.master.gain.value = this.muted ? 0 : 0.55;
+    if (this.master) this.master.gain.value = this.muted ? 0 : 0.62;
     return this.muted;
   }
 
@@ -176,8 +189,12 @@ export class GameAudio {
   // ---- effects ----------------------------------------------------------------------------------
   shot(weapon: string, dist = 0): void {
     if (!this.ctx) return;
-    const sk = weapon === "shotgun" ? "shot_heavy" : (weapon === "mg" || weapon === "bullet") ? "shot_rifle" : null;
-    if (sk && this.playSample(sk, dist, sk === "shot_heavy" ? 0.8 : 4)) return; // shot_rifle clip is quiet -> boosted
+    // each firearm has its OWN sample slot (falls back to the distinct synth below until the .mp3 is added)
+    const sk = SHOT_SAMPLE[weapon];
+    if (sk) {
+      const g = sk === "shot_rifle" ? 4 : sk === "shot_heavy" ? 0.8 : 1.4; // existing clips are quiet → boosted; new clips ~unity
+      if (this.playSample(sk, dist, g)) return;
+    }
     const p = WEAPON_SFX[weapon] ?? WEAPON_SFX.mg, d = this.dest(dist);
     this.burst(6500, "highpass", 0.7, p.gain * 0.85, 0.014, d, 0, 0.0005);            // ignition SNAP (near-instant)
     this.burst(p.crackFreq, "bandpass", 1.5, p.gain, p.decay, d, 0, 0.0008, 0.5);     // the crack (gritty)
@@ -205,6 +222,7 @@ export class GameAudio {
   explosion(power: number, dist = 0): void {
     if (!this.ctx) return;
     // bigger blasts play louder + pitched DOWN (slower) so a mega-bomb reads as huge
+    if (power > 700 && this.playSample("explosion_big", dist, Math.min(1, 0.6 + power / 2500))) return; // dedicated big-blast clip
     if (this.playSample("explosion", dist, Math.min(1, 0.5 + power / 2500), Math.max(0.7, 1.1 - power / 2200))) return;
     const p = explosionParams(power), d = this.dest(dist);
     this.burst(5000, "highpass", 0.6, p.gain * 0.55, 0.05, d, 0, 0.0006);            // sharp leading crack
@@ -266,6 +284,14 @@ export class GameAudio {
   melee(): void { if (!this.ctx) return; if (this.playSample("melee", 0, 0.4)) return; this.burst(1600, "bandpass", 0.8, 0.4, 0.16, this.dest(0), 0, 0.006); }  // swing whoosh
   meleeHit(): void { if (!this.ctx) return; if (this.playSample("melee_hit", 0, 0.85)) return; const d = this.dest(0); this.burst(470, "lowpass", 1, 0.55, 0.1, d, 0, 0.001, 0.5); this.tone(135, "square", 0.35, 0.13, d, 78); } // butt-strike thud
   lowBattery(): void { if (this.ctx) this.tone(1200, "square", 0.18, 0.12, this.master!, 800); }
+  /** Frontal-scanner sonar: a rising sweep + a soft ping (sample slot: scan_ping). */
+  scan(): void { if (!this.ctx) return; if (this.playSample("scan_ping", 0, 0.7)) return; const d = this.master!; this.tone(420, "sine", 0.16, 0.18, d, 1400, 0, 0.004); this.burst(2200, "bandpass", 3, 0.12, 0.14, d, 0.02, 0.002); this.tone(1500, "sine", 0.1, 0.1, d, 900, 0.16); }
+  /** Bandage applied: a soft warm heal chime (sample slot: heal). */
+  heal(): void { if (!this.ctx) return; if (this.playSample("heal", 0, 0.8)) return; const d = this.master!; this.tone(520, "sine", 0.18, 0.22, d, 780, 0, 0.01); this.tone(780, "sine", 0.12, 0.2, d, 1040, 0.08, 0.01); }
+  /** Item pickup (ammo / medkit): a bright two-note pluck (sample slot: pickup). */
+  pickup(): void { if (!this.ctx) return; if (this.playSample("pickup", 0, 0.8)) return; const d = this.master!; this.tone(700, "square", 0.16, 0.06, d, 1000, 0, 0.002); this.tone(1050, "square", 0.12, 0.07, d, 1400, 0.05, 0.002); }
+  /** A structure collapsing: a deep rumble + a scatter of debris cracks (sample slot: collapse). */
+  structureCollapse(dist = 0): void { if (!this.ctx) return; if (this.playSample("collapse", dist, 0.9)) return; const d = this.dest(dist); this.burst(140, "lowpass", 0.6, 0.5, 0.6, d, 0, 0.01, 0.5); this.tone(58, "sine", 0.4, 0.8, d, 34); for (let k = 0; k < 6; k++) this.burst(900 + Math.random() * 1800, "bandpass", 1.4, 0.14, 0.12, d, 0.05 + k * 0.07 + Math.random() * 0.05, 0.001); }
 
   /** Continuous drone rotor: layered noise + two saws + a blade-pass tremolo → a real quad-copper whir.
    *  level (0..1) sets loudness, speed sets pitch. Started lazily (never built in human-only matches). */

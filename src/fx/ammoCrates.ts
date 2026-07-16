@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { VOXEL } from "../config";
 import type { AmmoSite } from "../build/prefabs";
+import { loadInstancedModel, type InstancedPart } from "../engine/instancedModel";
 
 // Ammo-supply crates for the soldiers: static pickups scattered on the city streets (see
 // prefabs.ammoBoxSites). A soldier walking over one refills its team's ammo (game.ts drives the pickup
@@ -44,28 +45,55 @@ export function respawnCrates(crates: CrateState[], now: number): boolean {
 
 export class AmmoCrates {
   private crates: CrateState[] = [];
-  private mesh: THREE.InstancedMesh | null = null;
+  private meshes: THREE.InstancedMesh[] = [];   // one InstancedMesh per material part (glTF) or one box (fallback)
   private readonly geo = new THREE.BoxGeometry(CRATE_SIZE, CRATE_SIZE, CRATE_SIZE);
   private readonly mat: THREE.MeshStandardMaterial;
   private readonly dummy = new THREE.Object3D();
   private dirty = false;
+  private parts: InstancedPart[] | null = null; // downloaded glTF parts once ready (null = box fallback)
+  private baseY = CRATE_SIZE / 2;               // instance Y for a live pickup (box: half-height; glTF: 0, base on ground)
 
-  /** `color` tints the crate (default olive ammo box); pass a red for medkits. `emissive` defaults to a
-   *  darker shade of the base colour so both pickup types glow. */
-  constructor(private readonly scene: THREE.Scene, color = 0x5a6b2e, emissive = 0x39461a) {
+  /** `color` tints the fallback box (default olive ammo box; pass a red for medkits). `modelUrl` (optional)
+   *  streams a CC0 glTF prop that REPLACES the box once loaded — kept as ONE InstancedMesh per material so a
+   *  field of pickups still costs a fixed few draw calls. `modelH` fits the model to that height in metres. */
+  constructor(private readonly scene: THREE.Scene, color = 0x5a6b2e, emissive = 0x39461a,
+              modelUrl?: string, modelH = 0.6) {
     this.mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.2, emissive, emissiveIntensity: 0.55 });
+    if (modelUrl) void loadInstancedModel(modelUrl, modelH).then((p) => {
+      if (!p) return;
+      // the glTF ships with flat, unlit-looking materials → give each part a self-glow (its own colour/texture)
+      // so a medkit/ammo box POPS on a dim street and reads as "pickup", like the old emissive crate did.
+      for (const part of p) {
+        const m = part.material as THREE.MeshStandardMaterial;
+        if (!m.isMeshStandardMaterial) continue;
+        m.emissive.copy(m.color);
+        if (m.map) m.emissiveMap = m.map;   // textured (ammo crate) → the texture itself glows
+        m.emissiveIntensity = 0.55;
+      }
+      this.parts = p; this.baseY = 0;
+      if (this.crates.length) this.rebuildMeshes();
+    });
   }
 
   /** (Re)builds the crate set from placement sites — all live. Empty list clears the crates. */
   build(sites: readonly AmmoSite[]): void {
-    if (this.mesh) { this.scene.remove(this.mesh); this.mesh.dispose(); this.mesh = null; }
     this.crates = sites.map((s) => ({ x: (s.vx + 0.5) * VOXEL, z: (s.vz + 0.5) * VOXEL, live: true, respawnAt: 0 }));
+    this.rebuildMeshes();
+  }
+
+  /** Rebuilds the InstancedMesh(es) for the current crate count — glTF parts if downloaded, else the box. */
+  private rebuildMeshes(): void {
+    for (const m of this.meshes) { this.scene.remove(m); m.dispose(); }
+    this.meshes = [];
     if (this.crates.length === 0) return;
-    const m = new THREE.InstancedMesh(this.geo, this.mat, this.crates.length);
-    m.castShadow = true;
-    this.mesh = m;
+    const specs = this.parts ?? [{ geometry: this.geo, material: this.mat }];
+    for (const p of specs) {
+      const m = new THREE.InstancedMesh(p.geometry, p.material, this.crates.length);
+      m.castShadow = true;
+      this.meshes.push(m);
+      this.scene.add(m);
+    }
     this.writeMatrices();
-    this.scene.add(m);
   }
 
   /** Nearest live crate to (px,pz) within pickup range, or -1. */
@@ -88,21 +116,19 @@ export class AmmoCrates {
   }
 
   private writeMatrices(): void {
-    const m = this.mesh;
-    if (!m) return;
+    if (this.meshes.length === 0) return;
     for (let i = 0; i < this.crates.length; i++) {
       const c = this.crates[i];
       if (c.live) {
-        this.dummy.position.set(c.x, CRATE_SIZE / 2, c.z);
+        this.dummy.position.set(c.x, this.baseY, c.z);
         this.dummy.scale.setScalar(1);
       } else {
         this.dummy.position.set(c.x, -100, c.z); // zero-scaled + buried → invisible while taken
         this.dummy.scale.setScalar(0);
       }
       this.dummy.updateMatrix();
-      m.setMatrixAt(i, this.dummy.matrix);
+      for (const m of this.meshes) m.setMatrixAt(i, this.dummy.matrix); // every material part shares the crate's transform
     }
-    m.instanceMatrix.needsUpdate = true;
-    m.computeBoundingSphere();
+    for (const m of this.meshes) { m.instanceMatrix.needsUpdate = true; m.computeBoundingSphere(); }
   }
 }

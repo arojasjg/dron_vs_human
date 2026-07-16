@@ -1,15 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { MODEL_CONFIGS, selectGltfBots } from "../src/net/avatarModels";
+import { MODEL_CONFIGS, DRONE_CLASS_MODEL, SOLDIER_CLASS_MODEL, KIND_MODEL, unitModel, selectGltfBots } from "../src/net/avatarModels";
 
 describe("avatar model registry", () => {
+  const allCfgs = [...Object.values(MODEL_CONFIGS), ...Object.values(DRONE_CLASS_MODEL), ...Object.values(SOLDIER_CLASS_MODEL), ...Object.values(KIND_MODEL)];
   it("every config has a real url, a positive scale and an idle clip", () => {
-    for (const cfg of Object.values(MODEL_CONFIGS)) {
+    for (const cfg of allCfgs) {
       expect(cfg.url.endsWith(".glb")).toBe(true);
       expect(cfg.scale).toBeGreaterThan(0);
       expect(cfg.clips.idle.length).toBeGreaterThan(0);
       expect(Number.isFinite(cfg.yOffset)).toBe(true);
       expect(Number.isFinite(cfg.rot)).toBe(true);
     }
+  });
+  it("each drone/soldier CLASS maps to a DISTINCT model (no two the same)", () => {
+    const droneUrls = Object.values(DRONE_CLASS_MODEL).map((c) => c.url);
+    const soldierUrls = Object.values(SOLDIER_CLASS_MODEL).map((c) => c.url);
+    expect(new Set(droneUrls).size).toBe(droneUrls.length);   // 4 distinct drone-class models
+    expect(new Set(soldierUrls).size).toBe(soldierUrls.length); // 4 distinct soldier-class models
+    expect(droneUrls.some((u) => soldierUrls.includes(u))).toBe(false); // drones ≠ soldiers
+  });
+  it("unitModel picks by role+class and falls back to that side's assault for an unknown class", () => {
+    expect(unitModel("drone", "interceptor").url).toBe(DRONE_CLASS_MODEL.interceptor.url);
+    expect(unitModel("human", "marksman").url).toBe(SOLDIER_CLASS_MODEL.marksman.url);
+    expect(unitModel("drone", "???").url).toBe(DRONE_CLASS_MODEL.assault.url);   // unknown → assault
+    expect(unitModel("human", "").url).toBe(SOLDIER_CLASS_MODEL.assault.url);
+    // a drone never resolves to a soldier model and vice-versa
+    expect(unitModel("drone", "heavy").url).toBe(DRONE_CLASS_MODEL.assault.url); // "heavy" isn't a drone class → assault
   });
 });
 

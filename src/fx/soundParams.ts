@@ -12,6 +12,9 @@ export interface ShotSfx {
 
 export const WEAPON_SFX: Record<string, ShotSfx> = {
   mg:        { crackFreq: 1800, bodyFreq: 150, decay: 0.09, gain: 0.5 },  // sharp rapid crack
+  smg:       { crackFreq: 2200, bodyFreq: 175, decay: 0.055, gain: 0.4 }, // fast + high + light: a tight zippy tac-tac
+  lmg:       { crackFreq: 1500, bodyFreq: 115, decay: 0.12, gain: 0.64 }, // heavy suppressor: lower, louder, more body
+  dmr:       { crackFreq: 1450, bodyFreq: 88,  decay: 0.19, gain: 0.82 }, // marksman: a punchy deep SEMI-auto crack + tail
   shotgun:   { crackFreq: 1150, bodyFreq: 85,  decay: 0.24, gain: 0.85 }, // deep loud boom
   grenade:   { crackFreq: 520,  bodyFreq: 120, decay: 0.14, gain: 0.45 }, // launch thunk
   glauncher: { crackFreq: 600,  bodyFreq: 100, decay: 0.16, gain: 0.5 },

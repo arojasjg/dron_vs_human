@@ -3,7 +3,7 @@ import {
   seekDir, shouldFire, waveSize, pickTarget, orbitDir, jink, leadAim, spread,
   speedScale, fireCdScale, hpBonus, pickKind, ARCHETYPES, AiSwarm, shouldDrop, homingStep, type AiDrop,
   pickThreatTarget, beingAimedAt, separation, shouldBoom, applyHeal, type AiBoom,
-  beliefAccuracy, beliefGoal, pickAudible, holdMult, shouldSuppress, type AiNoise,
+  beliefAccuracy, beliefGoal, pickAudible, holdMult, shouldSuppress, searchPoint, openingSeek, type AiNoise, type AiBreak,
 } from "../src/net/ai";
 
 describe("enemy AI — pure decision helpers", () => {
@@ -26,12 +26,14 @@ describe("enemy AI — pure decision helpers", () => {
     expect(pickTarget(0, 0, [])).toBe(-1);
   });
 
-  it("waveSize grows ~×1.6 every wave with NO cap ('cada vez más drones')", () => {
+  it("waveSize grows ~×1.6 early, then PLATEAUS at the cap (survivable late waves)", () => {
     expect(waveSize(0)).toBe(5);
-    expect(waveSize(1)).toBe(8);                         // ceil(5·1.6)
+    expect(waveSize(1)).toBe(8);                         // ceil(5·1.6) — early ramp unchanged
     expect(waveSize(2)).toBe(13);                        // ceil(5·1.6²)
-    expect(waveSize(3)).toBeGreaterThan(waveSize(2));    // strictly grows
-    expect(waveSize(10)).toBeGreaterThan(500);           // uncapped — explodes late
+    expect(waveSize(3)).toBeGreaterThan(waveSize(2));    // strictly grows while under the cap
+    expect(waveSize(10)).toBe(60);                       // capped — no longer explodes into the hundreds
+    expect(waveSize(100)).toBe(60);                      // stays at the plateau
+    expect(waveSize(5, 5, 40)).toBe(40);                 // cap is configurable
     expect(waveSize(-5)).toBe(5);                        // guards a negative
   });
 
@@ -341,6 +343,28 @@ describe("enemy AI — BRUTAL upgrade (threat / memory / coordination / archetyp
   });
 });
 
+describe("searchPoint — widening seed-sectored last-seen sweep (pure)", () => {
+  const dist = (p: [number, number], ax: number, az: number) => Math.hypot(p[0] - ax, p[1] - az);
+  it("radius GROWS with age (search farther the longer you're unseen), capped at maxR", () => {
+    const r0 = dist(searchPoint(0, 0, 0.3, 0), 0, 0);
+    const r5 = dist(searchPoint(0, 0, 0.3, 5), 0, 0);
+    const rBig = dist(searchPoint(0, 0, 0.3, 1000), 0, 0);
+    expect(r5).toBeGreaterThan(r0);              // older contact → wider ring
+    expect(rBig).toBeLessThanOrEqual(22 + 1e-6); // capped at maxR
+    expect(r0).toBeCloseTo(2);                   // starts near the anchor (base)
+  });
+  it("different seeds cover different SECTORS (fan out, not the same point)", () => {
+    const a = searchPoint(0, 0, 0.1, 4), b = searchPoint(0, 0, 0.6, 4);
+    expect(Math.hypot(a[0] - b[0], a[1] - b[1])).toBeGreaterThan(1); // distinct bearings → real spread
+  });
+  it("is centred on the last-seen anchor and stays finite", () => {
+    const p = searchPoint(50, -30, 0.7, 3);
+    expect(dist(p, 50, -30)).toBeLessThanOrEqual(22 + 1e-6); // within maxR of the anchor
+    expect(Number.isFinite(p[0]) && Number.isFinite(p[1])).toBe(true);
+    expect(dist(searchPoint(0, 0, 0.5, -5), 0, 0)).toBeCloseTo(2); // guards a negative age → base radius
+  });
+});
+
 describe("enemy AI — perception (sight + hearing, belief that decays)", () => {
   it("beliefAccuracy decays from its update value, monotonically, never below the floor", () => {
     expect(beliefAccuracy(1, 0)).toBeCloseTo(1);                 // fresh sighting → exact
@@ -385,6 +409,65 @@ describe("enemy AI — perception (sight + hearing, belief that decays)", () => 
     expect(shouldSuppress("chaser", true, 0)).toBe(false);      // only the ranged suppressors
     expect(shouldSuppress("gunner", false, 0)).toBe(false);     // stale belief → no blind spray
     expect(shouldSuppress("tank", true, 0.5)).toBe(false);      // on cooldown
+  });
+});
+
+describe("openingSeek — steer a blocked bot toward a door/window (pure)", () => {
+  // a wall at x∈[4,5) spanning all z EXCEPT an open doorway at z∈[1,3]; bot in front at (3.5,0), goal +x
+  const wall = (x: number, _y: number, z: number) => x >= 4 && x < 5 && !(z >= 1 && z < 3);
+  it("finds the nearby opening and returns its XZ + a low entry height", () => {
+    const ok = openingSeek(3.5, 0, 1, 0, wall);
+    expect(ok).not.toBeNull();
+    expect(ok![1]).toBeGreaterThan(0.5); expect(ok![1]).toBeLessThan(3.5); // steered toward the +z doorway
+    expect([1.5, 4.5]).toContain(ok![2]);                                  // an entry height, not the bot's height
+  });
+  it("returns null when the wall is solid at every entry height (→ the bot climbs instead)", () => {
+    expect(openingSeek(3.5, 0, 1, 0, (x) => x >= 4 && x < 5)).toBeNull(); // infinite wall, no gap
+  });
+  it("seed splits which side is scanned first → the swarm fans across two doorways", () => {
+    const twoDoors = (x: number, _y: number, z: number) => x >= 4 && x < 5 && !((z >= 1 && z < 3) || (z > -3 && z <= -1));
+    const a = openingSeek(3.5, 0, 1, 0, twoDoors, 0.1); // low seed → +z first
+    const b = openingSeek(3.5, 0, 1, 0, twoDoors, 0.9); // high seed → −z first
+    expect(Math.sign(a![1])).not.toBe(Math.sign(b![1]));
+  });
+});
+
+describe("enemy AI — building entry (openingSeek + break requests)", () => {
+  it("tick: a bot blocked between it and its last-seen target requests a break of the wall ahead", () => {
+    const s = new AiSwarm();
+    s.spawnWave(20, 0, 0, 5, () => 0.5);               // a CHASER at (20,·,0) (pushes IN, hold 5m), target at the origin
+    const wall = (x: number) => x >= 8 && x <= 10;     // an unbroken wall between the bot and the target
+    s.tick(0.05, [{ id: 1, x: 0, y: 0, z: 0 }], () => true, () => 0.5, undefined, undefined, (x) => wall(x)); // sees → belief (0,0)
+    const breaks: AiBreak[] = [];
+    for (let i = 0; i < 60; i++)
+      s.tick(0.05, [{ id: 1, x: 0, y: 0, z: 0 }], () => false, () => 0.5, undefined, undefined, (x) => wall(x), [], breaks);
+    expect(breaks.length).toBeGreaterThan(0);          // pressed the wall with no opening → asked the game to clear it
+    expect(breaks.every((b) => Number.isFinite(b.x) && Number.isFinite(b.y))).toBe(true);
+  });
+});
+
+describe("enemy AI — EMP stun (crowd control)", () => {
+  it("stunBots disables bots in radius; a stunned bot does not move or fire", () => {
+    const s = new AiSwarm();
+    s.spawnWave(5, 0, 0, 5, () => 0.5); // chasers stacked at (5,·,0), target at origin (they'd rush −x)
+    const before = { x: s.list[0].x, y: s.list[0].y };
+    const n = s.stunBots(5, 0, 4, 2);                 // EMP within 4 m for 2 s → catches the whole cluster
+    expect(n).toBe(s.count);                          // every bot in range disabled
+    const fires = s.tick(0.1, [{ id: 1, x: 0, y: 0, z: 0 }], () => true); // would normally approach + maybe fire
+    expect(s.list[0].x).toBeCloseTo(before.x);        // frozen — no movement
+    expect(s.list[0].y).toBeCloseTo(before.y);
+    expect(fires.length).toBe(0);                     // disabled — no shots
+    expect(s.list[0].stun).toBeGreaterThan(0);        // still stunned (2 − 0.1)
+  });
+  it("stun wears off and the bot resumes", () => {
+    const s = new AiSwarm();
+    s.spawnWave(20, 0, 0, 5, () => 0.5);              // FAR from the target → chasers APPROACH (move −x), not orbit
+    s.stunBots(20, 0, 4, 0.1);                        // one-tick stun at dt 0.1
+    s.tick(0.1, [{ id: 1, x: 0, y: 0, z: 0 }], () => true); // still stunned this tick (0.1 → 0.0), frozen
+    const xMid = s.list[0].x;
+    s.tick(0.1, [{ id: 1, x: 0, y: 0, z: 0 }], () => true); // stun elapsed → moves again
+    expect(s.list[0].x).toBeLessThan(xMid);           // resumed approaching the origin (−x)
+    expect(s.stunBots(99, 99, 1, 1)).toBe(0);         // out of range → nobody stunned
   });
 });
 

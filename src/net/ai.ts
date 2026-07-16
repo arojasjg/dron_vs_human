@@ -17,6 +17,8 @@ export interface AiBot {
   ba: number;                               // belief accuracy at the last update (1 = saw it, ~0.6 = heard it); decays with age
   bt: number;                               // believed target id (bound on perception; survives losing sight → no omniscient re-pick)
   fx: number; fz: number;                   // facing (unit XZ toward the current belief) — drives the tank's shield
+  okx: number; okz: number; oky: number; okT: number; // LATCHED building opening (world XZ + entry height + time); okT < 0 = none
+  stun: number;                             // seconds of EMP stun remaining — while >0 the bot is disabled (no move/fire)
 }
 export interface AiTarget {
   id: number; x: number; y: number; z: number; vx?: number; vz?: number;
@@ -31,6 +33,9 @@ export interface AiNoise { x: number; z: number; loud: number; }
 export interface AiDrop { id: number; x: number; y: number; z: number; targetId: number; }
 /** A KAMIKAZE reached its target and self-detonates at (x,y,z) — a contact explosion on the player. */
 export interface AiBoom { id: number; x: number; y: number; z: number; targetId: number; }
+/** A bot pressed against a wall on its way to a belief inside a building REQUESTS the voxel just ahead be
+ *  cleared. The game side breaks it ONLY if it's glass (a window) — ai.ts is material-agnostic. */
+export interface AiBreak { id: number; x: number; y: number; z: number; dx: number; dz: number; }
 
 /** Per-archetype base stats. speed m/s · hp bullets-to-kill · hold stand-off (m) · fireCd s · high hover height (m). */
 export const ARCHETYPES: Record<AiKind, { speed: number; hp: number; hold: number; fireCd: number; high: number }> = {
@@ -59,9 +64,10 @@ export function pickKind(rng: () => number, wave = 0): AiKind {
   return b < 0.45 ? "gunner" : b < 0.78 ? "chaser" : "diver";
 }
 
-/** Wave size grows ~×1.6 each wave — NO cap ("cada vez más drones"). Pure. */
-export function waveSize(wave: number, base = 5): number {
-  return Math.ceil(base * Math.pow(1.6, Math.max(0, wave)));
+/** Wave size grows ~×1.6 each wave but PLATEAUS at `cap` — the early ramp is unchanged, late waves stop
+ *  exploding into the hundreds so a soldier (with the new anti-swarm tools) can actually hold. Pure. */
+export function waveSize(wave: number, base = 5, cap = 60): number {
+  return Math.min(cap, Math.ceil(base * Math.pow(1.6, Math.max(0, wave))));
 }
 
 /** Per-wave difficulty ramps (pure, bounded — BRUTAL: higher caps so late waves are punishing). */
@@ -203,6 +209,48 @@ export function beliefGoal(lsx: number, lsz: number, seed: number, t: number, ac
   return [lsx + Math.cos(ang) * off, lsz + Math.sin(ang) * off];
 }
 
+/** A LOST-CONTACT search point around the last-seen anchor: a WIDENING ring (radius grows with `age` since the
+ *  last perception, capped at `maxR`) at a per-bot SECTOR (seed) that slowly SWEEPS. So the swarm first converges
+ *  on where you were last seen, then fans out to cover every approach — a deliberate sweep, not the small drift
+ *  of beliefGoal. Distinct from beliefGoal: much wider reach + seed-partitioned coverage. Pure. */
+export function searchPoint(lsx: number, lsz: number, seed: number, age: number, base = 2, expand = 2, maxR = 22): [number, number] {
+  const r = Math.min(maxR, base + Math.max(0, age) * expand); // longer unseen → search farther out
+  const ang = seed * 6.283 + Math.max(0, age) * 0.6;          // per-bot sector + a slow sweep → cover, don't sit
+  return [lsx + Math.cos(ang) * r, lsz + Math.sin(ang) * r];
+}
+
+/** BUILDING ENTRY: find a nearby door/window a blocked bot can slip through. Slides ALONG the blocking wall's
+ *  face (a point `wallDist` ahead) in pure ±x/±z steps along the world axis perpendicular to the dominant
+ *  approach axis — voxel walls are axis-aligned, so this stays ON the wall plane instead of drifting off a
+ *  thick wall's edge. Probes at fixed ENTRY heights (doors + low windows are low; probing the bot's own height
+ *  would false-positive once it climbed ABOVE a wall). An opening = a clear cell IN the wall plane (a real gap).
+ *  Returns [openX, openZ, entryY] of the nearest one (seed splits the swarm left/right so they fan across
+ *  multiple doors), or null → the caller climbs instead. Pure over `solid`. Bounded: 2 sides × ~10 steps ×
+ *  `heights` probes per call. (Trades a small chance of rounding a wall's lateral edge for robustness — the
+ *  sub-voxel collision march still prevents any tunnelling regardless of where this steers.) */
+export function openingSeek(
+  bx: number, bz: number, gdx: number, gdz: number, solid: (x: number, y: number, z: number) => boolean,
+  seed = 0, reach = 6, step = 0.6, heights: readonly number[] = [1.5, 4.5], wallDist = 0.7,
+): [number, number, number] | null {
+  const gl = Math.hypot(gdx, gdz) || 1e-3;
+  const fdx = gdx / gl, fdz = gdz / gl;       // forward toward the goal
+  const wx = bx + fdx * wallDist, wz = bz + fdz * wallDist; // a point ON the blocking wall's face, just ahead
+  // voxel walls are axis-aligned → slide along the WORLD axis perpendicular to the dominant approach axis (a pure
+  // ±x or ±z sweep that stays ON the wall plane, instead of a diagonal that drifts off a thick wall's edge).
+  const alongX = Math.abs(fdx) >= Math.abs(fdz);
+  const px = alongX ? 0 : 1, pz = alongX ? 1 : 0;
+  const sides = seed < 0.5 ? [1, -1] : [-1, 1]; // seed → half the swarm scans left-first, half right → fan out
+  for (let d = step; d <= reach; d += step) {    // nearest opening first
+    for (const side of sides) {
+      const sx = wx + px * side * d, sz = wz + pz * side * d; // slide ALONG the wall face → a real hole, not open air in front
+      for (const hy of heights) {
+        if (!solid(sx, hy, sz)) return [sx, sz, hy]; // a clear cell in the wall plane = a door/window gap
+      }
+    }
+  }
+  return null;
+}
+
 /** Index of the best AUDIBLE noise from (bx,bz): largest positive margin (loud − dist); -1 if none is within
  *  its loudness radius. A loud explosion beats a near-but-quiet footstep. Pure. */
 export function pickAudible(bx: number, bz: number, noises: readonly AiNoise[]): number {
@@ -272,7 +320,7 @@ export class AiSwarm {
       this.bots.set(this.nextId, {
         id: this.nextId, x: cx + Math.cos(a) * radius, y: y + st.high * 0.5, z: cz + Math.sin(a) * radius,
         hp, maxHp: hp, cd: rng() * st.fireCd, gcd: rng() * this.GREN_CD, kind, seed: rng(), orbit: rng() < 0.5 ? 1 : -1,
-        lsx: cx, lsz: cz, lsT: -1, ba: 0, bt: -1, fx: 0, fz: 0,
+        lsx: cx, lsz: cz, lsT: -1, ba: 0, bt: -1, fx: 0, fz: 0, okx: 0, okz: 0, oky: 0, okT: -1, stun: 0,
       });
       this.nextId++;
     }
@@ -288,7 +336,7 @@ export class AiSwarm {
   tick(
     dt: number, targets: readonly AiTarget[], los: LosFn = () => true, aimRng: () => number = Math.random,
     drops?: AiDrop[], booms?: AiBoom[], solid: (x: number, y: number, z: number) => boolean = () => false,
-    noises: readonly AiNoise[] = [],
+    noises: readonly AiNoise[] = [], breaks?: AiBreak[],
   ): AiFire[] {
     this.t += dt;
     const fires: AiFire[] = [];
@@ -314,6 +362,7 @@ export class AiSwarm {
 
     for (const b of this.bots.values()) {
       const a = ARCHETYPES[b.kind];
+      if (b.stun > 0) { b.stun -= dt; b.cd = Math.max(b.cd, 0.2); continue; } // EMP: disabled — no move, no fire, hovers in place
       // --- PERCEPTION: hearing first, then sight (sight wins). Belief anchor = lsx/lsz, accuracy = ba. ---
       const ni = pickAudible(b.x, b.z, noises);
       if (ni >= 0) { b.lsx = noises[ni].x; b.lsz = noises[ni].z; b.lsT = this.t; b.ba = 0.6; } // heard → approximate fix
@@ -351,9 +400,11 @@ export class AiSwarm {
         mvx = dir[0]; mvz = dir[2];
       } else if (lowHp) {                                 // hurt → back off + strafe (self-preservation)
         mvx = ox - dir[0] * 0.8; mvz = oz - dir[2] * 0.8;
-      } else if (!fresh) {                                // SEARCH: sweep the drifting belief ring, orbit-heavy → FAN OUT
-        mvx = (rdx / rl) * 0.6 + ox * 0.7 + dir[0] * 0.25;
-        mvz = (rdz / rl) * 0.6 + oz * 0.7 + dir[2] * 0.25;
+      } else if (!fresh) {                                // SEARCH: converge on the last-seen spot, then fan OUT in a
+        const [spx, spz] = searchPoint(b.lsx, b.lsz, b.seed, age); // WIDENING, seed-sectored sweep (cover every approach)
+        const sdx = spx - b.x, sdz = spz - b.z, sl = Math.hypot(sdx, sdz) || 1e-3;
+        mvx = (sdx / sl) * 0.85 + ox * 0.5;               // seek the sweep point (dominant) + orbit for lateral coverage
+        mvz = (sdz / sl) * 0.85 + oz * 0.5;
       } else if (gDist > hold) {                          // approach: encircle SLOT dominant + goal-seek + weave
         mvx = (rdx / rl) * 0.75 + dir[0] * 0.5 + ox * 0.45 * jk;
         mvz = (rdz / rl) * 0.75 + dir[2] * 0.5 + oz * 0.45 * jk;
@@ -361,6 +412,27 @@ export class AiSwarm {
         const adj = gDist < hold * 0.6 ? -0.8 : (gDist > hold * 1.1 ? 0.5 : 0);
         mvx = ox * 1.2 + dir[0] * adj; mvz = oz * 1.2 + dir[2] * adj;
       }
+      // BUILDING ENTRY: if a wall blocks the straight line to the belief, steer toward the nearest door/window
+      // (slip through) instead of grinding up and OVER it. If no open gap is near, REQUEST a break of the voxel
+      // just ahead (the game clears it only if it's glass) — so drones enter through doors or by shattering
+      // windows, rather than always climbing to the roof. Latched ~1.2 s so they don't dither between openings.
+      const gfx = gdx / gDist, gfz = gdz / gDist;
+      let seekingOpening = false, entryY = 0;
+      const wallAhead = b.kind !== "kamikaze" && !lowHp && solid(b.x + gfx * 0.6, b.y, b.z + gfz * 0.6);
+      if (wallAhead) {
+        let ok: [number, number, number] | null = null;
+        if (b.okT >= 0 && this.t - b.okT < 1.2) ok = [b.okx, b.okz, b.oky];   // reuse the latched opening
+        else { ok = openingSeek(b.x, b.z, gdx, gdz, solid, b.seed); if (ok) { b.okx = ok[0]; b.okz = ok[1]; b.oky = ok[2]; b.okT = this.t; } }
+        if (ok) {
+          const odx = ok[0] - b.x, odz = ok[1] - b.z, ol = Math.hypot(odx, odz) || 1e-3;
+          mvx = (odx / ol) * 0.9 + gfx * 0.35;  // slide toward the opening (dominant) + a little forward through it
+          mvz = (odz / ol) * 0.9 + gfz * 0.35;
+          seekingOpening = true; entryY = ok[2];
+        } else if (breaks) {
+          breaks.push({ id: b.id, x: b.x + gfx * 0.6, y: b.y, z: b.z + gfz * 0.6, dx: gfx, dz: gfz }); // ask to clear the pane ahead
+        }
+      }
+
       if (aimedAt) { mvx += ox * 1.2; mvz += oz * 1.2; }   // DODGE when the crosshair is on us
 
       const [sepx, sepz] = separation(b.x, b.z, neighborsOf(b), SEP_RADIUS); // anti-clumping
@@ -397,7 +469,8 @@ export class AiSwarm {
         wantY = eyeY + a.high * highMul;
         if (!canSee && perceived) wantY += 5;             // rise to see over the wall toward the believed spot
       }
-      if (blocked) wantY = Math.min(45, Math.max(wantY, b.y + 8)); // hit something → climb over it (cap ~45 m)
+      if (seekingOpening) wantY = entryY;                 // drop to the door/window band to fly IN, not climb over
+      else if (blocked) wantY = Math.min(45, Math.max(wantY, b.y + 8)); // hit something → climb over it (cap ~45 m)
       let ny = b.y + (wantY - b.y) * Math.min(1, dt * 2.2);
       if (ny < b.y && solid(b.x, ny, b.z)) ny = b.y;      // descending into a roof → rest on it, don't sink through
       b.y = ny;
@@ -460,6 +533,18 @@ export class AiSwarm {
     b.hp -= d;
     if (b.hp <= 0) { this.bots.delete(id); return true; }
     return false;
+  }
+
+  /** EMP: disable every bot within `r` metres (XZ) of (x,z) for `dur` seconds. Returns how many were hit.
+   *  Host-authoritative — a stunned bot stops moving/firing in tick, so the frozen positions the host
+   *  broadcasts show peers the disabled swarm with no extra netcode. */
+  stunBots(x: number, z: number, r: number, dur: number): number {
+    let n = 0; const r2 = r * r;
+    for (const b of this.bots.values()) {
+      const dx = b.x - x, dz = b.z - z;
+      if (dx * dx + dz * dz <= r2) { b.stun = Math.max(b.stun, dur); n++; }
+    }
+    return n;
   }
 
   clear(): void { this.bots.clear(); this.wave = 0; this.nextId = 1; this.t = 0; this.lastContact = { x: 0, z: 0, t: -1 }; }

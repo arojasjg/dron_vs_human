@@ -1,5 +1,7 @@
 // glTF avatar model registry + the pure LOD selector. Kept three.js-free so the config and the
 // "which bots get the expensive skinned model" decision unit-test without a renderer.
+import type { Role, SoldierClass, DroneClass } from "./roles";
+import type { AiKind } from "./ai";
 
 export interface AvatarModelConfig {
   url: string;       // path under public/ (loaded via instanceModel)
@@ -9,11 +11,49 @@ export interface AvatarModelConfig {
   clips: { idle: string; walk?: string; run?: string }; // clip-name candidates (pickAction is fuzzy/case-insensitive)
 }
 
-/** The on-disk glTF avatars. Soldiers keep the rigged Soldier.glb; drones (preview + near-LOD) use the
- *  animated RobotExpressive.glb. Scale/offset are eyeballed and browser-tuned. */
+// A DISTINCT CC0 model per class/archetype so no two classes look the same. All non-skinned drones (→ cheap to
+// instance for the swarm); soldiers are peers-only (few) so a skinned model is fine. scale/yOffset are in-world
+// tuning (the lobby preview auto-frames by bbox, so it reads any of these correctly regardless).
+const drone = (url: string, scale = 1, yOffset = 0): AvatarModelConfig =>
+  ({ url, scale, yOffset, rot: Math.PI, clips: { idle: "Idle", walk: "Walk", run: "Run" } });
+const soldier = (url: string, scale = 1, yOffset = -1.5): AvatarModelConfig =>
+  ({ url, scale, yOffset, rot: Math.PI, clips: { idle: "Idle", walk: "Walk", run: "Run" } });
+
+/** One distinct drone model per drone class. */
+export const DRONE_CLASS_MODEL: Record<DroneClass, AvatarModelConfig> = {
+  assault:     drone("models/units/drone_basic.glb"),
+  interceptor: drone("models/units/drone_little.glb"),
+  armor:       drone("models/units/drone_predator.glb"),
+  artillery:   drone("models/units/drone_orb.glb"),
+};
+/** One distinct soldier model per soldier class. */
+export const SOLDIER_CLASS_MODEL: Record<SoldierClass, AvatarModelConfig> = {
+  assault:  soldier("models/units/sol_rifleman.glb"),
+  scout:    soldier("models/units/sol_scout.glb"),
+  heavy:    soldier("models/units/sol_swat.glb"),
+  marksman: soldier("models/units/sol_sniper.glb"),
+};
+/** One distinct drone model per AI archetype → the enemy swarm reads as a varied force, not one clone. */
+export const KIND_MODEL: Record<AiKind, AvatarModelConfig> = {
+  chaser:   drone("models/units/drone_little.glb"),
+  gunner:   drone("models/units/drone_basic.glb"),
+  diver:    drone("models/units/drone_antigrav.glb"),
+  tank:     drone("models/units/drone_predator.glb"),
+  kamikaze: drone("models/units/drone_stinger.glb"),
+  support:  drone("models/units/drone_orb.glb"),
+};
+
+/** The model for a player's role+class, falling back to that side's "assault" for an unknown class. Pure. */
+export function unitModel(role: Role, cls: string): AvatarModelConfig {
+  if (role === "drone") return DRONE_CLASS_MODEL[cls as DroneClass] ?? DRONE_CLASS_MODEL.assault;
+  return SOLDIER_CLASS_MODEL[cls as SoldierClass] ?? SOLDIER_CLASS_MODEL.assault;
+}
+
+/** The on-disk glTF avatars. Soldiers keep the rigged Soldier.glb; the drone preview uses the CC0
+ *  enemy-flying quadcopter (a real drone reads better than a walking robot). Scale/offset browser-tuned. */
 export const MODEL_CONFIGS: Record<"soldier" | "robot", AvatarModelConfig> = {
   soldier: { url: "models/Soldier.glb", scale: 1.0, yOffset: -1.5, rot: Math.PI, clips: { idle: "Idle", walk: "Walk", run: "Run" } },
-  robot: { url: "models/RobotExpressive.glb", scale: 0.3, yOffset: -0.35, rot: Math.PI, clips: { idle: "Idle", walk: "Walking", run: "Running" } },
+  robot: { url: "models/drone/enemy-flying.glb", scale: 1.6, yOffset: -0.4, rot: Math.PI, clips: { idle: "Idle", walk: "Walk", run: "Run" } },
 };
 
 /** Which bots get the EXPENSIVE skinned glTF this frame: only the up-to-`n` NEAREST bots within `r` metres of

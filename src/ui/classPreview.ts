@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { buildClassModel } from "../net/classModels";
 import { classStats, type Role } from "../net/roles";
 import { instanceModel, pickAction, type ModelInstance } from "../engine/modelLoader";
-import { MODEL_CONFIGS } from "../net/avatarModels";
+import { unitModel } from "../net/avatarModels";
 
 // Self-contained 3D class preview for the lobby. Owns its OWN tiny renderer/scene/camera + rAF loop on a
 // dedicated <canvas>, fully decoupled from the game renderer. Created when the lobby opens and disposed
@@ -50,7 +50,7 @@ export class ClassPreview {
     if (this.disposed) return;
     const token = ++this.loadToken;
     this.showGroup(buildClassModel(role, cls), false); // instant procedural placeholder/fallback
-    const cfg = MODEL_CONFIGS[role === "drone" ? "robot" : "soldier"];
+    const cfg = unitModel(role, cls); // a DISTINCT model per class (not one shared per role)
     instanceModel(cfg.url).then((m) => {
       if (this.disposed || token !== this.loadToken || !m) { // disposed / class changed / load failed → keep procedural
         if (m) { m.mixer.stopAllAction(); m.scene.traverse((o) => { const me = o as THREE.Mesh; if (!me.isMesh) return; const mt = me.material; if (Array.isArray(mt)) mt.forEach((x) => x.dispose()); else if (mt) mt.dispose(); }); } // free the stale instance's per-instance materials (NOT the shared geometry)

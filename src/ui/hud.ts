@@ -99,6 +99,8 @@ export class Hud {
   private readonly hit: HTMLElement;
   private readonly death: HTMLElement;
   private readonly killfeedEl: HTMLElement;
+  private scannerEl!: HTMLElement;   // frontal-scanner status panel
+  private scanMarks!: HTMLElement;   // on-screen directional markers container
   private toastTimer = 0;
 
   constructor() {
@@ -117,6 +119,8 @@ export class Hud {
     this.weaponEl = document.getElementById("hud-weapon")!;
     this.classEl = document.getElementById("hud-class")!;
     this.bandageEl = document.getElementById("hud-bandage")!;
+    this.scannerEl = document.getElementById("hud-scanner")!;
+    this.scanMarks = document.getElementById("hud-scanmarks")!;
     this.battery = document.getElementById("hud-battery")!;
     this.batteryFill = document.getElementById("hud-battery-fill")!;
     this.kda = document.getElementById("hud-kda")!;
@@ -131,7 +135,7 @@ export class Hud {
 
   /** Draws the HEADING-UP minimap: a radar disc with the player at the centre (arrow = ahead), friends
    *  (green) / enemies (red) within `range`, and fading shot rays. `big` doubles the size + range. */
-  drawMinimap(cx: number, cz: number, heading: number, blips: RadarBlip[], shots: RadarShot[], big: boolean): void {
+  drawMinimap(cx: number, cz: number, heading: number, blips: RadarBlip[], shots: RadarShot[], big: boolean, scanned: { x: number; z: number; behindWall: boolean }[] = []): void {
     const size = big ? 330 : 158, range = big ? 130 : 55, r = size / 2;
     if (this.minimap.width !== size) { this.minimap.width = this.minimap.height = size; }
     this.minimap.style.width = this.minimap.style.height = `${size}px`;
@@ -153,6 +157,19 @@ export class Hud {
       if (!p) continue;
       g.fillStyle = b.enemy ? "#ff5236" : "#6bff9e";
       g.beginPath(); g.arc(p[0], p[1], big ? 4 : 3, 0, Math.PI * 2); g.fill();
+    }
+    // scanned enemies (frontal scanner): a distinct PULSING ring — cyan if behind a wall (revealed intel),
+    // amber if in the open — so a scan contact reads apart from the normal red/green blips.
+    if (scanned.length) {
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 170);
+      for (const s of scanned) {
+        const p = toRadar(heading, cx, cz, s.x, s.z, range, size);
+        if (!p) continue;
+        const col = s.behindWall ? "56,230,255" : "255,182,56";
+        g.strokeStyle = `rgba(${col},${0.45 + pulse * 0.55})`; g.lineWidth = 2;
+        g.beginPath(); g.arc(p[0], p[1], (big ? 7 : 5) + pulse * 2, 0, Math.PI * 2); g.stroke();
+        g.fillStyle = `rgba(${col},0.95)`; g.beginPath(); g.arc(p[0], p[1], 2, 0, Math.PI * 2); g.fill();
+      }
     }
     // compass: N/S/E/O around the edge, rotating with the heading so each letter points at its true world
     // direction (the N is amber to orient at a glance). Heading-up → whichever way you face is at the top.
@@ -349,14 +366,50 @@ export class Hud {
     this.classEl.style.display = "block";
   }
 
-  /** Bandage HUD: charge count (🩹 ×N) + a channel progress bar while healing. `count < 0` hides it (drones). */
-  setBandages(count: number, healing: boolean, progress: number): void {
+  /** Bandage HUD: charge count (🩹 ×N) + a state-aware hint so it's clear WHEN you can heal. `count < 0` hides
+   *  it (drones). `canHeal` = hurt AND have a bandage → prompt to press B (amber, panel pulses). `medkitNear` =
+   *  a live medkit within reach → prompt to grab it (restock). While channelling, a progress bar + VENDANDO. */
+  setBandages(count: number, healing: boolean, progress: number, canHeal = false, medkitNear = false): void {
     if (count < 0) { this.bandageEl.style.display = "none"; return; }
-    const bar = healing
-      ? `<div class="bnd-bar"><i style="width:${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%"></i></div><span class="bnd-do">VENDANDO</span>`
-      : `<span class="bnd-hint">B — vendar</span>`;
-    this.bandageEl.innerHTML = `<b>🩹 ×${count}</b> ${bar}`;
+    let hint: string, alert = false;
+    if (healing) {
+      hint = `<div class="bnd-bar"><i style="width:${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%"></i></div><span class="bnd-do">VENDANDO…</span>`;
+      alert = true;
+    } else if (medkitNear) {
+      hint = `<span class="bnd-do">🩹 Botiquín — pisa para recoger</span>`; alert = true;
+    } else if (canHeal) {
+      hint = `<span class="bnd-do">B — CURARTE</span>`; alert = true;          // hurt + have a bandage
+    } else if (count === 0) {
+      hint = `<span class="bnd-empty">Sin vendas · busca 🩹</span>`;           // out → find a medkit
+    } else {
+      hint = `<span class="bnd-hint">B — vendar</span>`;                       // have bandages, at full HP
+    }
+    this.bandageEl.innerHTML = `<b>🩹 ×${count}</b> ${hint}`;
+    this.bandageEl.classList.toggle("alert", alert);
     this.bandageEl.style.display = "flex";
+  }
+
+  /** Frontal-scanner status panel. `state`: "ready" (glows amber, prompts R), "charging" (progress bar 0..1),
+   *  or "off" (hidden — sandbox). Modeled on the bandage panel. */
+  setScanStatus(state: "ready" | "charging" | "off", frac = 0): void {
+    if (state === "off") { this.scannerEl.style.display = "none"; return; }
+    const ready = state === "ready";
+    this.scannerEl.innerHTML = ready
+      ? `<b>📡 ESCÁNER</b> <span class="scn-do">R — LISTO</span>`
+      : `<b>📡 ESCÁNER</b> <div class="scn-bar"><i style="width:${Math.round(Math.max(0, Math.min(1, frac)) * 100)}%"></i></div>`;
+    this.scannerEl.classList.toggle("alert", ready);
+    this.scannerEl.style.display = "flex";
+  }
+
+  /** On-screen directional markers pointing at each scanned enemy. `marks[].angle` = bearing (rad, 0 = ahead,
+   *  + = right); `behindWall` styles it cyan (intel) vs red (in the open). Empty clears them. Rebuilt per frame
+   *  while pings are alive (≤ a dozen nodes → cheap); untouched when there's nothing to show. */
+  setScanMarkers(marks: { angle: number; behindWall: boolean }[]): void {
+    if (marks.length === 0) { if (this.scanMarks.childElementCount) this.scanMarks.innerHTML = ""; return; }
+    this.scanMarks.innerHTML = marks.map((m) => {
+      const deg = m.angle * 180 / Math.PI;
+      return `<span class="scanmark ${m.behindWall ? "sm-wall" : "sm-see"}" style="transform:translate(-50%,-50%) rotate(${deg.toFixed(1)}deg) translateY(-34vh)">▲</span>`;
+    }).join("");
   }
 
   /** Start overlay: pick a mode to CREATE a room (host, gets a random code), or type a code to JOIN one. */
@@ -823,9 +876,28 @@ function inject(): void {
       font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
     #hud-bandage b { color: var(--phos); font-size: 13px; }
     #hud-bandage .bnd-hint { color: var(--muted); font-size: 9px; }
-    #hud-bandage .bnd-do { color: var(--amber); font-size: 9px; }
+    #hud-bandage .bnd-do { color: var(--amber); font-size: 10px; font-weight: 700; }
+    #hud-bandage .bnd-empty { color: var(--red); font-size: 9px; }
     #hud-bandage .bnd-bar { position: relative; width: 60px; height: 8px; background: rgba(0,0,0,.45); border: 1px solid var(--edge2); overflow: hidden; }
     #hud-bandage .bnd-bar i { display: block; height: 100%; background: var(--phos); box-shadow: 0 0 8px rgba(107,255,158,.4); }
+    /* when you can actually heal (hurt+bandage) or a medkit is in reach, the panel glows amber + pulses to catch the eye */
+    #hud-bandage.alert { border-color: var(--amber); box-shadow: 0 0 14px rgba(255,182,56,.35); animation: bndpulse 1s ease-in-out infinite; }
+    @keyframes bndpulse { 0%,100% { box-shadow: 0 0 10px rgba(255,182,56,.25); } 50% { box-shadow: 0 0 20px rgba(255,182,56,.55); } }
+    #hud-scanner { bottom: 16px; left: 330px; display: none; align-items: center; gap: 8px; padding: 6px 10px;
+      font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    #hud-scanner b { color: var(--cyan); font-size: 12px; }
+    #hud-scanner .scn-do { color: var(--cyan); font-size: 10px; font-weight: 700; }
+    #hud-scanner .scn-bar { position: relative; width: 56px; height: 8px; background: rgba(0,0,0,.45); border: 1px solid var(--edge2); overflow: hidden; }
+    #hud-scanner .scn-bar i { display: block; height: 100%; background: var(--cyan); box-shadow: 0 0 8px rgba(56,230,255,.4); }
+    #hud-scanner.alert { border-color: var(--cyan); box-shadow: 0 0 14px rgba(56,230,255,.35); animation: scnpulse 1s ease-in-out infinite; }
+    @keyframes scnpulse { 0%,100% { box-shadow: 0 0 10px rgba(56,230,255,.25); } 50% { box-shadow: 0 0 20px rgba(56,230,255,.55); } }
+    /* on-screen directional markers pointing at scanned enemies (arrows around the crosshair) */
+    #hud-scanmarks { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+    .scanmark { position: absolute; top: 50%; left: 50%; font-size: 20px; line-height: 1; transform-origin: center;
+      animation: smpulse 1s ease-in-out infinite; text-shadow: 0 0 8px currentColor; }
+    .scanmark.sm-wall { color: var(--cyan); }
+    .scanmark.sm-see { color: var(--red); }
+    @keyframes smpulse { 0%,100% { opacity: .55; } 50% { opacity: 1; } }
     #hud-lobby .llist { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 20px; min-height: 40px; }
     #hud-lobby .lrow { background: rgba(107,255,158,.05); border: 1px solid var(--edge2); padding: 7px 10px; font-size: 12px; letter-spacing: .06em; }
     #hud-lobby .lactions { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
@@ -853,6 +925,8 @@ function inject(): void {
     <div id="hud-weapon" class="panel"></div>
     <div id="hud-class" class="panel"></div>
     <div id="hud-bandage" class="panel"></div>
+    <div id="hud-scanner" class="panel"></div>
+    <div id="hud-scanmarks"></div>
     <div id="hud-battery" class="panel"><span class="cap">🔋 Batería</span><div id="hud-battery-bar"><div id="hud-battery-fill"></div></div></div>
     <div id="hud-kda" class="panel"></div>
     <div id="hud-team" class="panel"></div>

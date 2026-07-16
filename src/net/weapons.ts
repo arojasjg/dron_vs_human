@@ -2,10 +2,12 @@
 // physics world, a renderer, or the network. game.ts wires these into firing/HUD/recharge.
 import type { Role } from "./roles";
 
-export type Weapon = "mg" | "grenade" | "kamikaze" | "shotgun" | "glauncher" | "net" | "sniper" | "smoke" | "swarm" | "smg" | "lmg" | "dmr";
+export type Weapon = "mg" | "grenade" | "kamikaze" | "shotgun" | "glauncher" | "net" | "sniper" | "smoke" | "swarm" | "smg" | "lmg" | "dmr"
+  | "flak" | "emp" | "lockon" | "turret" | "laser";
 
 /** How a weapon fires — game.ts maps each kind to a Projectiles call (or a self-detonation). */
-export type FireKind = "bullet" | "shotgun" | "grenade" | "explosive" | "net" | "kamikaze" | "smoke" | "swarm";
+export type FireKind = "bullet" | "shotgun" | "grenade" | "explosive" | "net" | "kamikaze" | "smoke" | "swarm"
+  | "flak" | "emp" | "lockon" | "turret";
 
 export interface WeaponSpec {
   name: string;        // HUD label (Spanish)
@@ -42,6 +44,13 @@ export const WEAPONS: Record<Weapon, WeaponSpec> = {
   smg:       { name: "Subfusil",      icon: "⚡", fire: "bullet",    cooldown: 0.05, magSize: 30,  maxReserve: 240, playerDmg: 8,  botDmg: 1 }, // scout/interceptor: shreds up close, useless far (falloff)
   lmg:       { name: "Ametralladora", icon: "💢", fire: "bullet",    cooldown: 0.10, magSize: 100, maxReserve: 300, playerDmg: 15, botDmg: 2 }, // heavy: sustained suppression, huge mag
   dmr:       { name: "Tiro medido",   icon: "🎖️", fire: "bullet",    cooldown: 0.45, magSize: 12,  maxReserve: 72,  playerDmg: 45, botDmg: 2, scope: true, zoomMags: [3], aiRanges: [55], bulletSpeed: 240 }, // marksman/artillery: semi-auto punch between mg and sniper
+  // Anti-drone soldier tools — the answer to "hard to resist the AI swarm": AREA, CONTROL and AUTOMATION.
+  flak:      { name: "Cañón Flak",    icon: "🎇", fire: "flak",     cooldown: 1.1,  magSize: 3,   maxReserve: 12 }, // airbursts among clustered drones — big AoE vs the swarm
+  emp:       { name: "Granada EMP",   icon: "🌀", fire: "emp",      cooldown: 5.0,  magSize: 2,   maxReserve: 4 },  // stuns/disables every drone in radius for a few seconds (crowd control)
+  lockon:    { name: "Misil buscador", icon: "🛰️", fire: "lockon",  cooldown: 2.4,  magSize: 2,   maxReserve: 8 },  // homing missile that hunts the drone you aim at (kills evasive fliers)
+  turret:    { name: "Torreta",       icon: "🗼", fire: "turret",   cooldown: 14.0, magSize: 1,   maxReserve: 1 },  // SCARCE auto-sentry: only 2 per resupply, long redeploy, capped active — the engineer's tool
+  // Drone PvP variety (NOT given to the AI — the swarm stays as-is): a rapid laser beam.
+  laser:     { name: "Láser",         icon: "🔺", fire: "bullet",   cooldown: 0.03, magSize: 160, maxReserve: 320, playerDmg: 5, botDmg: 1, bulletSpeed: 400 }, // fast, low-damage beam — a drone's dogfight weapon
 };
 
 /** Melee reach test: is target (p) within `range` metres of attacker (a) AND inside the swing cone

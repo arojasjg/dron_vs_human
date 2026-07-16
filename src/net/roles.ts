@@ -76,20 +76,20 @@ export interface ClassStats {
 }
 
 export const SOLDIER_CLASSES: Record<SoldierClass, ClassStats> = {
-  assault:  { label: "Asalto",     maxHp: 150, moveMul: 1.00, jumpMul: 1.00, loadout: ["mg", "grenade", "shotgun"],    tint: 0x4a5238,
+  assault:  { label: "Asalto",     maxHp: 150, moveMul: 1.00, jumpMul: 1.00, loadout: ["mg", "grenade", "shotgun", "flak"], tint: 0x4a5238,
               profile: { armor: 3, mobility: 3, range: 3, firepower: 3 }, pros: ["Todoterreno", "Sin puntos débiles"], cons: ["No sobresale", "Sin especialidad"] },
-  scout:    { label: "Explorador", maxHp: 90,  moveMul: 1.35, jumpMul: 1.15, loadout: ["smg", "shotgun"],              tint: 0x3aa0d0,
-              profile: { armor: 1, mobility: 5, range: 1, firepower: 3 }, pros: ["Muy rápido", "Letal de cerca"], cons: ["Muy frágil", "Inútil de lejos"] },
-  heavy:    { label: "Pesado",     maxHp: 260, moveMul: 0.70, jumpMul: 0.80, loadout: ["lmg", "shotgun", "glauncher"], tint: 0x8a5a2b,
+  scout:    { label: "Explorador", maxHp: 80,  moveMul: 1.35, jumpMul: 1.15, loadout: ["smg", "shotgun", "emp", "turret"], tint: 0x3aa0d0,
+              profile: { armor: 1, mobility: 5, range: 1, firepower: 3 }, pros: ["Muy rápido", "Ingeniero: torreta + EMP"], cons: ["El más frágil", "Torretas mueren con él"] },
+  heavy:    { label: "Pesado",     maxHp: 260, moveMul: 0.70, jumpMul: 0.80, loadout: ["lmg", "shotgun", "glauncher", "flak"], tint: 0x8a5a2b,
               profile: { armor: 5, mobility: 1, range: 2, firepower: 4 }, pros: ["Mucha vida", "Supresión sostenida"], cons: ["Lento", "Blanco fácil"] },
-  marksman: { label: "Tirador",    maxHp: 100, moveMul: 0.90, jumpMul: 1.00, loadout: ["sniper", "dmr", "smoke"],      tint: 0x6a4aa0,
+  marksman: { label: "Tirador",    maxHp: 100, moveMul: 0.90, jumpMul: 1.00, loadout: ["sniper", "dmr", "smoke", "lockon"], tint: 0x6a4aa0,
               profile: { armor: 2, mobility: 3, range: 5, firepower: 4 }, pros: ["Un tiro a distancia", "Controla zonas"], cons: ["Cadencia lenta", "Indefenso de cerca"] },
 };
 
 export const DRONE_CLASSES: Record<DroneClass, ClassStats> = {
-  assault:     { label: "Asalto",      maxHp: 80,  moveMul: 1.00, jumpMul: 1, loadout: ["mg", "grenade"],   tint: 0x3a3f4a,
+  assault:     { label: "Asalto",      maxHp: 80,  moveMul: 1.00, jumpMul: 1, loadout: ["mg", "grenade", "laser"], tint: 0x3a3f4a,
                  profile: { armor: 3, mobility: 3, range: 3, firepower: 3 }, pros: ["Equilibrado", "Flexible"], cons: ["No sobresale", "Sin especialidad"] },
-  interceptor: { label: "Interceptor", maxHp: 55,  moveMul: 1.30, jumpMul: 1, loadout: ["smg", "kamikaze"], tint: 0x2ad0c0,
+  interceptor: { label: "Interceptor", maxHp: 55,  moveMul: 1.30, jumpMul: 1, loadout: ["smg", "kamikaze", "laser"], tint: 0x2ad0c0,
                  profile: { armor: 1, mobility: 5, range: 1, firepower: 3 }, pros: ["Velocidad extrema", "Caza en vuelo"], cons: ["De papel", "Corto alcance"] },
   armor:       { label: "Blindado",    maxHp: 170, moveMul: 0.65, jumpMul: 1, loadout: ["lmg", "shotgun"],  tint: 0x8a5a2b,
                  profile: { armor: 5, mobility: 1, range: 2, firepower: 4 }, pros: ["Aguanta y empuja", "Cargador enorme"], cons: ["Lento", "Torpe"] },

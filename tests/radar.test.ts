@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { wrapAngle, bearing, toRadar, compassMarks, COMPASS } from "../src/ui/radar";
+import { wrapAngle, bearing, toRadar, compassMarks, COMPASS, inScanCone } from "../src/ui/radar";
 
 const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
 
@@ -69,5 +69,37 @@ describe("compass marks (N/S/E/O around the heading-up minimap, pure)", () => {
   it("rotates with the heading: facing north (−Z), N swings to the top", () => {
     expect(at("N", Math.PI).y).toBeLessThan(50); // now facing north → N is up
     expect(at("S", Math.PI).y).toBeGreaterThan(50);
+  });
+});
+
+describe("inScanCone — frontal scanner detection (pure)", () => {
+  const RANGE = 40, MINDOT = 0.5; // ~120° cone (60° half-angle)
+  it("detects an enemy straight ahead within range", () => {
+    // viewer at origin facing +Z; enemy 20m dead ahead
+    expect(inScanCone(0, 0, 0, 1, 0, 20, RANGE, MINDOT)).toBe(true);
+  });
+  it("rejects an enemy off to the side beyond the cone half-angle", () => {
+    // facing +Z; enemy at +X (90° off axis, dot 0 < 0.5) → outside the cone
+    expect(inScanCone(0, 0, 0, 1, 20, 0, RANGE, MINDOT)).toBe(false);
+  });
+  it("rejects an enemy behind the viewer", () => {
+    expect(inScanCone(0, 0, 0, 1, 0, -20, RANGE, MINDOT)).toBe(false);
+  });
+  it("rejects an enemy in the cone but beyond range", () => {
+    expect(inScanCone(0, 0, 0, 1, 0, 60, RANGE, MINDOT)).toBe(false);
+  });
+  it("accepts an enemy just inside the cone edge, rejects just outside", () => {
+    // dot = cos(angle); at exactly the half-angle it's the boundary (>=). 45° off, minDot cos45≈0.707
+    const d = Math.SQRT1_2; // cos 45°
+    expect(inScanCone(0, 0, 0, 1, 20, 20, RANGE, d - 1e-9)).toBe(true);  // 45° enemy inside a 45° half-cone
+    expect(inScanCone(0, 0, 0, 1, 20, 20, RANGE, d + 1e-3)).toBe(false); // just tighten the cone → excluded
+  });
+  it("follows the viewer's facing: rotate to face +X and a +X enemy is now in-cone", () => {
+    expect(inScanCone(0, 0, 1, 0, 20, 0, RANGE, MINDOT)).toBe(true);   // facing +X, enemy +X → ahead
+    expect(inScanCone(0, 0, 1, 0, 0, 20, RANGE, MINDOT)).toBe(false);  // enemy +Z is now to the side
+  });
+  it("an enemy on top of the viewer counts as inside; a zero forward vector scans nothing", () => {
+    expect(inScanCone(5, 5, 0, 1, 5, 5, RANGE, MINDOT)).toBe(true);    // coincident
+    expect(inScanCone(0, 0, 0, 0, 0, 10, RANGE, MINDOT)).toBe(false);  // no forward dir
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { respawnDelay, allDead, wallBlocks, smokeOccludes, perimeterSpawn, playerSpawn, cardinalSpawn, WAVE_DIRS, bandageStep, BANDAGE_DUR, canBeginMatch, type SmokeCloud } from "../src/net/coop";
+import { respawnDelay, allDead, wallBlocks, smokeOccludes, perimeterSpawn, playerSpawn, cardinalSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, BANDAGE_DUR, canBeginMatch, type SmokeCloud } from "../src/net/coop";
 
 const VOX = 0.25;
 // mirror of PLAY_BOUNDS for the current-map extent (city 513×594 vox + 48-vox forest margin) so we can assert
@@ -101,6 +101,20 @@ describe("enemy wave spawn — one cardinal point per wave, rotating N→S→E�
     const off = 20 * VOX; // margin 20 voxels < 48-voxel forest margin → inside the playfield
     expect(Math.abs(cardinalSpawn(CX, CZ, VOX, 0).cz)).toBeLessThan(48 * VOX);
     expect(off).toBeLessThan(48 * VOX);
+  });
+
+  it("farthestCardinal steers the opening wave AWAY from a player pinned in the perimeter band", () => {
+    // a host who just spawned near the NORTH edge (−Z, mid-X) must get the wave from the SOUTH (+Z, opposite)
+    const nearNorth = farthestCardinal(midX, -5, CX, CZ, VOX);
+    expect(nearNorth).toBe("S");
+    // near the WEST edge (−X) → wave from the EAST
+    const nearWest = farthestCardinal(-5, midZ, CX, CZ, VOX);
+    expect(nearWest).toBe("E");
+    // the chosen point is genuinely far — farther than the naive rotation point (N) would have been
+    const far = cardinalPoint(nearNorth, CX, CZ, VOX);
+    const naive = cardinalPoint("N", CX, CZ, VOX);
+    const d2 = (p: { cx: number; cz: number }) => (p.cx - midX) ** 2 + (p.cz - -5) ** 2;
+    expect(d2(far)).toBeGreaterThan(d2(naive));
   });
 });
 

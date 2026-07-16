@@ -8,10 +8,28 @@ describe("weapon shot params", () => {
     expect(WEAPON_SFX.shotgun.decay).toBeGreaterThan(WEAPON_SFX.mg.decay);
   });
   it("every carried weapon has a shot profile", () => {
-    for (const w of ["mg", "shotgun", "grenade", "glauncher", "net"]) {
+    for (const w of ["mg", "smg", "lmg", "dmr", "sniper", "shotgun", "grenade", "glauncher", "net"]) {
       expect(WEAPON_SFX[w].gain).toBeGreaterThan(0);
       expect(WEAPON_SFX[w].decay).toBeGreaterThan(0);
     }
+  });
+  it("smg / lmg / dmr each sound DISTINCT (no more clones of the machine-gun)", () => {
+    const { mg, smg, lmg, dmr } = WEAPON_SFX;
+    // smg: faster + higher + lighter than the mg
+    expect(smg.decay).toBeLessThan(mg.decay);
+    expect(smg.crackFreq).toBeGreaterThan(mg.crackFreq);
+    expect(smg.gain).toBeLessThan(mg.gain);
+    // lmg: heavier — lower crack, longer, louder
+    expect(lmg.crackFreq).toBeLessThan(mg.crackFreq);
+    expect(lmg.decay).toBeGreaterThan(mg.decay);
+    expect(lmg.gain).toBeGreaterThan(mg.gain);
+    // dmr: marksman punch — deepest body, longest of the three, loudest
+    expect(dmr.bodyFreq).toBeLessThan(mg.bodyFreq);
+    expect(dmr.decay).toBeGreaterThan(lmg.decay);
+    expect(dmr.gain).toBeGreaterThan(lmg.gain);
+    // no two of the four share an identical full profile
+    const key = (s: typeof mg) => `${s.crackFreq}-${s.bodyFreq}-${s.decay}-${s.gain}`;
+    expect(new Set([mg, smg, lmg, dmr].map(key)).size).toBe(4);
   });
 });
 

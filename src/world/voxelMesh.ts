@@ -40,6 +40,13 @@ export class VoxelMesher {
   readonly group = new THREE.Group();
   private readonly geo: THREE.BoxGeometry;
   private readonly mats = new Map<MaterialId, THREE.MeshStandardMaterial>();
+  // Fog-free twins of every material, used ONLY for the perimeter-ring chunks. The map is far bigger than the
+  // view/fog bubble, so a fogged far wall dissolves into the horizon and reads as a "missing side". The ring
+  // is the map seal → render it un-fogged (a thin treeline at the horizon, like a real distant forest) so all
+  // four edges always read solid, at any distance and any view-distance setting.
+  private readonly matsNoFog = new Map<MaterialId, THREE.MeshStandardMaterial>();
+  private ringX1 = Infinity;   // city footprint (voxels); a chunk whose centre is outside it is ring → seal, never fog/cull/stream-out
+  private ringZ1 = Infinity;
   private readonly chunks = new Map<number, Map<MaterialId, THREE.InstancedMesh>>();
   // Shared across every masonry program: setVoxelDetail flips this one .value → all seam shaders gate off
   // together on the next render, no recompile. 1 = full surface detail, 0 = flat (the perf floor lever).
@@ -59,8 +66,20 @@ export class VoxelMesher {
       // visually re-subdivides into coursing at the destruction granularity — kills the "flat box" look.
       if (!NEUTRAL_WEATHER.has(id)) mat.onBeforeCompile = patchVoxelDetail;
       this.mats.set(id, mat);
+      const noFog = mat.clone(); noFog.fog = false; noFog.onBeforeCompile = mat.onBeforeCompile; // fog-free twin for the ring
+      this.matsNoFog.set(id, noFog);
     }
     scene.add(this.group);
+  }
+
+  /** Tell the mesher the city footprint (voxels) so it can flag perimeter-ring chunks — set on each world
+   *  (re)build / map-size change. Ring chunks render fog-free and are never distance-culled (see updateVisibility). */
+  setRingBounds(cityX1: number, cityZ1: number): void { this.ringX1 = cityX1; this.ringZ1 = cityZ1; }
+
+  /** Whether a render chunk belongs to the perimeter ring (its centre sits outside the city footprint). */
+  private isRingChunk(mcx: number, mcz: number): boolean {
+    const cx = mcx * MESH_CHUNK + (MESH_CHUNK >> 1), cz = mcz * MESH_CHUNK + (MESH_CHUNK >> 1);
+    return cx < 0 || cx > this.ringX1 || cz < 0 || cz > this.ringZ1;
   }
 
   /** Live toggle of the voxel-pitch surface detail (mortar seams + hash). Off recovers the ~4 ms fwidth
@@ -95,6 +114,7 @@ export class VoxelMesher {
     const HALF = (MESH_CHUNK / 2) * VOXEL;
     for (const [ck, mats] of this.chunks) {
       const [mcx, , mcz] = unpackKey(ck);
+      if (this.isRingChunk(mcx, mcz)) { for (const mesh of mats.values()) mesh.visible = true; continue; } // seal → never cull
       const dx = mcx * MESH_CHUNK * VOXEL + HALF - camX;
       const dz = mcz * MESH_CHUNK * VOXEL + HALF - camZ;
       const vis = dx * dx + dz * dz <= maxDistSq;
@@ -139,11 +159,13 @@ export class VoxelMesher {
     const old = this.chunks.get(ck);
     if (old) { for (const mesh of old.values()) this.disposeMesh(mesh); this.chunks.delete(ck); }
     if (parts.length === 0) return;
+    const [mcx, , mcz] = unpackKey(ck);
+    const matSet = this.isRingChunk(mcx, mcz) ? this.matsNoFog : this.mats; // the ring seal renders fog-free
     const map = new Map<MaterialId, THREE.InstancedMesh>();
     for (const part of parts) {
       const mat = MATERIAL_ORDER[part.matIdx];
       const count = part.matrices.length / 16;
-      const mesh = new THREE.InstancedMesh(this.geo, this.mats.get(mat)!, count);
+      const mesh = new THREE.InstancedMesh(this.geo, matSet.get(mat)!, count);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.frustumCulled = true; // per-chunk mesh with a computed bounding sphere → drawn only on-screen
