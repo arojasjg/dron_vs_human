@@ -14,6 +14,18 @@ const VERT_FLOATS = CUBE_POS.length; // 108
 const _Q = new THREE.Quaternion();
 const _V = new THREE.Vector3();
 
+// memoized linear-space vertex colour per material (same setHex+convertSRGBToLinear, run once per material)
+const LINEAR_COLOR = new Map<MaterialId, { r: number; g: number; b: number }>();
+function linearColorOf(id: MaterialId): { r: number; g: number; b: number } {
+  let c = LINEAR_COLOR.get(id);
+  if (!c) {
+    const col = new THREE.Color().setHex(MATERIALS[id].color).convertSRGBToLinear();
+    c = { r: col.r, g: col.g, b: col.b };
+    LINEAR_COLOR.set(id, c);
+  }
+  return c;
+}
+
 const MAX_CHUNKS = 16;
 const SETTLE_AFTER_SLEEP = 0.4;
 /** Hard cap on a chunk's airborne lifetime: one wedged/jittering chunk that never reaches the
@@ -95,16 +107,20 @@ export class ChunkDebris {
     if (voxels.length === 0) return false;
     if (this.chunks.length >= MAX_CHUNKS) this.release(0);
 
-    // centroid + AABB (voxel space) for mass/drag estimation
+    // centroid + AABB (voxel space) for mass/drag estimation; materials resolved ONCE here and
+    // reused for the dominant pick, the geometry colours and the chunk record (was 3× per voxel)
     let sx = 0, sy = 0, sz = 0;
     let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     const counts = new Map<MaterialId, number>();
-    for (const [x, y, z] of voxels) {
+    const materials: MaterialId[] = new Array(voxels.length);
+    for (let i = 0; i < voxels.length; i++) {
+      const [x, y, z] = voxels[i];
       const c = VoxelGrid.center(x, y, z);
       sx += c.x; sy += c.y; sz += c.z;
       if (x < minX) minX = x; if (y < minY) minY = y; if (z < minZ) minZ = z;
       if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
       const m = materialOf(x, y, z);
+      materials[i] = m;
       counts.set(m, (counts.get(m) ?? 0) + 1);
     }
     const n = voxels.length;
@@ -144,7 +160,7 @@ export class ChunkDebris {
       );
     }
 
-    const mesh = new THREE.Mesh(this.buildGeometry(voxels, materialOf, cx, cy, cz), this.getMat(dominant));
+    const mesh = new THREE.Mesh(this.buildGeometry(voxels, materials, cx, cy, cz), this.getMat(dominant));
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;
@@ -153,28 +169,26 @@ export class ChunkDebris {
     this.chunks.push({
       body, mesh, sleep: 0, age: 0, cx, cy, cz,
       voxels: voxels.map(([x, y, z]) => [x, y, z] as Voxel),
-      materials: voxels.map(([x, y, z]) => materialOf(x, y, z)),
+      materials,
     });
     return true;
   }
 
   private buildGeometry(
     voxels: Voxel[],
-    materialOf: (x: number, y: number, z: number) => MaterialId,
+    materials: MaterialId[],
     cx: number, cy: number, cz: number,
   ): THREE.BufferGeometry {
     const n = voxels.length;
     const pos = new Float32Array(n * VERT_FLOATS);
     const norm = new Float32Array(n * VERT_FLOATS);
     const col = new Float32Array(n * VERT_FLOATS);
-    const color = new THREE.Color();
 
     for (let i = 0; i < n; i++) {
       const [x, y, z] = voxels[i];
       const c = VoxelGrid.center(x, y, z);
       const ox = c.x - cx, oy = c.y - cy, oz = c.z - cz;
-      const def = MATERIALS[materialOf(x, y, z)];
-      color.setHex(def.color).convertSRGBToLinear();
+      const color = linearColorOf(materials[i]);
       const base = i * VERT_FLOATS;
       for (let v = 0; v < VERT_FLOATS; v += 3) {
         pos[base + v] = CUBE_POS[v] + ox;

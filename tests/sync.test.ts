@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { buildDefaultScene, setWorldSeed } from "../src/build/prefabs";
 import { carveSphere } from "../src/destruction/carve";
+import { MATERIAL_ORDER, type MaterialId } from "../src/world/materials";
 
 // Two "clients" are simulated as two independent grids. The multiplayer sync contract is:
 // same seed (identical world) + same sequence of authoritative blast events ⇒ byte-identical
@@ -12,6 +13,9 @@ class MockGrid {
   remove(x: number, y: number, z: number) { this.m.delete(this.k(x, y, z)); }
   has(x: number, y: number, z: number) { return this.m.has(this.k(x, y, z)); }
   get(x: number, y: number, z: number) { return this.m.get(this.k(x, y, z)); }
+  // Raw material byte (mirrors the real grid): material index+1 in the low bits, 0 = empty. No indestructible
+  // bit — this mock's isIndestructible() is always false, so carve behaves exactly as with get()+isIndestructible().
+  byteAt(x: number, y: number, z: number) { const mat = this.m.get(this.k(x, y, z)); return mat === undefined ? 0 : MATERIAL_ORDER.indexOf(mat as MaterialId) + 1; }
   markSettled() {}
   markWeakBox() {}
   markIndestructibleBox() {}

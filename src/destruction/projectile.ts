@@ -8,6 +8,12 @@ type Kind = "cannon" | "grenade" | "rocket" | "bullet";
 
 const BULLET_AXIS = new THREE.Vector3(0, 1, 0);
 const TMP = new THREE.Vector3();
+// per-frame scratch (consumed synchronously; values are always copied out before reuse)
+const CUR = new THREE.Vector3();
+const SEG = new THREE.Vector3();
+const RAY = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
+let contactHit = false;
+const onContact = () => { contactHit = true; };
 
 interface Flying {
   body: RAPIER.RigidBody;
@@ -178,13 +184,13 @@ export class Projectiles {
       const f = this.list[i];
       if (!f) continue; // a chain detonation this frame may have spliced entries out from under us
       const t = f.body.translation();
-      const cur = new THREE.Vector3(t.x, t.y, t.z);
+      const cur = CUR.set(t.x, t.y, t.z);
       f.mesh.position.copy(cur);
       f.life -= dt;
       f.armed -= dt;
 
       if (f.kind === "bullet") {
-        const seg = new THREE.Vector3().subVectors(cur, f.prev);
+        const seg = SEG.subVectors(cur, f.prev);
         const len = seg.length();
         let consumed = false;
         if (len > 1e-4) {
@@ -194,11 +200,12 @@ export class Projectiles {
           const gd = gh ? Math.hypot(gh.point.x - f.prev.x, gh.point.y - f.prev.y, gh.point.z - f.prev.z) : Infinity;
           // ...or ANYTHING physical: the ground plane, crates, debris (the grid ray can't see those).
           // Consuming on the nearer of the two means the bullet stops dead - it can NEVER ricochet.
-          const ray = new RAPIER.Ray({ x: f.prev.x, y: f.prev.y, z: f.prev.z }, { x: dx, y: dy, z: dz });
+          RAY.origin.x = f.prev.x; RAY.origin.y = f.prev.y; RAY.origin.z = f.prev.z;
+          RAY.dir.x = dx; RAY.dir.y = dy; RAY.dir.z = dz;
           // DYNAMIC props only (crates, debris). The voxel STRUCTURE is the grid ray's job — excluding
           // FIXED bodies stops the building's coincident colliders from stealing the hit and dropping
           // the carve/damage; the ground plane is handled by the y<=0 check below.
-          const oh = this.physics.world.castRay(ray, len + 0.06, true, RAPIER.QueryFilterFlags.EXCLUDE_FIXED, undefined, undefined, f.body);
+          const oh = this.physics.world.castRay(RAY, len + 0.06, true, RAPIER.QueryFilterFlags.EXCLUDE_FIXED, undefined, undefined, f.body);
           const od = oh ? oh.timeOfImpact : Infinity;
           if (gh && gd <= od) {
             if (!f.ghost) this.onBulletHit(gh, dx, dy, dz);
@@ -234,7 +241,7 @@ export class Projectiles {
 
       if (f.kind === "cannon" || f.kind === "rocket") {
         // detonate on impact with anything in this frame's travel path
-        const seg = new THREE.Vector3().subVectors(cur, f.prev);
+        const seg = SEG.subVectors(cur, f.prev);
         const len = seg.length();
         if (len > 1e-4) {
           const inv = 1 / len;
@@ -248,8 +255,9 @@ export class Projectiles {
           }
           // …or any DYNAMIC object: crates, debris, other projectiles (the building is fixed and
           // already covered above; exclude the projectile's own body)
-          const ray = new RAPIER.Ray({ x: f.prev.x, y: f.prev.y, z: f.prev.z }, { x: dx, y: dy, z: dz });
-          const oh = this.physics.world.castRay(ray, len + 0.18, true, RAPIER.QueryFilterFlags.EXCLUDE_FIXED, undefined, undefined, f.body);
+          RAY.origin.x = f.prev.x; RAY.origin.y = f.prev.y; RAY.origin.z = f.prev.z;
+          RAY.dir.x = dx; RAY.dir.y = dy; RAY.dir.z = dz;
+          const oh = this.physics.world.castRay(RAY, len + 0.18, true, RAPIER.QueryFilterFlags.EXCLUDE_FIXED, undefined, undefined, f.body);
           if (oh && oh.timeOfImpact < best) {
             detonate = true;
             hx = f.prev.x + dx * oh.timeOfImpact; hy = f.prev.y + dy * oh.timeOfImpact; hz = f.prev.z + dz * oh.timeOfImpact;
@@ -259,12 +267,14 @@ export class Projectiles {
         // catch: physics resolves the collision before we get here, so a fast hit that the swept
         // ray misses would otherwise just bounce. Contact ⇒ detonate (and restitution 0 ⇒ no bounce).
         if (!detonate && f.armed <= 0) {
-          this.physics.world.contactPairsWith(f.collider, () => { detonate = true; });
+          contactHit = false;
+          this.physics.world.contactPairsWith(f.collider, onContact);
+          if (contactHit) detonate = true;
         }
       } else {
         // grenade: stick to the first surface it touches, then count down the fuse
         if (!f.stuck) {
-          const seg = new THREE.Vector3().subVectors(cur, f.prev);
+          const seg = SEG.subVectors(cur, f.prev);
           const len = seg.length();
           let sx = cur.x, sy = cur.y, sz = cur.z, stick = false;
           if (len > 1e-4) {

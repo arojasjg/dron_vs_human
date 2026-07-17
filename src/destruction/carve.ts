@@ -1,5 +1,5 @@
 import { MAX_DEBRIS_PER_EVENT, VOXEL } from "../config";
-import { MATERIALS, type MaterialId } from "../world/materials";
+import { MATERIALS, MATERIAL_ORDER, type MaterialId } from "../world/materials";
 
 // debris colour-type code (inside the GPU "debris" band 0.6–0.8) per source material, so the GPU
 // rubble cloud keeps the colour of whatever was destroyed
@@ -8,7 +8,7 @@ export const DEBRIS_CT: Record<MaterialId, number> = {
   wall_slate: 0.65, wall_moss: 0.65, wall_clay: 0.65, wall_navy: 0.65,
   car_red: 0.73, car_blue: 0.73, car_teal: 0.73, tire: 0.61, leaves: 0.69, leaves_pine: 0.69,
 };
-import { VoxelGrid, packKey } from "../world/voxelGrid";
+import { VoxelGrid, packKey, INDESTRUCTIBLE, MAT_MASK } from "../world/voxelGrid";
 import { Rng, mix32 } from "../engine/rng";
 import type { DebrisSystem } from "./debris";
 import type { ParticleSink } from "../fx/particles";
@@ -43,6 +43,10 @@ export function carveSphere(
   // the IDENTICAL irregular crater — required by the authoritative destruction sync.
   const AMP = 0.45;
   const maxR = radius * (1 + AMP);
+  // conservative squared-distance cull: each sine lobe ≤ 1 ⇒ lobe ≤ 4 ⇒ reach ≤ radius·(1+AMP) = maxR,
+  // so any voxel beyond maxR (pad for FP) would fail `dist > reach` anyway — skip sqrt + 4×Math.sin.
+  const maxRSq = maxR * maxR * (1 + 1e-6);
+  const px = cx * 0.7, py = cy * 0.9, pz = cz * 1.1; // lobe phases — whole-scan invariants
   const [vx0, vy0, vz0] = VoxelGrid.worldToVoxel(cx - maxR, cy - maxR, cz - maxR);
   const [vx1, vy1, vz1] = VoxelGrid.worldToVoxel(cx + maxR, cy + maxR, cz + maxR);
 
@@ -52,21 +56,29 @@ export function carveSphere(
   const vr = new Rng(0); // one instance reseeded per voxel below — avoids thousands of Rng allocations per blast (GC)
 
   for (let x = vx0; x <= vx1; x++) {
+    const wx = (x + 0.5) * VOXEL;
+    const dx = wx - cx, dxx = dx * dx;
     for (let y = vy0; y <= vy1; y++) {
+      const wy = (y + 0.5) * VOXEL;
+      const dy = wy - cy, dxy = dxx + dy * dy;
       for (let z = vz0; z <= vz1; z++) {
-        const mat = t.grid.get(x, y, z);
-        if (mat === undefined) continue;
-        if (t.grid.isIndestructible(x, y, z)) continue; // forest wall / gate vehicles: blasts never carve them
-        const wx = (x + 0.5) * VOXEL, wy = (y + 0.5) * VOXEL, wz = (z + 0.5) * VOXEL;
-        const dx = wx - cx, dy = wy - cy, dz = wz - cz;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        // one Map.get + one localIdx (byteAt) instead of get() + isIndestructible(): same decode, same bit
+        const b = t.grid.byteAt(x, y, z);
+        if (b === 0) continue;
+        if ((b & INDESTRUCTIBLE) !== 0) continue; // forest wall / gate vehicles: blasts never carve them
+        const wz = (z + 0.5) * VOXEL;
+        const dz = wz - cz;
+        const distSq = dxy + dz * dz; // same grouping as (dx*dx + dy*dy) + dz*dz
+        if (distSq > maxRSq) continue;
+        const dist = Math.sqrt(distSq);
+        const mat = MATERIAL_ORDER[(b & MAT_MASK) - 1];
 
         // direction-dependent reach: sine lobes phased by the blast centre make the crater edge
         // lumpy and non-spherical while remaining deterministic across clients.
         const inv = dist > 1e-4 ? 1 / dist : 0;
         const nx = dx * inv, ny = dy * inv, nz = dz * inv;
-        const lobe = Math.sin(nx * 4.3 + cx * 0.7) + Math.sin(ny * 3.7 + cy * 0.9)
-          + Math.sin(nz * 4.9 + cz * 1.1) + Math.sin((nx + ny + nz) * 2.6);
+        const lobe = Math.sin(nx * 4.3 + px) + Math.sin(ny * 3.7 + py)
+          + Math.sin(nz * 4.9 + pz) + Math.sin((nx + ny + nz) * 2.6);
         const reach = radius * (1 + AMP * lobe / 4); // lobe ∈ [-4,4] → reach ∈ radius·[1-AMP, 1+AMP]
         if (dist > reach) continue;
 
@@ -82,9 +94,9 @@ export function carveSphere(
         // scan/iteration order, so debris launched from the same event/voxel matches everywhere.
         vr.reseed(mix32(seed, packKey(x, y, z)));
         const out = velScale * (0.45 + vr.next() * 0.55);
-        const vxv = dx * inv * out + vr.centered(out * 0.4);
-        const vyv = dy * inv * out + out * 0.35 + vr.centered(out * 0.4);
-        const vzv = dz * inv * out + vr.centered(out * 0.4);
+        const vxv = nx * out + vr.centered(out * 0.4);
+        const vyv = ny * out + out * 0.35 + vr.centered(out * 0.4);
+        const vzv = nz * out + vr.centered(out * 0.4);
 
         const pulverize = spawned >= MAX_DEBRIS_PER_EVENT || (def.shatters && vr.next() > 0.55);
         if (!pulverize && t.debris.spawn(wx, wy, wz, mat, vxv, vyv, vzv, VOXEL / 2, vr)) {

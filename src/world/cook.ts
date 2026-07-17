@@ -1,5 +1,5 @@
 import { VOXEL } from "../config";
-import { packKey, unpackKey, type VoxelGrid } from "./voxelGrid";
+import { unpackKey, KEY_SPAN, type VoxelGrid } from "./voxelGrid";
 import { MATERIAL_ORDER, type MaterialId } from "./materials";
 import { weatherTint, type RGB } from "./weathering";
 
@@ -46,33 +46,36 @@ export function meshChunkCoord(v: number): number {
  */
 export function greedyBoxesFromKeys(keys: Iterable<number>): Box[] {
   const remaining = new Set<number>(keys);
-  const has = (x: number, y: number, z: number) => remaining.has(packKey(x, y, z));
   const boxes: Box[] = [];
 
-  const sorted = [...remaining].sort((a, b) => a - b);
+  // packKey is exactly linear (+1 per x, +KEY_SPAN per y, +KEY_SPAN² per z; keys < 2^31), so the
+  // probe/delete loops walk incremental integer keys instead of recomputing packKey per voxel.
+  const SPAN2 = KEY_SPAN * KEY_SPAN;
+  // typed-array numeric sort — keys are non-negative int32, so the order is identical to (a,b)=>a-b
+  const sorted = Int32Array.from(remaining).sort();
   for (const k of sorted) {
     if (!remaining.has(k)) continue;
     const [x0, y0, z0] = unpackKey(k);
 
     let x1 = x0;
-    while (has(x1 + 1, y0, z0)) x1++;
+    for (let kx = k + 1; remaining.has(kx); kx++) x1++;
 
     let y1 = y0;
-    expandY: while (true) {
-      for (let x = x0; x <= x1; x++) if (!has(x, y1 + 1, z0)) break expandY;
+    expandY: for (let rowBase = k + KEY_SPAN; ; rowBase += KEY_SPAN) {
+      for (let x = x0, kx = rowBase; x <= x1; x++, kx++) if (!remaining.has(kx)) break expandY;
       y1++;
     }
 
     let z1 = z0;
-    expandZ: while (true) {
-      for (let x = x0; x <= x1; x++)
-        for (let y = y0; y <= y1; y++) if (!has(x, y, z1 + 1)) break expandZ;
+    expandZ: for (let slabBase = k + SPAN2; ; slabBase += SPAN2) {
+      for (let x = x0, kx = slabBase; x <= x1; x++, kx++)
+        for (let y = y0, ky = kx; y <= y1; y++, ky += KEY_SPAN) if (!remaining.has(ky)) break expandZ;
       z1++;
     }
 
-    for (let x = x0; x <= x1; x++)
-      for (let y = y0; y <= y1; y++)
-        for (let z = z0; z <= z1; z++) remaining.delete(packKey(x, y, z));
+    for (let x = x0, kx = k; x <= x1; x++, kx++)
+      for (let y = y0, ky = kx; y <= y1; y++, ky += KEY_SPAN)
+        for (let z = z0, kz = ky; z <= z1; z++, kz += SPAN2) remaining.delete(kz);
 
     boxes.push([x0, y0, z0, x1, y1, z1]);
   }

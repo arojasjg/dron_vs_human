@@ -28,7 +28,7 @@ import { ImpactMarks } from "./fx/impactMarks";
 import { RubbleField } from "./fx/rubble";
 import { HeightField } from "./fx/heightField";
 import { placeVoxel, eraseVoxel, type EditRegion } from "./build/editor";
-import { BIG, ammoBoxSites, medkitSites, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, CITY_VOX, FOREST_RING, groundClass, objectiveHp, objectiveDestroyed, OBJECTIVE_SITES, PLAY_BOUNDS, placedBuildings, setWorldSeed, setMapSize, MAP_SIZES, type MapSize } from "./build/prefabs";
+import { BIG, ammoBoxSites, medkitSites, buildBuilding, buildCar, buildDefaultScene, buildHouse, buildObjectives, buildTower, buildWall, CITY_VOX, FOREST_RING, groundClass, objectiveHp, OBJECTIVE_SITES, PLAY_BOUNDS, placedBuildings, setWorldSeed, setMapSize, MAP_SIZES, type MapSize } from "./build/prefabs";
 import { InteriorLights } from "./engine/interiorLights";
 import { Hud, type Mode, type Tool, type RadarBlip, type RadarShot } from "./ui/hud";
 import { bearing, inScanCone } from "./ui/radar";
@@ -45,15 +45,18 @@ import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, TEAM_LABEL, type Role, type Team, type UnitClass } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
-import { respawnDelay, allDead, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
+import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
 import { WEAPONS, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
-import { packKey, unpackKey, VoxelGrid, type RayHit } from "./world/voxelGrid";
+import { packKey, unpackKey, KEY_SPAN, VoxelGrid, type RayHit } from "./world/voxelGrid";
 import { chunkCoord, VoxelCollider } from "./world/voxelCollider";
 import { MESH_CHUNK, MESH_CHUNK_RATIO } from "./world/cook";
 import { VoxelMesher } from "./world/voxelMesh";
 import { connectedComponents, type Voxel } from "./world/structuralIntegrity";
+
+// Inline packed-key decode (same arithmetic as unpackKey, minus the per-call tuple) for the per-frame streams.
+const KEY_HALF = KEY_SPAN >> 1;
 
 // Structural-collapse constants (CELL_OVERHANG, CELL_MIN_MASS, PANCAKE_FRAC, COLLAPSE_BUDGET) + the pure
 // collapseTick now live in ./destruction/collapse so the tick runs headless in the divergence harness.
@@ -125,7 +128,10 @@ export class Game {
   private static readonly MAX_FLASHES = 5;
   private readonly flashes: Flash[] = [];
   private readonly props: Prop[] = [];
-  private gasTanks: { vox: Voxel[]; cx: number; cy: number; cz: number; live: boolean }[] = [];
+  // x/y/z = the cluster's WORLD centre, precomputed once per rebuildGasTanks (constant per world) so the
+  // per-frame applyDebrisImpacts never re-derives it; the array itself satisfies resolveDebrisImpacts' input.
+  private gasTanks: { vox: Voxel[]; cx: number; cy: number; cz: number; x: number; y: number; z: number; live: boolean }[] = [];
+  private readonly _droneScratch = { x: 0, y: 0, z: 0 }; // reused per frame by applyDebrisImpacts
   private readonly tankChain: { cx: number; cy: number; cz: number; delay: number }[] = [];
 
   private tool: Tool = "shoot";
@@ -143,6 +149,9 @@ export class Game {
   private smokeFxAt = 0;                           // throttle for the sustained smoke particle emission
   // soldier's interceptor swarm: local homing mini-drones that ram the nearest enemy drone (kill is host-auth)
   private readonly miniDrones: { mesh: THREE.Object3D; x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number; boom?: boolean }[] = [];
+  // reused per frame by miniDroneFrame (scratch snapshot + its object pool) — no per-frame allocation
+  private readonly _miniBots: { id: number; x: number; y: number; z: number }[] = [];
+  private readonly _miniBotPool: { id: number; x: number; y: number; z: number }[] = [];
   private readonly turrets: { mesh: THREE.Object3D; head: THREE.Object3D; x: number; y: number; z: number; cd: number; until: number }[] = []; // deployed sentries (head tracks, base static)
   private readonly turretMat = new THREE.MeshStandardMaterial({ color: 0x3a4a3a, roughness: 0.7, metalness: 0.4, emissive: 0x0a2a0a, emissiveIntensity: 0.5 });
   private readonly turretAccentMat = new THREE.MeshStandardMaterial({ color: 0xff5533, roughness: 0.4, metalness: 0.3, emissive: 0xff3311, emissiveIntensity: 1.4 }); // the sensor "eye" (shared → not disposed)
@@ -234,6 +243,8 @@ export class Game {
   private readonly aiAimTmp = new THREE.Vector3();                                 // reused: host camera forward (bots dodge our aim)
   private minimapBig = false;                   // TAB toggles the enlarged minimap
   private readonly recentShots: RadarShot[] = []; // fading shot rays on the minimap (from peers + AI fire)
+  private readonly _blips: RadarBlip[] = [];      // reused per frame by minimapFrame (objects reused in place)
+  private readonly _scanMarks: { angle: number; behindWall: boolean }[] = []; // reused per frame (scan markers)
   // Frontal scanner (R): a recharging cone pulse revealing enemies ahead (even behind walls) as fading pings.
   private scanReadyAt = 0;
   private readonly scanPings: { x: number; y: number; z: number; until: number; behindWall: boolean }[] = [];
@@ -598,8 +609,9 @@ export class Game {
   /** Host-only: end the co-op session the moment EVERY soldier (host + human peers) is down (team wipe). */
   private checkTeamWipe(): void {
     if (this.matchOver) return;
-    const hps = [this.hp, ...this.remotes.peers().filter((p) => p.isHuman).map((p) => p.hp)];
-    if (allDead(hps)) this.endCoop();
+    if (this.hp > 0) return; // the wipe list includes our own hp → alive means not wiped (skip the peer scan)
+    for (const p of this.remotes.peers()) if (p.isHuman && p.hp > 0) return;
+    this.endCoop();
   }
 
   /** End the co-op session: freeze the swarm, show the game-over overlay + final score, tell everyone. */
@@ -728,7 +740,13 @@ export class Game {
    *  A killed bot is dropped from THIS frame's snapshot so two interceptors don't waste on the same drone. */
   private miniDroneFrame(dt: number): void {
     if (this.miniDrones.length === 0) return;
-    const bots = [...this.aiBots].map(([id, p]) => ({ id, x: p.x, y: p.y, z: p.z }));
+    const bots = this._miniBots; bots.length = 0;
+    for (const [id, p] of this.aiBots) {
+      let b = this._miniBotPool[bots.length];
+      if (!b) { b = { id: 0, x: 0, y: 0, z: 0 }; this._miniBotPool[bots.length] = b; }
+      b.id = id; b.x = p.x; b.y = p.y; b.z = p.z;
+      bots.push(b);
+    }
     for (let i = this.miniDrones.length - 1; i >= 0; i--) {
       const m = this.miniDrones[i];
       m.life -= dt;
@@ -737,7 +755,8 @@ export class Game {
         const t = bots[ti];
         const s = homingStep(m.x, m.y, m.z, m.vx, m.vy, m.vz, t.x, t.y, t.z, 40, 26, dt);
         m.x = s.x; m.y = s.y; m.z = s.z; m.vx = s.vx; m.vy = s.vy; m.vz = s.vz;
-        if (Math.hypot(t.x - m.x, t.y - m.y, t.z - m.z) < 1.5) { // reached it
+        const rx = t.x - m.x, ry = t.y - m.y, rz = t.z - m.z;
+        if (rx * rx + ry * ry + rz * rz < 2.25) { // reached it (1.5² — same verdict, no hypot)
           if (m.boom) this.explodeAt(m.x, m.y, m.z, 4, 700, true); // lock-on MISSILE → AoE airburst (catches the cluster)
           else { this.sink.burst(m.x, m.y, m.z, { count: 10, color: 0x88ffdd, speed: 7, size: 4, life: 0.3, kind: "spark", strength: 0.02 }); this.killBot(t.id); }
           bots.splice(ti, 1); // don't let another interceptor chase the corpse this frame
@@ -930,10 +949,15 @@ export class Game {
    *  rays). Friend/enemy is by mode: co-op → drones are the enemy; PvP → the opposite role. */
   private minimapFrame(dt: number): void {
     const cp = this.player.camera.position, f = this.player.forward(this.tmpDir);
-    const blips: RadarBlip[] = this.remotes.radar().map((e) => ({
+    const radar = this.remotes.radar();
+    const blips = this._blips;
+    while (blips.length > radar.length) blips.pop();
+    while (blips.length < radar.length) blips.push({ x: 0, z: 0, enemy: false });
+    for (let i = 0; i < radar.length; i++) {
+      const e = radar[i], b = blips[i];
       // co-op: the enemy is the drone swarm; PvP: anyone not on our team (works for drone-vs-drone too)
-      x: e.x, z: e.z, enemy: this.mode === "coop" ? !e.isHuman : e.team !== this.myTeam,
-    }));
+      b.x = e.x; b.z = e.z; b.enemy = this.mode === "coop" ? !e.isHuman : e.team !== this.myTeam;
+    }
     for (let i = this.recentShots.length - 1; i >= 0; i--) {
       this.recentShots[i].life -= dt / 1.5;
       if (this.recentShots[i].life <= 0) this.recentShots.splice(i, 1);
@@ -942,7 +966,14 @@ export class Game {
     // frontal-scanner pings: drop expired, feed the minimap overlay + directional HUD markers + status panel
     for (let i = this.scanPings.length - 1; i >= 0; i--) if (this.time >= this.scanPings[i].until) this.scanPings.splice(i, 1);
     this.hud.drawMinimap(cp.x, cp.z, heading, blips, this.recentShots, this.minimapBig, this.scanPings);
-    this.hud.setScanMarkers(this.scanPings.map((p) => ({ angle: bearing(heading, cp.x, cp.z, p.x, p.z), behindWall: p.behindWall })));
+    const marks = this._scanMarks;
+    while (marks.length > this.scanPings.length) marks.pop();
+    while (marks.length < this.scanPings.length) marks.push({ angle: 0, behindWall: false });
+    for (let i = 0; i < this.scanPings.length; i++) {
+      const p = this.scanPings[i], m = marks[i];
+      m.angle = bearing(heading, cp.x, cp.z, p.x, p.z); m.behindWall = p.behindWall;
+    }
+    this.hud.setScanMarkers(marks);
     if (this.mode === "free" || this.phase !== "playing") this.hud.setScanStatus("off");
     else if (this.time >= this.scanReadyAt) this.hud.setScanStatus("ready");
     else this.hud.setScanStatus("charging", 1 - (this.scanReadyAt - this.time) / Game.SCAN_CD);
@@ -1129,15 +1160,16 @@ export class Game {
 
   /** DvH win check: destroy the enemy objective or hit the kill limit. Objectives live in the
    *  synced grid, so every client reaches the same verdict. */
+  private readonly objMatAt = (x: number, y: number, z: number): MaterialId | undefined => this.grid.get(x, y, z); // hoisted: checkMatchWin runs per frame
   private checkMatchWin(): void {
     if (this.mode !== "dvh" || this.matchOver || OBJECTIVE_SITES.length < 4) return;
-    const mat = (x: number, y: number, z: number) => this.grid.get(x, y, z);
+    const mat = this.objMatAt;
     // count each team's SURVIVING bases (destroyed = ~75% of its metal razed) + weakest-base HP for the HUD
     let droneObjsAlive = 0, humanObjsAlive = 0, droneHp = 1, humanHp = 1;
     for (const s of OBJECTIVE_SITES) {
-      const hp = objectiveHp(s, mat);
-      if (s.team === "drone") { if (!objectiveDestroyed(s, mat)) droneObjsAlive++; droneHp = Math.min(droneHp, hp); }
-      else { if (!objectiveDestroyed(s, mat)) humanObjsAlive++; humanHp = Math.min(humanHp, hp); }
+      const hp = objectiveHp(s, mat); // one site scan; hp >= 0.25 ⟺ !objectiveDestroyed (prefabs.ts)
+      if (s.team === "drone") { if (hp >= 0.25) droneObjsAlive++; droneHp = Math.min(droneHp, hp); }
+      else { if (hp >= 0.25) humanObjsAlive++; humanHp = Math.min(humanHp, hp); }
     }
     this.hud.setScore(this.droneKills, this.humanKills, droneObjsAlive, humanObjsAlive, droneHp, humanHp);
     // Alert MY team when OUR base crosses a damage threshold, so teams rotate to defend instead of
@@ -1833,8 +1865,7 @@ export class Game {
    */
   private streamColliders(initial = false): void {
     const p = this.player.camera.position;
-    const [pvx, pvy, pvz] = VoxelGrid.worldToVoxel(p.x, p.y, p.z);
-    const pcx = chunkCoord(pvx), pcy = chunkCoord(pvy), pcz = chunkCoord(pvz);
+    const pcx = chunkCoord(Math.floor(p.x / VOXEL)), pcy = chunkCoord(Math.floor(p.y / VOXEL)), pcz = chunkCoord(Math.floor(p.z / VOXEL));
     const R = Game.COLLIDER_RADIUS;
     // Build AT MOST ONE collider chunk per frame while streaming (the initial full build is exempt).
     // Adding a chunk's colliders forces Rapier to re-optimise the static broadphase on the NEXT world.step,
@@ -1860,12 +1891,17 @@ export class Game {
     // of hysteresis is ample to stop boundary thrash at drone speed.
     const drop = this._dropScratch; drop.length = 0; // reused: streamColliders runs every frame → no per-frame array alloc
     for (const ck of this.collider.builtChunks()) {
-      const [cx, cy, cz] = unpackKey(ck);
-      if (Math.abs(cx - pcx) > far || Math.abs(cy - pcy) > far || Math.abs(cz - pcz) > far) drop.push(ck);
+      const cx = (ck % KEY_SPAN) - KEY_HALF, cy = (Math.floor(ck / KEY_SPAN) % KEY_SPAN) - KEY_HALF, cz = Math.floor(ck / (KEY_SPAN * KEY_SPAN)) - KEY_HALF;
+      if (Math.abs(cx - pcx) > far || Math.abs(cy - pcy) > far || Math.abs(cz - pcz) > far) {
+        drop.push(ck);
+        // Cap drops/frame like the build side: removing a whole trailing face (~9 chunks) of colliders in one
+        // frame forces a big broadphase re-opt on the next world.step (the "tirón al moverse"). Dropped chunks
+        // are already ≥1 chunk outside collision range (hysteresis), so lingering a few frames is invisible.
+        if (drop.length >= 2) break;
+      }
     }
     for (const ck of drop) {
-      const [cx, cy, cz] = unpackKey(ck);
-      this.collider.removeChunk(cx, cy, cz);
+      this.collider.removeChunk((ck % KEY_SPAN) - KEY_HALF, (Math.floor(ck / KEY_SPAN) % KEY_SPAN) - KEY_HALF, Math.floor(ck / (KEY_SPAN * KEY_SPAN)) - KEY_HALF);
     }
     const _cd = performance.now() - _cs0;
     this.prof.colTotal += _cd; if (_cd > this.prof.colMax) this.prof.colMax = _cd;
@@ -1896,13 +1932,13 @@ export class Game {
     let built = 0;
     for (const ck of this.meshChunks) {
       if (this.mesher.hasChunk(ck) || this.meshInFlight.has(ck)) continue;
-      const [mcx, mcy, mcz] = unpackKey(ck);
+      const mcx = (ck % KEY_SPAN) - KEY_HALF, mcy = (Math.floor(ck / KEY_SPAN) % KEY_SPAN) - KEY_HALF, mcz = Math.floor(ck / (KEY_SPAN * KEY_SPAN)) - KEY_HALF;
       const dx = mcx * MESH_CHUNK * VOXEL + HALF - p.x, dz = mcz * MESH_CHUNK * VOXEL + HALF - p.z;
       if (dx * dx + dz * dz > R2 && !this.isRingChunk(mcx, mcz)) continue; // the ring (map seal) always builds — never a see-through gap
       const keys = this.grid.meshChunkVoxelKeys(mcx, mcy, mcz);
       if (keys.length === 0) continue;                     // chunk carved to nothing → nothing to build
       const matIdx = new Uint8Array(keys.length);
-      for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(this.grid.materialAt(keys[i])!);
+      for (let i = 0; i < keys.length; i++) matIdx[i] = this.grid.materialIndexAt(keys[i]);
       this.meshInFlight.add(ck);
       this.cookService.requestMesh(ck, Int32Array.from(keys), matIdx);
       if (++built >= 3) break;                             // budget: ≤3 requests/frame so a fast crossing never stalls
@@ -1911,7 +1947,7 @@ export class Game {
     // the one-time post-load trim (everything built → bubble) spreads over frames instead of a dispose hitch.
     const drop = this._meshDrop; drop.length = 0;
     for (const ck of this.mesher.builtChunks()) {
-      const [mcx, , mcz] = unpackKey(ck);
+      const mcx = (ck % KEY_SPAN) - KEY_HALF, mcz = Math.floor(ck / (KEY_SPAN * KEY_SPAN)) - KEY_HALF;
       if (this.isRingChunk(mcx, mcz)) continue;            // NEVER stream out the perimeter ring — it seals the map on every side
       const dx = mcx * MESH_CHUNK * VOXEL + HALF - p.x, dz = mcz * MESH_CHUNK * VOXEL + HALF - p.z;
       if (dx * dx + dz * dz > dropR2) { drop.push(ck); if (drop.length >= 12) break; }
@@ -2027,7 +2063,9 @@ export class Game {
       let sx = 0, sy = 0, sz = 0;
       for (const [x, y, z] of vox) { sx += x; sy += y; sz += z; }
       const n = vox.length;
-      return { vox, cx: Math.round(sx / n), cy: Math.round(sy / n), cz: Math.round(sz / n), live: true };
+      const cx = Math.round(sx / n), cy = Math.round(sy / n), cz = Math.round(sz / n);
+      const c = VoxelGrid.center(cx, cy, cz); // world centre cached once — read every frame by applyDebrisImpacts
+      return { vox, cx, cy, cz, x: c.x, y: c.y, z: c.z, live: true };
     });
   }
 
@@ -2334,12 +2372,22 @@ export class Game {
   }
 
   /** True when within recharge range of EITHER of our team's two bases. */
+  // Site centres cached per world: buildObjectives REASSIGNS the OBJECTIVE_SITES array, so an identity
+  // check on the array reference recomputes exactly once per world build (nearOwnBase runs every frame).
+  private baseSitesRef: typeof OBJECTIVE_SITES | null = null;
+  private readonly baseCenters: { team: "drone" | "human"; x: number; y: number; z: number }[] = [];
   private nearOwnBase(): boolean {
+    if (this.baseSitesRef !== OBJECTIVE_SITES) {
+      this.baseSitesRef = OBJECTIVE_SITES;
+      this.baseCenters.length = 0;
+      for (const site of OBJECTIVE_SITES)
+        this.baseCenters.push({ team: site.team, x: (site.x0 + site.x1) * 0.5 * VOXEL, y: (site.y0 + site.y1) * 0.5 * VOXEL, z: (site.z0 + site.z1) * 0.5 * VOXEL });
+    }
     const p = this.player.camera.position;
-    for (const site of OBJECTIVE_SITES) {
+    for (const site of this.baseCenters) {
       if (site.team !== this.role) continue;
-      const cx = (site.x0 + site.x1) * 0.5 * VOXEL, cy = (site.y0 + site.y1) * 0.5 * VOXEL, cz = (site.z0 + site.z1) * 0.5 * VOXEL;
-      if (Math.hypot(p.x - cx, p.y - cy, p.z - cz) < 8) return true;
+      const dx = p.x - site.x, dy = p.y - site.y, dz = p.z - site.z;
+      if (dx * dx + dy * dy + dz * dz < 64) return true; // 8² — same verdict as hypot < 8
     }
     return false;
   }
@@ -2348,10 +2396,12 @@ export class Game {
    *  whether anything was below full, so a crate isn't wasted on an already-stocked soldier. NO battery. */
   private resupplyAmmo(): boolean {
     let gained = false;
-    for (const w of classLoadout(this.role, this.myClass)) {
+    for (const w of classStats(this.role, this.myClass).loadout) { // read-only walk — no classLoadout .slice() per call
       const spec = WEAPONS[w], cur = this.ammo[w];
-      if (cur.mag < spec.magSize || cur.reserve < spec.maxReserve) gained = true;
-      this.ammo[w] = fullAmmo(spec);
+      if (cur.mag < spec.magSize || cur.reserve < spec.maxReserve) {
+        gained = true;
+        cur.mag = spec.magSize; cur.reserve = spec.maxReserve; // same values as fullAmmo(spec), in place
+      }
     }
     return gained;
   }
@@ -2525,19 +2575,17 @@ export class Game {
   /** Fast flying rubble hurts our own drone (locally) and sets off any gas tank it slams into
    *  (broadcast as an authoritative blast so every client converges). Cheap: a handful of chunks
    *  against a handful of tanks per tick. */
+  private static readonly DEBRIS_IMPACT_CFG = {
+    keThreshold: DEBRIS_IMPACT_KE, tankR: DEBRIS_HIT_TANK_R, droneR: DEBRIS_HIT_DRONE_R,
+    dmgPerKe: 0.03, maxDronePerFrame: 25,
+  };
   private applyDebrisImpacts(): void {
     const debris = this.debris.impacts();
     if (debris.length === 0) return;
-    const tanks = this.gasTanks.map((t) => {
-      const c = VoxelGrid.center(t.cx, t.cy, t.cz);
-      return { x: c.x, y: c.y, z: c.z, live: t.live };
-    });
     const p = this.player.camera.position;
-    const drone = this.hp > 0 ? { x: p.x, y: p.y, z: p.z } : null;
-    const out = resolveDebrisImpacts(debris, tanks, drone, {
-      keThreshold: DEBRIS_IMPACT_KE, tankR: DEBRIS_HIT_TANK_R, droneR: DEBRIS_HIT_DRONE_R,
-      dmgPerKe: 0.03, maxDronePerFrame: 25,
-    });
+    let drone: { x: number; y: number; z: number } | null = null;
+    if (this.hp > 0) { drone = this._droneScratch; drone.x = p.x; drone.y = p.y; drone.z = p.z; }
+    const out = resolveDebrisImpacts(debris, this.gasTanks, drone, Game.DEBRIS_IMPACT_CFG);
     for (const i of out.tanks) this.detonateTankByDebris(i);
     if (out.droneDamage > 0) this.damageDrone(out.droneDamage);
   }
@@ -2955,7 +3003,7 @@ export class Game {
         if (!this.mesher.hasChunk(ck)) continue;
         const keys = this.grid.meshChunkVoxelKeys(cx, cy, cz);
         const matIdx = new Uint8Array(keys.length);
-        for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(this.grid.materialAt(keys[i])!);
+        for (let i = 0; i < keys.length; i++) matIdx[i] = this.grid.materialIndexAt(keys[i]);
         this.cookService.requestMesh(ck, Int32Array.from(keys), matIdx);
         if (performance.now() - _rt0 > meshBudget) break;
       }

@@ -13,8 +13,12 @@ const CELL_BIAS = 512;
 const CELL_SPAN = CELL_BIAS * 2;
 const cellOf = (cx: number, cy: number, cz: number) =>
   (cx + CELL_BIAS) + (cy + CELL_BIAS) * CELL_SPAN + (cz + CELL_BIAS) * CELL_SPAN * CELL_SPAN;
+// CCELL === 8, integer coords in ±512 → `>> 3` is the arithmetic-shift form of Math.floor(v/8)
 const cellKey = (x: number, y: number, z: number) =>
-  cellOf(Math.floor(x / CCELL), Math.floor(y / CCELL), Math.floor(z / CCELL));
+  cellOf(x >> 3, y >> 3, z >> 3);
+
+/** Stride of the packed-key layout: keys are linear — +1 per x, +KEY_SPAN per y, +KEY_SPAN² per z. */
+export const KEY_SPAN = SPAN;
 
 export function packKey(x: number, y: number, z: number): number {
   return (x + BIAS) + (y + BIAS) * SPAN + (z + BIAS) * SPAN * SPAN;
@@ -41,8 +45,8 @@ const MAT_BYTE = new Map<MaterialId, number>(MATERIAL_ORDER.map((m, i) => [m, i 
 // The material field was widened-down from 7 bits to 6 (still 63 materials, we use 16) to free bit 6 for the
 // indestructible flag: voxels immune to ALL gameplay destruction (the static forest wall + the gate vehicles).
 const WEAK = 0x80;
-const INDESTRUCTIBLE = 0x40;
-const MAT_MASK = 0x3f;
+export const INDESTRUCTIBLE = 0x40;
+export const MAT_MASK = 0x3f;
 
 export interface RayHit {
   /** Voxel that was hit. */
@@ -95,6 +99,20 @@ export class VoxelGrid {
   has(x: number, y: number, z: number): boolean {
     const c = this.chunks.get(scKeyOf(x, y, z));
     return c !== undefined && c[localIdx(x, y, z)] !== 0;
+  }
+
+  /** Raw stored byte of a voxel (0 = empty): material index+1 in bits 0-5 (MAT_MASK), INDESTRUCTIBLE
+   *  bit 6, WEAK bit 7. ONE Map.get + one localIdx — hot-loop form of get()+isIndestructible(). */
+  byteAt(x: number, y: number, z: number): number {
+    const c = this.chunks.get(scKeyOf(x, y, z));
+    return c === undefined ? 0 : c[localIdx(x, y, z)];
+  }
+
+  /** MATERIAL_ORDER index of a voxel by packed key (-1 if empty) — no unpack tuple, no indexOf. */
+  materialIndexAt(key: number): number {
+    const [x, y, z] = unpackKey(key);
+    const c = this.chunks.get(scKeyOf(x, y, z));
+    return c === undefined ? -1 : (c[localIdx(x, y, z)] & MAT_MASK) - 1;
   }
 
   /** Whether a voxel is flagged INDESTRUCTIBLE (immune to bullets, explosions and grenades). O(1). */

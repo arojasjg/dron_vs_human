@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { PerfGovernor } from "../src/engine/perfGovernor";
 import { buildBuilding, buildDefaultScene, setWorldSeed } from "../src/build/prefabs";
 import { carveSphere } from "../src/destruction/carve";
+import { MATERIAL_ORDER, type MaterialId } from "../src/world/materials";
 import { findUnsupported, type Voxel } from "../src/world/structuralIntegrity";
 import { STRUCTURE_MAX_OVERHANG } from "../src/config";
 
@@ -12,6 +13,7 @@ class MockGrid {
   remove(x: number, y: number, z: number) { this.m.delete(this.k(x, y, z)); }
   has(x: number, y: number, z: number) { return this.m.has(this.k(x, y, z)); }
   get(x: number, y: number, z: number) { return this.m.get(this.k(x, y, z)); }
+  byteAt(x: number, y: number, z: number) { const mat = this.m.get(this.k(x, y, z)); return mat === undefined ? 0 : MATERIAL_ORDER.indexOf(mat as MaterialId) + 1; } // material index+1; 0=empty; no indestructible bit (isIndestructible()=false)
   markSettled() {}
   markWeakBox() {}
   markIndestructibleBox() {}

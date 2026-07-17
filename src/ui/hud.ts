@@ -137,8 +137,10 @@ export class Hud {
    *  (green) / enemies (red) within `range`, and fading shot rays. `big` doubles the size + range. */
   drawMinimap(cx: number, cz: number, heading: number, blips: RadarBlip[], shots: RadarShot[], big: boolean, scanned: { x: number; z: number; behindWall: boolean }[] = []): void {
     const size = big ? 330 : 158, range = big ? 130 : 55, r = size / 2;
-    if (this.minimap.width !== size) { this.minimap.width = this.minimap.height = size; }
-    this.minimap.style.width = this.minimap.style.height = `${size}px`;
+    if (this.minimap.width !== size) {
+      this.minimap.width = this.minimap.height = size;
+      this.minimap.style.width = this.minimap.style.height = `${size}px`; // style tracks the buffer size → same guard
+    }
     const g = this.minimap.getContext("2d")!;
     g.clearRect(0, 0, size, size);
     g.beginPath(); g.arc(r, r, r - 1, 0, Math.PI * 2); g.fillStyle = "rgba(4,12,8,.62)"; g.fill();
@@ -247,9 +249,10 @@ export class Hud {
   setScore(droneKills: number, humanKills: number, droneObjs: number, humanObjs: number, droneHp = 1, humanHp = 1): void {
     const bases = (n: number) => "🟢".repeat(Math.max(0, n)) + "💥".repeat(Math.max(0, 2 - n));
     const pct = (h: number) => `${Math.round(h * 100)}%`;
-    this.score.innerHTML = `🤖 Drones <b>${droneKills}</b> ${bases(droneObjs)}<small> ${pct(droneHp)}</small>` +
+    const html = `🤖 Drones <b>${droneKills}</b> ${bases(droneObjs)}<small> ${pct(droneHp)}</small>` +
       ` &nbsp;·&nbsp; <small>${pct(humanHp)} </small>${bases(humanObjs)} <b>${humanKills}</b> Humanos 🧍`;
-    this.score.style.display = "block";
+    if (this.score.innerHTML !== html) this.score.innerHTML = html; // called every frame → only touch the DOM on change
+    if (this.score.style.display !== "block") this.score.style.display = "block";
   }
 
   hideScore(): void { this.score.style.display = "none"; }
@@ -384,21 +387,23 @@ export class Hud {
     } else {
       hint = `<span class="bnd-hint">B — vendar</span>`;                       // have bandages, at full HP
     }
-    this.bandageEl.innerHTML = `<b>🩹 ×${count}</b> ${hint}`;
+    const html = `<b>🩹 ×${count}</b> ${hint}`;
+    if (this.bandageEl.innerHTML !== html) this.bandageEl.innerHTML = html; // called every frame → diff first
     this.bandageEl.classList.toggle("alert", alert);
-    this.bandageEl.style.display = "flex";
+    if (this.bandageEl.style.display !== "flex") this.bandageEl.style.display = "flex";
   }
 
   /** Frontal-scanner status panel. `state`: "ready" (glows amber, prompts R), "charging" (progress bar 0..1),
    *  or "off" (hidden — sandbox). Modeled on the bandage panel. */
   setScanStatus(state: "ready" | "charging" | "off", frac = 0): void {
-    if (state === "off") { this.scannerEl.style.display = "none"; return; }
+    if (state === "off") { if (this.scannerEl.style.display !== "none") this.scannerEl.style.display = "none"; return; }
     const ready = state === "ready";
-    this.scannerEl.innerHTML = ready
+    const html = ready
       ? `<b>📡 ESCÁNER</b> <span class="scn-do">R — LISTO</span>`
       : `<b>📡 ESCÁNER</b> <div class="scn-bar"><i style="width:${Math.round(Math.max(0, Math.min(1, frac)) * 100)}%"></i></div>`;
+    if (this.scannerEl.innerHTML !== html) this.scannerEl.innerHTML = html; // called every frame → diff first
     this.scannerEl.classList.toggle("alert", ready);
-    this.scannerEl.style.display = "flex";
+    if (this.scannerEl.style.display !== "flex") this.scannerEl.style.display = "flex";
   }
 
   /** On-screen directional markers pointing at each scanned enemy. `marks[].angle` = bearing (rad, 0 = ahead,

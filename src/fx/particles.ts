@@ -28,6 +28,10 @@ const FRAG = /* glsl */ `
 
 export type ParticleKind = "dust" | "smoke" | "spark" | "debris" | "light";
 
+// burst() scratch — values are consumed into the typed arrays before the call returns
+const COL = new THREE.Color();
+const DIR = new THREE.Vector3();
+
 export interface BurstOptions {
   count: number;
   color: THREE.ColorRepresentation;
@@ -109,7 +113,7 @@ export class Particles {
   }
 
   burst(x: number, y: number, z: number, o: BurstOptions): void {
-    const color = new THREE.Color(o.color);
+    const color = COL.set(o.color);
     const spread = o.spread ?? 1;
     const size = o.size ?? 6;
     const life = o.life ?? 1.2;
@@ -118,7 +122,7 @@ export class Particles {
     for (let n = 0; n < o.count; n++) {
       const i = this.free.pop();
       if (i === undefined) return;
-      const dir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
+      const dir = DIR.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
       if (dir.lengthSq() < 1e-4) dir.set(0, 1, 0);
       dir.normalize().multiplyScalar(o.speed * (0.4 + Math.random() * 0.6));
       this.pos[i * 3] = x + (Math.random() - 0.5) * spread;
@@ -137,6 +141,9 @@ export class Particles {
       this.alpha[i] = 1;
       this.buoy[i] = buoy;
       this.damp[i] = damp;
+      // col/size only ever change here → flag their re-upload now instead of every frame in update()
+      this.colAttr.needsUpdate = true;
+      this.sizeAttr.needsUpdate = true;
     }
   }
 
@@ -168,8 +175,6 @@ export class Particles {
       this.pos[i * 3 + 2] += this.vz[i] * dt;
     }
     this.posAttr.needsUpdate = true;
-    this.colAttr.needsUpdate = true;
     this.lifeAttr.needsUpdate = true;
-    this.sizeAttr.needsUpdate = true;
   }
 }

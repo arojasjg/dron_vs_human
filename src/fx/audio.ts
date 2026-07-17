@@ -17,6 +17,8 @@ const SHOT_SAMPLE: Record<string, string> = {
   smg: "shot_smg", lmg: "shot_lmg", dmr: "shot_dmr", sniper: "shot_sniper", glauncher: "shot_glauncher",
 };
 
+const DIST_CURVES = new Map<number, Float32Array<ArrayBuffer>>(); // memoized WaveShaper curves per shape amount
+
 export class GameAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
@@ -127,10 +129,16 @@ export class GameAudio {
     return buf;
   }
 
-  /** Soft-clip distortion curve — a touch of grit/saturation for blasts & heavy impacts. */
+  /** Soft-clip distortion curve — a touch of grit/saturation for blasts & heavy impacts.
+   *  Memoized per shape amount (only a handful of distinct values ever used; the curve is deterministic). */
   private distCurve(amount: number): Float32Array<ArrayBuffer> {
-    const n = 1024, c = new Float32Array(new ArrayBuffer(n * 4));
-    for (let i = 0; i < n; i++) { const x = (i / n) * 2 - 1; c[i] = ((1 + amount) * x) / (1 + amount * Math.abs(x)); }
+    let c = DIST_CURVES.get(amount);
+    if (!c) {
+      const n = 1024;
+      c = new Float32Array(new ArrayBuffer(n * 4));
+      for (let i = 0; i < n; i++) { const x = (i / n) * 2 - 1; c[i] = ((1 + amount) * x) / (1 + amount * Math.abs(x)); }
+      DIST_CURVES.set(amount, c);
+    }
     return c;
   }
 

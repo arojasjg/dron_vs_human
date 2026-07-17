@@ -6,6 +6,8 @@ import { idleGate } from "./idleGate";
 
 const EMITTERS = 24;
 
+const CLEAR_COL = new THREE.Color(); // densityPass scratch: saves/restores the renderer clear colour
+
 const COLOR_TYPE: Record<ParticleKind, number> = {
   dust: 0.1, smoke: 0.3, spark: 0.5, debris: 0.7, light: 0.9,
 };
@@ -422,15 +424,14 @@ export class GpuParticles implements ParticleSink {
     if (!posTex) return;
     this.densityUniforms.uPosTex.value = posTex;
     const prev = this.renderer.getRenderTarget();
-    const rc = new THREE.Color();
-    this.renderer.getClearColor(rc);
+    this.renderer.getClearColor(CLEAR_COL);
     const ra = this.renderer.getClearAlpha();
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.setRenderTarget(this.densityRT);
     this.renderer.clear(true, false, false);
     this.renderer.render(this.densityScene, this.densityCam);
     this.renderer.setRenderTarget(prev);
-    this.renderer.setClearColor(rc, ra);
+    this.renderer.setClearColor(CLEAR_COL, ra);
     this.velVar.material.uniforms.uDensityTex.value = this.densityRT.texture;
   }
 

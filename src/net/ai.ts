@@ -53,6 +53,12 @@ const HEAL_CD = 1.2;      // seconds between a support's heal pulses (reuses the
 const SEP_RADIUS = 5;     // anti-clumping: bots within this push apart (wide enough to break the ball-on-top pile-up)
 const AIM_COS = 0.965;    // how tightly the target's aim must point at a bot to trigger a dodge
 
+// Spatial-hash cell + key, hoisted to module scope so tick() allocates no per-frame closures. The key
+// function and cell size are FROZEN: the swarm's separation sum (an order-dependent FP accumulation) is
+// byte-identical only if neighbour enumeration order is unchanged, which depends on this hash + cell.
+const HASH_CELL = 6;
+function cellHash(gx: number, gz: number): number { return ((gx * 73856093) ^ (gz * 19349663)) | 0; }
+
 /** Weighted archetype pick — the base trio early, with tanks / kamikazes / supports PHASING IN as waves climb.
  *  Pure given rng (draws up to twice). `wave` gates the specials so the first waves stay the classic trio. */
 export function pickKind(rng: () => number, wave = 0): AiKind {
@@ -228,9 +234,11 @@ export function searchPoint(lsx: number, lsz: number, seed: number, age: number,
  *  multiple doors), or null → the caller climbs instead. Pure over `solid`. Bounded: 2 sides × ~10 steps ×
  *  `heights` probes per call. (Trades a small chance of rounding a wall's lateral edge for robustness — the
  *  sub-voxel collision march still prevents any tunnelling regardless of where this steers.) */
+const OPEN_HEIGHTS: readonly number[] = [1.5, 4.5];        // door + low-window probe heights (hoisted — no per-call array)
+const SIDES_LR: readonly number[] = [1, -1], SIDES_RL: readonly number[] = [-1, 1]; // seed-split scan order (read-only)
 export function openingSeek(
   bx: number, bz: number, gdx: number, gdz: number, solid: (x: number, y: number, z: number) => boolean,
-  seed = 0, reach = 6, step = 0.6, heights: readonly number[] = [1.5, 4.5], wallDist = 0.7,
+  seed = 0, reach = 6, step = 0.6, heights: readonly number[] = OPEN_HEIGHTS, wallDist = 0.7,
 ): [number, number, number] | null {
   const gl = Math.hypot(gdx, gdz) || 1e-3;
   const fdx = gdx / gl, fdz = gdz / gl;       // forward toward the goal
@@ -239,7 +247,7 @@ export function openingSeek(
   // ±x or ±z sweep that stays ON the wall plane, instead of a diagonal that drifts off a thick wall's edge).
   const alongX = Math.abs(fdx) >= Math.abs(fdz);
   const px = alongX ? 0 : 1, pz = alongX ? 1 : 0;
-  const sides = seed < 0.5 ? [1, -1] : [-1, 1]; // seed → half the swarm scans left-first, half right → fan out
+  const sides = seed < 0.5 ? SIDES_LR : SIDES_RL; // seed → half the swarm scans left-first, half right → fan out
   for (let d = step; d <= reach; d += step) {    // nearest opening first
     for (const side of sides) {
       const sx = wx + px * side * d, sz = wz + pz * side * d; // slide ALONG the wall face → a real hole, not open air in front
@@ -293,8 +301,25 @@ export class AiSwarm {
   readonly PROJ = 90;    // assumed round speed used for aim lead
   readonly GREN_CD = 4;    // seconds between a bomber's grenade drops (divers + gunners, aggressive)
   readonly DROP_RANGE = 16; // XZ distance under which a bomber releases a grenade over the target
+  // Reused spatial-hash storage — rebuilt each tick but never reallocated (the largest per-frame GC churn in
+  // the sim). Bucket arrays are recycled through `_bucketPool`; `_neighbors` is one scratch buffer whose result
+  // is always consumed by its caller before the next collectNeighbors() call.
+  private readonly _buckets = new Map<number, AiBot[]>();
+  private readonly _bucketPool: AiBot[][] = [];
+  private readonly _neighbors: AiBot[] = [];
+  private _listCache: AiBot[] | null = null; // reused snapshot of bots.values() — rebuilt only on a membership change
 
-  get list(): readonly AiBot[] { return [...this.bots.values()]; }
+  // Cached bot snapshot (read up to twice per host frame + by peers). Elements are LIVE bot objects mutated in
+  // place by tick(), so a membership-stable cache stays current; a length mismatch vs bots.size (the ONLY way
+  // membership changes here — waves only add, tick/damage only delete, never a same-size swap) rebuilds it in
+  // the identical Map-insertion order → byte-identical to the old fresh-spread getter (guarded by golden AI).
+  get list(): readonly AiBot[] {
+    const c = this._listCache;
+    if (c === null || c.length !== this.bots.size) return this._listCache = [...this.bots.values()];
+    return c;
+  }
+  get count(): number { return this.bots.size; }
+  has(id: number): boolean { return this.bots.has(id); }
   get count(): number { return this.bots.size; }
   has(id: number): boolean { return this.bots.has(id); }
 
@@ -327,6 +352,20 @@ export class AiSwarm {
     return n;
   }
 
+  /** The 3×3 spatial-hash neighbourhood of `b` (excluding itself) written into a REUSED scratch array. The
+   *  caller consumes the result immediately (separation / heal), so one buffer is safe. Enumeration order —
+   *  bucket fill order (bots.values()) × the frozen gx/gz scan below — is preserved verbatim, so the
+   *  separation FP sum stays byte-identical to the pre-optimization per-call-array version. */
+  private collectNeighbors(b: AiBot): AiBot[] {
+    const out = this._neighbors; out.length = 0;
+    const cx = Math.floor(b.x / HASH_CELL), cz = Math.floor(b.z / HASH_CELL);
+    for (let gx = cx - 1; gx <= cx + 1; gx++) for (let gz = cz - 1; gz <= cz + 1; gz++) {
+      const arr = this._buckets.get(cellHash(gx, gz)); if (!arr) continue;
+      for (const o of arr) if (o !== b) out.push(o);
+    }
+    return out;
+  }
+
   /** Advances every bot and returns the shots fired this tick. Bots are NOT omniscient: they drive off a
    *  PERCEIVED belief (updated only by real `los` sight or by an audible `noises` event), pursuing a drifting,
    *  seeded search point when the belief is stale — so a quiet/hidden target is tracked imprecisely and the
@@ -342,23 +381,20 @@ export class AiSwarm {
     const fires: AiFire[] = [];
     if (targets.length === 0) return fires;
     const sp = speedScale(this.wave), fcd = fireCdScale(this.wave), sprd = spread(this.wave);
+    const lerpK = Math.min(1, dt * 2.2); // height-lerp factor — loop-invariant, hoisted out of the per-bot loop
 
-    // Spatial hash of bot positions (built once per tick) → O(n) neighbour lookups for separation + support heal.
-    const CELL = 6;
-    const hash = (gx: number, gz: number) => ((gx * 73856093) ^ (gz * 19349663)) | 0;
-    const buckets = new Map<number, AiBot[]>();
+    // Spatial hash of bot positions (rebuilt each tick into POOLED arrays → zero per-tick Map/array allocation).
+    // Insertion order (bots.values()) and the cellHash are unchanged → neighbour enumeration, and thus the
+    // separation FP sum, is byte-identical to the previous fresh-Map version.
+    const buckets = this._buckets, pool = this._bucketPool;
+    for (const arr of buckets.values()) { arr.length = 0; pool.push(arr); }
+    buckets.clear();
     for (const b of this.bots.values()) {
-      const k = hash(Math.floor(b.x / CELL), Math.floor(b.z / CELL));
-      let arr = buckets.get(k); if (!arr) { arr = []; buckets.set(k, arr); } arr.push(b);
+      const k = cellHash(Math.floor(b.x / HASH_CELL), Math.floor(b.z / HASH_CELL));
+      let arr = buckets.get(k);
+      if (!arr) { arr = pool.pop() ?? []; buckets.set(k, arr); }
+      arr.push(b);
     }
-    const neighborsOf = (b: AiBot): AiBot[] => {
-      const out: AiBot[] = []; const cx = Math.floor(b.x / CELL), cz = Math.floor(b.z / CELL);
-      for (let gx = cx - 1; gx <= cx + 1; gx++) for (let gz = cz - 1; gz <= cz + 1; gz++) {
-        const arr = buckets.get(hash(gx, gz)); if (!arr) continue;
-        for (const o of arr) if (o !== b) out.push(o);
-      }
-      return out;
-    };
 
     for (const b of this.bots.values()) {
       const a = ARCHETYPES[b.kind];
@@ -379,18 +415,15 @@ export class AiSwarm {
       const age = perceived ? this.t - b.lsT : (this.lastContact.t >= 0 ? this.t - this.lastContact.t : 0);
       const acc = perceived ? beliefAccuracy(b.ba, age) : 0.2;
       const [gx, gz] = beliefGoal(b.lsx, b.lsz, b.seed, this.t, acc);
-      const gdx = gx - b.x, gdz = gz - b.z, gDist = Math.hypot(gdx, gdz) || 1e-3;
+      const gdx = gx - b.x, gdz = gz - b.z;
+      const rawG = Math.hypot(gdx, gdz), gDist = rawG || 1e-3;  // ONE hypot: gDist and the orbit tangent both use it
       b.fx = gdx / gDist; b.fz = gdz / gDist;                   // face where it BELIEVES you are (shield/aim)
       const fresh = perceived && age < 1.5;                     // saw/heard recently → engage; else search
       const hold = a.hold * holdMult(b.seed);                   // per-bot stand-off → LAYERED ring, no ball
 
       const dir = seekDir(b.x, b.y, b.z, gx, aimY, gz);
-      const [ox, oz] = orbitDir(gdx, gdz, b.orbit);
-      const jk = jink(b.seed, this.t);
-      // ENCIRCLE: each bot owns a bearing slot on the hold ring around the BELIEF → the swarm surrounds you.
-      const bearing = b.seed * Math.PI * 2;
-      const ringX = gx + Math.cos(bearing) * hold, ringZ = gz + Math.sin(bearing) * hold;
-      const rdx = ringX - b.x, rdz = ringZ - b.z, rl = Math.hypot(rdx, rdz) || 1e-3;
+      const od = rawG || 1;                                     // orbitDir's OWN guard (|| 1), distinct from gDist's || 1e-3
+      const ox = (-gdz / od) * b.orbit, oz = (gdx / od) * b.orbit; // strafe/orbit tangent (inlined orbitDir, no tuple + shared hypot)
 
       const lowHp = b.kind !== "kamikaze" && b.hp <= Math.max(1, a.hp * 0.34); // hurt → retreat
       const aimedAt = canSee && t.aimX !== undefined && beingAimedAt(b.x, b.z, t.x, t.z, t.aimX, t.aimZ ?? 0);
@@ -406,6 +439,12 @@ export class AiSwarm {
         mvx = (sdx / sl) * 0.85 + ox * 0.5;               // seek the sweep point (dominant) + orbit for lateral coverage
         mvz = (sdz / sl) * 0.85 + oz * 0.5;
       } else if (gDist > hold) {                          // approach: encircle SLOT dominant + goal-seek + weave
+        // ENCIRCLE: each bot owns a bearing slot on the hold ring around the BELIEF → the swarm surrounds you.
+        // Computed HERE (its only consumer) instead of for every bot every frame.
+        const jk = jink(b.seed, this.t);
+        const bearing = b.seed * Math.PI * 2;
+        const ringX = gx + Math.cos(bearing) * hold, ringZ = gz + Math.sin(bearing) * hold;
+        const rdx = ringX - b.x, rdz = ringZ - b.z, rl = Math.hypot(rdx, rdz) || 1e-3;
         mvx = (rdx / rl) * 0.75 + dir[0] * 0.5 + ox * 0.45 * jk;
         mvz = (rdz / rl) * 0.75 + dir[2] * 0.5 + oz * 0.45 * jk;
       } else {                                            // in the pocket → ORBIT-dominant + gentle hold-range drift
@@ -416,7 +455,7 @@ export class AiSwarm {
       // (slip through) instead of grinding up and OVER it. If no open gap is near, REQUEST a break of the voxel
       // just ahead (the game clears it only if it's glass) — so drones enter through doors or by shattering
       // windows, rather than always climbing to the roof. Latched ~1.2 s so they don't dither between openings.
-      const gfx = gdx / gDist, gfz = gdz / gDist;
+      const gfx = b.fx, gfz = b.fz;                        // == gdx/gDist, gdz/gDist (already stored above — no recompute)
       let seekingOpening = false, entryY = 0;
       const wallAhead = b.kind !== "kamikaze" && !lowHp && solid(b.x + gfx * 0.6, b.y, b.z + gfz * 0.6);
       if (wallAhead) {
@@ -435,7 +474,7 @@ export class AiSwarm {
 
       if (aimedAt) { mvx += ox * 1.2; mvz += oz * 1.2; }   // DODGE when the crosshair is on us
 
-      const [sepx, sepz] = separation(b.x, b.z, neighborsOf(b), SEP_RADIUS); // anti-clumping
+      const [sepx, sepz] = separation(b.x, b.z, this.collectNeighbors(b), SEP_RADIUS); // anti-clumping
       mvx += sepx * 1.4; mvz += sepz * 1.4;                // stronger push → they layer around you, not stack
 
       const ml = Math.hypot(mvx, mvz) || 1;
@@ -471,7 +510,7 @@ export class AiSwarm {
       }
       if (seekingOpening) wantY = entryY;                 // drop to the door/window band to fly IN, not climb over
       else if (blocked) wantY = Math.min(45, Math.max(wantY, b.y + 8)); // hit something → climb over it (cap ~45 m)
-      let ny = b.y + (wantY - b.y) * Math.min(1, dt * 2.2);
+      let ny = b.y + (wantY - b.y) * lerpK;
       if (ny < b.y && solid(b.x, ny, b.z)) ny = b.y;      // descending into a roof → rest on it, don't sink through
       b.y = ny;
       if (b.y < 2) b.y = 2;
@@ -513,7 +552,7 @@ export class AiSwarm {
       // SUPPORT heal pulse: top up nearby allies on a cooldown (reuses the grenade timer slot).
       if (b.kind === "support" && b.gcd <= 0) {
         b.gcd = HEAL_CD;
-        applyHeal(b.x, b.z, neighborsOf(b), HEAL_RADIUS, HEAL_AMT);
+        applyHeal(b.x, b.z, this.collectNeighbors(b), HEAL_RADIUS, HEAL_AMT);
       }
     }
     return fires;

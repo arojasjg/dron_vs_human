@@ -53,6 +53,11 @@ const HIP_PIVOT = -0.2;        // hip height the legs swing about
 const WALK_FREQ = 1.7;         // walk-phase advance per metre travelled
 const HUMAN_RUN = 7.5;         // matches Walker RUN — scales the leg swing amplitude
 
+// per-frame scratch: consumed synchronously by the caller / Rapier before the next use
+const KIN_POS = { x: 0, y: 0, z: 0 };
+const NEAREST = { dist: 0, x: 0, z: 0 };
+const TARGET_POOL: { id: number; x: number; y: number; z: number; hp: number; maxHp: number }[] = [];
+
 // --- Drone: detailed military quadcopter (~0.95 m span) ---
 const D_CORE = new THREE.BoxGeometry(0.34, 0.12, 0.52);          // fuselage
 const D_DECK = new THREE.BoxGeometry(0.26, 0.07, 0.34);          // raised avionics deck
@@ -142,7 +147,9 @@ export class RemoteDrones {
       const p = d.drone.position, dd = Math.hypot(p.x - x, p.y - y, p.z - z);
       if (dd < best) { best = dd; bx = p.x; bz = p.z; found = true; }
     }
-    return found ? { dist: best, x: bx, z: bz } : null;
+    if (!found) return null;
+    NEAREST.dist = best; NEAREST.x = bx; NEAREST.z = bz;
+    return NEAREST;
   }
 
   /** Distance to the nearest enemy drone, or Infinity if none. */
@@ -211,7 +218,10 @@ export class RemoteDrones {
     for (const [id, d] of this.drones) {
       if (!d.isHuman || d.hp <= 0) continue;
       const p = d.human.position;
-      out.push({ id, x: p.x, y: p.y, z: p.z, hp: d.hp, maxHp: d.maxHp });
+      let t = TARGET_POOL[out.length];
+      if (!t) { t = { id: 0, x: 0, y: 0, z: 0, hp: 0, maxHp: 0 }; TARGET_POOL[out.length] = t; }
+      t.id = id; t.x = p.x; t.y = p.y; t.z = p.z; t.hp = d.hp; t.maxHp = d.maxHp;
+      out.push(t);
     }
   }
 
@@ -294,7 +304,8 @@ export class RemoteDrones {
       d.barFg.position.set(p.x - 0.3 * (1 - d.frac), p.y + 0.45, p.z);
       d.barBg.position.set(p.x, p.y + 0.45, p.z);
       // follow the eased avatar with the kinematic collider (humans: drop to the torso; drones: at the body)
-      d.body.setNextKinematicTranslation({ x: p.x, y: p.y - (d.isHuman ? 0.6 : 0), z: p.z });
+      KIN_POS.x = p.x; KIN_POS.y = p.y - (d.isHuman ? 0.6 : 0); KIN_POS.z = p.z;
+      d.body.setNextKinematicTranslation(KIN_POS);
     }
   }
 

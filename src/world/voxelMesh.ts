@@ -47,7 +47,10 @@ export class VoxelMesher {
   private readonly matsNoFog = new Map<MaterialId, THREE.MeshStandardMaterial>();
   private ringX1 = Infinity;   // city footprint (voxels); a chunk whose centre is outside it is ring → seal, never fog/cull/stream-out
   private ringZ1 = Infinity;
-  private readonly chunks = new Map<number, Map<MaterialId, THREE.InstancedMesh>>();
+  // Per-chunk entry caches the ring flag + world-space centre XZ (static between setRingBounds calls, and
+  // every setRingBounds is followed by a full rebuild → recomputed at applyCooked, never stale) so the
+  // per-frame updateVisibility does no key unpack and no ring recompute.
+  private readonly chunks = new Map<number, { mats: Map<MaterialId, THREE.InstancedMesh>; ring: boolean; cx: number; cz: number }>();
   // Shared across every masonry program: setVoxelDetail flips this one .value → all seam shaders gate off
   // together on the next render, no recompile. 1 = full surface detail, 0 = flat (the perf floor lever).
   private readonly detailUniform: DetailUniform = { value: 1 };
@@ -102,7 +105,7 @@ export class VoxelMesher {
    *  city, so the world can scale (5× buildings) without the object graph growing with it. */
   disposeChunk(ck: number): void {
     const m = this.chunks.get(ck);
-    if (m) { for (const mesh of m.values()) this.disposeMesh(mesh); this.chunks.delete(ck); }
+    if (m) { for (const mesh of m.mats.values()) this.disposeMesh(mesh); this.chunks.delete(ck); }
   }
 
   /** Distance culling — the "view bubble". A chunk whose horizontal centre is farther than sqrt(maxDistSq)
@@ -111,20 +114,18 @@ export class VoxelMesher {
    *  Fog (renderer.ts) fully hides the scene before the cut → no pop. Cheap: a few ops per chunk, no allocs,
    *  and `.visible` is independent of the frozen instance matrices. Call once per frame. */
   updateVisibility(camX: number, camZ: number, maxDistSq: number): void {
-    const HALF = (MESH_CHUNK / 2) * VOXEL;
-    for (const [ck, mats] of this.chunks) {
-      const [mcx, , mcz] = unpackKey(ck);
-      if (this.isRingChunk(mcx, mcz)) { for (const mesh of mats.values()) mesh.visible = true; continue; } // seal → never cull
-      const dx = mcx * MESH_CHUNK * VOXEL + HALF - camX;
-      const dz = mcz * MESH_CHUNK * VOXEL + HALF - camZ;
+    for (const e of this.chunks.values()) {
+      if (e.ring) { for (const mesh of e.mats.values()) mesh.visible = true; continue; } // seal → never cull
+      const dx = e.cx - camX;
+      const dz = e.cz - camZ;
       const vis = dx * dx + dz * dz <= maxDistSq;
-      for (const mesh of mats.values()) mesh.visible = vis;
+      for (const mesh of e.mats.values()) mesh.visible = vis;
     }
   }
 
   /** Full rebuild — used at load time and after stamping prefabs. */
   rebuild(grid: VoxelGrid): void {
-    for (const m of this.chunks.values()) for (const mesh of m.values()) this.disposeMesh(mesh);
+    for (const m of this.chunks.values()) for (const mesh of m.mats.values()) this.disposeMesh(mesh);
     this.chunks.clear();
 
     const buckets = new Map<number, number[]>();
@@ -146,7 +147,7 @@ export class VoxelMesher {
 
   private build(ck: number, grid: VoxelGrid, keys: number[]): void {
     const matIdx = new Uint8Array(keys.length);
-    for (let i = 0; i < keys.length; i++) matIdx[i] = MATERIAL_ORDER.indexOf(grid.materialAt(keys[i])!);
+    for (let i = 0; i < keys.length; i++) matIdx[i] = grid.materialIndexAt(keys[i]); // same index, no indexOf scan
     this.applyCooked(ck, cookMeshChunk(keys, matIdx)); // pure cook (the big part) → build the meshes
   }
 
@@ -157,10 +158,11 @@ export class VoxelMesher {
    */
   applyCooked(ck: number, parts: CookedMeshPart[]): void {
     const old = this.chunks.get(ck);
-    if (old) { for (const mesh of old.values()) this.disposeMesh(mesh); this.chunks.delete(ck); }
+    if (old) { for (const mesh of old.mats.values()) this.disposeMesh(mesh); this.chunks.delete(ck); }
     if (parts.length === 0) return;
     const [mcx, , mcz] = unpackKey(ck);
-    const matSet = this.isRingChunk(mcx, mcz) ? this.matsNoFog : this.mats; // the ring seal renders fog-free
+    const ring = this.isRingChunk(mcx, mcz);
+    const matSet = ring ? this.matsNoFog : this.mats; // the ring seal renders fog-free
     const map = new Map<MaterialId, THREE.InstancedMesh>();
     for (const part of parts) {
       const mat = MATERIAL_ORDER[part.matIdx];
@@ -180,7 +182,8 @@ export class VoxelMesher {
       this.group.add(mesh);
       map.set(mat, mesh);
     }
-    this.chunks.set(ck, map);
+    const HALF = (MESH_CHUNK / 2) * VOXEL;
+    this.chunks.set(ck, { mats: map, ring, cx: mcx * MESH_CHUNK * VOXEL + HALF, cz: mcz * MESH_CHUNK * VOXEL + HALF });
   }
 
   private disposeMesh(mesh: THREE.InstancedMesh): void {

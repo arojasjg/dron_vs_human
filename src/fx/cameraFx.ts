@@ -18,6 +18,7 @@ export class CameraFx {
   private readonly label: HTMLElement;
   private role: FxRole = "none";
   private t = 0;
+  private lastClockSec = -1; // the wall-clock string only changes once per second → skip identical rewrites
 
   constructor() {
     inject();
@@ -40,8 +41,12 @@ export class CameraFx {
     if (this.role === "none") return;
     this.t += dt;
     this.rec.style.opacity = this.t % 1 < 0.5 ? "1" : "0.2"; // ~1 Hz REC blink
-    const d = new Date(), p = (n: number) => String(n).padStart(2, "0");
-    this.clock.textContent = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}  ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (nowSec !== this.lastClockSec) {
+      this.lastClockSec = nowSec;
+      const d = new Date(), p = (n: number) => String(n).padStart(2, "0");
+      this.clock.textContent = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}  ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
     this.tele.textContent = this.role === "drone"
       ? `ALT ${tele.alt.toFixed(1)}m   VEL ${tele.speed.toFixed(1)}m/s   BAT ${Math.round(tele.battery)}%`
       : `CAM-01   ${tele.speed.toFixed(1)} m/s`;
