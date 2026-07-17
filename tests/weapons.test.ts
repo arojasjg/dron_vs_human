@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WEAPONS, roleLoadout, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff } from "../src/net/weapons";
+import { WEAPONS, roleLoadout, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff } from "../src/net/weapons";
 import { roleMaxHp } from "../src/net/roles";
 
 describe("bullet range falloff + TTK intent", () => {
@@ -138,6 +138,17 @@ describe("ammo — limited, auto-reload, base-refilled", () => {
 
   it("a full resupply restores the whole mag + reserve (recharge at base)", () => {
     expect(fullAmmo(WEAPONS.mg)).toEqual({ mag: 40, reserve: 200 });
+  });
+
+  it("reloadMag: a tactical swap WASTES the partial mag (rounds left in it are lost)", () => {
+    const r = reloadMag({ mag: 12, reserve: 30 }, 40);        // reload a 12/40 mag with 30 in reserve
+    expect(r.ammo).toEqual({ mag: 30, reserve: 0 });          // fresh mag = min(40,30)=30; the 12 leftover are GONE
+    expect(r.lost).toBe(12);                                  // reported for the HUD
+    expect(fullReloadNoWaste()).toBe(true);
+    function fullReloadNoWaste() {                            // reloading a FULL mag still costs the leftover if forced, but the UI gates it
+      const full = reloadMag({ mag: 5, reserve: 0 }, 5);      // empty reserve → no-op, keep the mag
+      return full.ammo.mag === 5 && full.lost === 0;
+    }
   });
 });
 

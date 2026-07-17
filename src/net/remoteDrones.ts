@@ -298,11 +298,16 @@ export class RemoteDrones {
       } else if (d.rifle.rotation.x !== 0) {
         d.rifle.rotation.x = 0;
       }
-      // health bar above whichever avatar is shown
+      // health bar above whichever avatar is shown — HIDDEN at full HP: the AI swarm is broadcast at a constant
+      // full 100/100, so its bars would ALWAYS show and clutter the view; a peer's bar only appears once hurt.
       const p = d.isHuman ? h.position : d.drone.position;
-      d.barFg.scale.set(0.6 * d.frac, 0.08, 1);
-      d.barFg.position.set(p.x - 0.3 * (1 - d.frac), p.y + 0.45, p.z);
-      d.barBg.position.set(p.x, p.y + 0.45, p.z);
+      const showBar = d.frac < 0.995;
+      d.barFg.visible = showBar; d.barBg.visible = showBar;
+      if (showBar) {
+        d.barFg.scale.set(0.6 * d.frac, 0.08, 1);
+        d.barFg.position.set(p.x - 0.3 * (1 - d.frac), p.y + 0.45, p.z);
+        d.barBg.position.set(p.x, p.y + 0.45, p.z);
+      }
       // follow the eased avatar with the kinematic collider (humans: drop to the torso; drones: at the body)
       KIN_POS.x = p.x; KIN_POS.y = p.y - (d.isHuman ? 0.6 : 0); KIN_POS.z = p.z;
       d.body.setNextKinematicTranslation(KIN_POS);

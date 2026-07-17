@@ -46,7 +46,7 @@ import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
-import { WEAPONS, tryFire, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, type Weapon, type Ammo } from "./net/weapons";
+import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, KEY_SPAN, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -148,15 +148,25 @@ export class Game {
   private readonly smokeClouds: SmokeCloud[] = []; // active smoke grenades: block LOS (both ways) until they expire
   private smokeFxAt = 0;                           // throttle for the sustained smoke particle emission
   // soldier's interceptor swarm: local homing mini-drones that ram the nearest enemy drone (kill is host-auth)
-  private readonly miniDrones: { mesh: THREE.Object3D; x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number; boom?: boolean }[] = [];
+  private readonly miniDrones: { mesh: THREE.Object3D; x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number; boom?: boolean; target?: number }[] = [];
   // reused per frame by miniDroneFrame (scratch snapshot + its object pool) — no per-frame allocation
   private readonly _miniBots: { id: number; x: number; y: number; z: number }[] = [];
   private readonly _miniBotPool: { id: number; x: number; y: number; z: number }[] = [];
-  private readonly turrets: { mesh: THREE.Object3D; head: THREE.Object3D; x: number; y: number; z: number; cd: number; until: number }[] = []; // deployed sentries (head tracks, base static)
+  private readonly turrets: { mesh: THREE.Object3D; head: THREE.Object3D; x: number; y: number; z: number; cd: number; until: number; yaw: number; pitch: number }[] = []; // deployed sentries (head tracks smoothly / scans when idle)
   private readonly turretMat = new THREE.MeshStandardMaterial({ color: 0x3a4a3a, roughness: 0.7, metalness: 0.4, emissive: 0x0a2a0a, emissiveIntensity: 0.5 });
   private readonly turretAccentMat = new THREE.MeshStandardMaterial({ color: 0xff5533, roughness: 0.4, metalness: 0.3, emissive: 0xff3311, emissiveIntensity: 1.4 }); // the sensor "eye" (shared → not disposed)
   private readonly miniGeo = new THREE.SphereGeometry(0.16, 10, 8);
   private readonly miniMat = new THREE.MeshBasicMaterial({ color: 0x7cffd0 }); // glowing interceptor orb
+  // lock-on missile parts (shared across shots; assembled nose-forward along +Z in makeMissile so
+  // mesh.lookAt(pos + vel) each frame leads with the nose)
+  private readonly msBodyGeo = new THREE.CylinderGeometry(0.055, 0.055, 0.32, 10).rotateX(Math.PI / 2);
+  private readonly msNoseGeo = new THREE.ConeGeometry(0.055, 0.14, 10).rotateX(Math.PI / 2);
+  private readonly msFinGeo = new THREE.BoxGeometry(0.012, 0.1, 0.09);
+  private readonly msGlowGeo = new THREE.SphereGeometry(0.05, 8, 6);
+  private readonly msBodyMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a8, roughness: 0.45, metalness: 0.7 });
+  private readonly msNoseMat = new THREE.MeshStandardMaterial({ color: 0xcc2a1a, roughness: 0.35, metalness: 0.55, emissive: 0x6a1008, emissiveIntensity: 0.7 }); // hot warhead tip
+  private readonly msFinMat = new THREE.MeshStandardMaterial({ color: 0x2e3236, roughness: 0.7, metalness: 0.4 });
+  private readonly msGlowMat = new THREE.MeshBasicMaterial({ color: 0x7cffd0 }); // exhaust glow
   private weaponReadyAt = 0;      // shared per-shot cooldown gate
   private firing = false;         // LMB held → auto-fire (machine gun) each frame at the weapon's rate
   private ads = false;            // RMB held → aim down sights (only engages for a scoped weapon; see applyAds)
@@ -245,6 +255,14 @@ export class Game {
   private readonly recentShots: RadarShot[] = []; // fading shot rays on the minimap (from peers + AI fire)
   private readonly _blips: RadarBlip[] = [];      // reused per frame by minimapFrame (objects reused in place)
   private readonly _scanMarks: { angle: number; behindWall: boolean }[] = []; // reused per frame (scan markers)
+  // Missile lock-on (soldier holding the seeking-missile launcher): the drone kept inside the centre circle
+  // for LOCK_TIME becomes the LOCKED target — marked on the HUD, and what the next missile hunts.
+  private lockId = -1;                             // drone being acquired / held (-1 = none)
+  private lockT = 0;                               // seconds it has stayed in the circle (>= LOCK_TIME → locked)
+  private readonly _lockV = new THREE.Vector3();   // scratch for the 3D→screen projection
+  private static readonly LOCK_TIME = 0.45;        // seconds on-target to acquire the lock (fast — drones are always moving)
+  private static readonly LOCK_R = 0.26;           // lock-circle radius (NDC, aspect-corrected → a true screen circle) — big, easy to hold a mover in
+  private static readonly LOCK_RANGE = 70;         // max lock distance (m)
   // Frontal scanner (R): a recharging cone pulse revealing enemies ahead (even behind walls) as fading pings.
   private scanReadyAt = 0;
   private readonly scanPings: { x: number; y: number; z: number; until: number; behindWall: boolean }[] = [];
@@ -539,7 +557,10 @@ export class Game {
           if (secs !== this.graceTick) { this.graceTick = secs; this.hud.flash(`⏳ Primera oleada en ${secs}…`); }
         }
         if (this.aiWaveGap <= 0) { // each wave enters from ONE cardinal side, from BEYOND the barricade
-          const beyond = FOREST_RING.hedgeInset + FOREST_RING.treeGap + FOREST_RING.depth + 12; // voxels PAST the treeline
+          // spawn just past the treeline — but CAP the margin to ~a third of the map's short side, so a MICRO/small
+          // arena doesn't fling the wave far out into the void (the forest ring is a FIXED ~28 m band, disproportionate
+          // to a tiny map). Large/medium keep the full margin; micro pulls the wave in close to the arena.
+          const beyond = Math.min(FOREST_RING.hedgeInset + FOREST_RING.treeGap + FOREST_RING.depth + 12, Math.round(Math.min(CITY_VOX.x1, CITY_VOX.z1) * 0.35));
           // wave 0: the players are still pinned in the perimeter band, so the rotation's N side would drop the
           // swarm right on the host — steer the OPENING wave to the cardinal farthest from him. Later waves keep
           // the N→S→E→O rotation (by then everyone has moved inward, so every side reads as "far").
@@ -750,23 +771,39 @@ export class Game {
     for (let i = this.miniDrones.length - 1; i >= 0; i--) {
       const m = this.miniDrones[i];
       m.life -= dt;
-      const ti = bots.length > 0 ? pickTarget(m.x, m.z, bots) : -1;
+      let ti = -1;
+      if (bots.length > 0) {
+        if (m.boom) {
+          // ONLY homes to the LOCKED target — with no lock (or once it's gone) the missile flies STRAIGHT, never re-picks
+          if (m.target !== undefined) for (let j = 0; j < bots.length; j++) if (bots[j].id === m.target) { ti = j; break; }
+        } else ti = pickTarget(m.x, m.z, bots); // interceptors keep hunting the nearest each frame
+      }
       if (ti >= 0) {
         const t = bots[ti];
-        const s = homingStep(m.x, m.y, m.z, m.vx, m.vy, m.vz, t.x, t.y, t.z, 40, 26, dt);
+        const s = m.boom
+          ? homingStep(m.x, m.y, m.z, m.vx, m.vy, m.vz, t.x, t.y, t.z, 150, 78, dt) // missile: HARD turn + high speed so it actually connects
+          : homingStep(m.x, m.y, m.z, m.vx, m.vy, m.vz, t.x, t.y, t.z, 60, 42, dt);  // interceptors: catch fast late-wave drones
         m.x = s.x; m.y = s.y; m.z = s.z; m.vx = s.vx; m.vy = s.vy; m.vz = s.vz;
         const rx = t.x - m.x, ry = t.y - m.y, rz = t.z - m.z;
-        if (rx * rx + ry * ry + rz * rz < 2.25) { // reached it (1.5² — same verdict, no hypot)
+        if (rx * rx + ry * ry + rz * rz < (m.boom ? 9 : 2.25)) { // reached it (missile = 3 m, no tunnel at high speed)
           if (m.boom) this.explodeAt(m.x, m.y, m.z, 4, 700, true); // lock-on MISSILE → AoE airburst (catches the cluster)
           else { this.sink.burst(m.x, m.y, m.z, { count: 10, color: 0x88ffdd, speed: 7, size: 4, life: 0.3, kind: "spark", strength: 0.02 }); this.killBot(t.id); }
           bots.splice(ti, 1); // don't let another interceptor chase the corpse this frame
           this.despawnMini(i);
           continue;
         }
-      } else { // nothing to hunt → coast + drop
-        m.x += m.vx * dt; m.y += m.vy * dt; m.z += m.vz * dt; m.vy -= 6 * dt; m.life -= dt;
+      } else { // nothing to hunt: an interceptor coasts + drops + expires faster; a lock-less MISSILE flies STRAIGHT its full range
+        m.x += m.vx * dt; m.y += m.vy * dt; m.z += m.vz * dt;
+        if (!m.boom) { m.vy -= 6 * dt; m.life -= dt; }
+      }
+      // MISSILE detonates on impact with the WORLD (walls / buildings), not only on reaching a drone → a boom + crater
+      if (m.boom && this.grid.has(Math.floor(m.x / VOXEL), Math.floor(m.y / VOXEL), Math.floor(m.z / VOXEL))) {
+        this.explodeAt(m.x, m.y, m.z, 4, 700, true);
+        this.despawnMini(i);
+        continue;
       }
       m.mesh.position.set(m.x, m.y, m.z);
+      if (m.boom) m.mesh.lookAt(m.x + m.vx, m.y + m.vy, m.z + m.vz); // nose (+Z) leads the velocity
       if (m.life <= 0) this.despawnMini(i);
     }
   }
@@ -774,6 +811,28 @@ export class Game {
   private despawnMini(i: number): void {
     this.renderer.scene.remove(this.miniDrones[i].mesh);
     this.miniDrones.splice(i, 1);
+  }
+
+  /** Missile lock-on: while the soldier holds the seeking-missile launcher, the drone kept inside the centre
+   *  circle for LOCK_TIME becomes the LOCKED target (marked on the HUD). fireLockon sends the missile at it. */
+  private lockFrame(dt: number): void {
+    const on = this.mode !== "free" && this.role === "human" && this.weapon === "lockon" && this.aiBots.size > 0;
+    if (!on) { if (this.lockId !== -1) { this.lockId = -1; this.lockT = 0; } this.hud.setLock(false, null); return; }
+    const cam = this.player.camera; cam.updateMatrixWorld();
+    const cp = cam.position, aspect = window.innerWidth / Math.max(1, window.innerHeight);
+    let best = -1, bestR = Game.LOCK_R, bx = 0, by = 0, bz = 0;                       // the drone nearest the crosshair, inside the circle
+    for (const [id, p] of this.aiBots) {
+      const dx = p.x - cp.x, dy = p.y - cp.y, dz = p.z - cp.z;
+      if (dx * dx + dy * dy + dz * dz > Game.LOCK_RANGE * Game.LOCK_RANGE) continue;
+      const ndc = this._lockV.set(p.x, p.y, p.z).project(cam);
+      if (ndc.z > 1) continue;                                                        // behind the camera
+      const r = Math.hypot(ndc.x * aspect, ndc.y);                                    // aspect-corrected → a true screen circle
+      if (r < bestR) { bestR = r; best = id; bx = p.x; by = p.y; bz = p.z; }
+    }
+    if (best === -1) { this.lockId = -1; this.lockT = 0; this.hud.setLock(true, null); return; } // aim off all → circle only
+    if (best === this.lockId) this.lockT += dt; else { this.lockId = best; this.lockT = 0; }     // hold → acquire; switch → restart
+    const ndc = this._lockV.set(bx, by, bz).project(cam);
+    this.hud.setLock(true, { x: (ndc.x * 0.5 + 0.5) * 100, y: (-ndc.y * 0.5 + 0.5) * 100, progress: Math.min(1, this.lockT / Game.LOCK_TIME), locked: this.lockT >= Game.LOCK_TIME });
   }
 
   /** Instakill a bot rammed by an interceptor (host-authoritative; a peer reports it for the host to apply). */
@@ -815,17 +874,42 @@ export class Game {
   /** Lock-on missile: a fast homing round (reuses the interceptor system) that hunts the nearest drone and
    *  AIRBURSTS on contact (a small AoE that also catches its neighbours). */
   private fireLockon(origin: THREE.Vector3, dir: THREE.Vector3): void {
-    const mesh = new THREE.Mesh(this.miniGeo, this.miniMat);
+    const mesh = this.makeMissile();
     mesh.position.set(origin.x, origin.y - 0.2, origin.z);
     this.renderer.scene.add(mesh);
-    this.miniDrones.push({ mesh, x: origin.x, y: origin.y - 0.2, z: origin.z, vx: dir.x * 22, vy: dir.y * 22 + 1, vz: dir.z * 22, life: 4, boom: true });
+    // seek ONLY a completed lock (drone held in the circle for LOCK_TIME); no lock → the missile flies straight.
+    const locked = this.lockT >= Game.LOCK_TIME && this.lockId >= 0;
+    this.miniDrones.push({ mesh, x: origin.x, y: origin.y - 0.2, z: origin.z, vx: dir.x * 34, vy: dir.y * 34 + 1, vz: dir.z * 34, life: 5, boom: true, target: locked ? this.lockId : undefined });
     this.audio.shot("glauncher");
+  }
+
+  /** Assembles the lock-on missile from the shared ms* geos/mats (scene.remove-only cleanup):
+   *  grey body, red-hot nose at +Z, four dark tail fins and a glowing exhaust at −Z. */
+  private makeMissile(): THREE.Group {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(this.msBodyGeo, this.msBodyMat);
+    body.castShadow = true;
+    const nose = new THREE.Mesh(this.msNoseGeo, this.msNoseMat);
+    nose.position.z = 0.23;
+    nose.castShadow = true;
+    const glow = new THREE.Mesh(this.msGlowGeo, this.msGlowMat);
+    glow.position.z = -0.19;
+    g.add(body, nose, glow);
+    for (let k = 0; k < 4; k++) {
+      const a = (k / 4) * Math.PI * 2;
+      const fin = new THREE.Mesh(this.msFinGeo, this.msFinMat);
+      fin.position.set(Math.cos(a) * 0.05, Math.sin(a) * 0.05, -0.12);
+      fin.rotation.z = a - Math.PI / 2;
+      fin.castShadow = true;
+      g.add(fin);
+    }
+    return g;
   }
 
   /** Deploy a SENTRY turret just ahead — it auto-fires at nearby drones for ~26 s so you don't face the swarm
    *  alone. Co-op is where it earns its keep (there are bots to shoot); in PvP it just sits (no AI swarm). */
   private deployTurret(origin: THREE.Vector3, dir: THREE.Vector3): void {
-    const tx = origin.x + dir.x * 3, tz = origin.z + dir.z * 3, ty = origin.y - 1.0;
+    const tx = origin.x + dir.x * 3, tz = origin.z + dir.z * 3, ty = origin.y - 1.45; // = the player's FEET → the foot sits flush ON the ground, not floating
     const M = this.turretMat, g = new THREE.Group();
     // static pedestal: a splayed hex foot + a tapered post (never tilts — only the head above tracks)
     const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.58, 0.14, 6), M); foot.position.y = 0.07;
@@ -834,7 +918,7 @@ export class Game {
     foot.castShadow = post.castShadow = true;
     g.add(foot, post, collar);
     // rotating head: armored housing, a mantlet, twin barrels (point +Z → lookAt aims them at the drone) and a sensor eye
-    const head = new THREE.Group(); head.position.y = 0.66;
+    const head = new THREE.Group(); head.position.y = 0.66; head.rotation.order = "YXZ"; // yaw (Y) then pitch (X) → clean turret aim
     const body = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.3, 0.36), M);
     const mantlet = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.24, 0.16), M); mantlet.position.z = 0.24;
     const barrelL = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 0.74), M); barrelL.position.set(-0.1, 0.01, 0.55);
@@ -844,7 +928,7 @@ export class Game {
     head.add(body, mantlet, barrelL, barrelR, eye);
     g.add(head); g.position.set(tx, ty, tz);
     this.renderer.scene.add(g);
-    this.turrets.push({ mesh: g, head, x: tx, y: ty + 0.66, z: tz, cd: 0, until: this.time + 26 });
+    this.turrets.push({ mesh: g, head, x: tx, y: ty + 0.66, z: tz, cd: 0, until: this.time + 26, yaw: Math.atan2(dir.x, dir.z), pitch: 0 });
     this.hud.flash("🗼 Torreta desplegada");
     this.audio.place();
   }
@@ -858,9 +942,21 @@ export class Game {
       t.cd -= dt;
       let bid = -1, bd = 34 * 34, bx = 0, by = 0, bz = 0;
       for (const [id, p] of this.aiBots) { const dx = p.x - t.x, dy = p.y - t.y, dz = p.z - t.z, d2 = dx * dx + dy * dy + dz * dz; if (d2 < bd) { bd = d2; bid = id; bx = p.x; by = p.y; bz = p.z; } }
-      if (bid < 0) continue;
-      t.head.lookAt(bx, by, bz);
-      if (t.cd <= 0) {
+      if (bid < 0) { // IDLE: slow sweep + gentle pitch bob → a sentry "scanning" for new drones (never snaps to a heading)
+        t.yaw += 0.7 * dt;
+        t.pitch += (Math.sin(this.time * 0.8 + t.x) * 0.12 - t.pitch) * Math.min(1, dt * 2);
+        t.head.rotation.set(t.pitch, t.yaw, 0);
+        continue;
+      }
+      // TARGET: rotate the head TOWARD it at a capped rate (smooth — not the old instant lookAt snap)
+      const ddx = bx - t.x, ddz = bz - t.z, horiz = Math.hypot(ddx, ddz) || 1e-3;
+      const wantYaw = Math.atan2(ddx, ddz), wantPitch = -Math.atan2(by - t.y, horiz);
+      const step = 4.0 * dt; // ~230°/s cap — tracks briskly but visibly turns, no teleport-aim
+      let dy2 = wantYaw - t.yaw; dy2 -= Math.round(dy2 / (Math.PI * 2)) * Math.PI * 2; // shortest angle
+      t.yaw += Math.abs(dy2) <= step ? dy2 : Math.sign(dy2) * step;
+      const dp = wantPitch - t.pitch; t.pitch += Math.abs(dp) <= step ? dp : Math.sign(dp) * step;
+      t.head.rotation.set(t.pitch, t.yaw, 0);
+      if (t.cd <= 0 && Math.abs(dy2) < 0.4) { // fire once roughly on-aim (so it settles before shooting), then cool down
         t.cd = 0.8; // slow, deliberate cadence — the sentry is support, not a minigun
         const dx = bx - t.x, dy = by - t.y, dz = bz - t.z, l = Math.hypot(dx, dy, dz) || 1;
         this.hitBotAlongRay(t.x, t.y, t.z, dx / l, dy / l, dz / l, 36, 2); // host-auth damage; wall-checked inside
@@ -977,6 +1073,23 @@ export class Game {
     if (this.mode === "free" || this.phase !== "playing") this.hud.setScanStatus("off");
     else if (this.time >= this.scanReadyAt) this.hud.setScanStatus("ready");
     else this.hud.setScanStatus("charging", 1 - (this.scanReadyAt - this.time) / Game.SCAN_CD);
+  }
+
+  /** R does double duty: if the current weapon can be RELOADED (mag not full and reserve left) it swaps a fresh
+   *  magazine — a TACTICAL reload that WASTES whatever was still in the old mag ("tolva cambiada, balas perdidas").
+   *  Otherwise (mag full, or nothing to load) it falls through to the frontal scanner. */
+  private reloadOrScan(): void {
+    if (this.mode === "free") { this.doScan(); return; }
+    const spec = WEAPONS[this.weapon], cur = this.ammo[this.weapon];
+    if (cur.mag < spec.magSize && cur.reserve > 0) {
+      const r = reloadMag(cur, spec.magSize);
+      this.ammo[this.weapon] = r.ammo;
+      this.audio.place(); // mechanical mag-swap clunk (reuse the deploy sound)
+      this.hud.setWeapon(this.role, this.weapon, r.ammo, classLoadout(this.role, this.myClass));
+      this.hud.flash(r.lost > 0 ? `🔄 Tolva cambiada · ${r.lost} balas perdidas` : "🔄 Recargado");
+      return;
+    }
+    this.doScan(); // nothing to reload → the scanner instead
   }
 
   /** Frontal scanner (R): a recharging cone pulse that reveals enemy drones/soldiers ahead — even BEHIND walls —
@@ -1132,7 +1245,7 @@ export class Game {
     }
     this.hp = this.myMaxHp(); // per-class max (heavy tank … scout fragile)
     this.weapon = classLoadout(this.role, this.myClass)[0]; // start on the class primary
-    this.viewmodel.setWeapon(this.weapon, this.role); // hold the class primary (soldiers only; drone → nothing)
+    this.viewmodel.setWeapon(this.weapon, this.role, this.myClass); // hold the class primary (soldiers only; drone → nothing)
     const mv = classMove(this.role, this.myClass);
     this.player.setClassMods(mv.speedMul, mv.jumpMul); // scout runs, heavy lumbers, interceptor screams
     this.resupply();
@@ -1282,13 +1395,16 @@ export class Game {
    *  each client and broadcast via the periodic state message, so health stays consistent. */
   private damageDrone(amount: number, srcX?: number, srcZ?: number): void {
     if (this.hp <= 0) return;
+    // the heavy soldier carries an armored riot shield → 40% damage reduction (combat modes only)
+    const shielded = this.role === "human" && this.myClass === "heavy" && (this.mode === "dvh" || this.mode === "vs" || this.mode === "coop");
+    const dmg = shielded ? amount * 0.6 : amount;
     this.bandageT = 0; // taking a hit interrupts an in-progress bandage (no partial heal)
-    this.hp = Math.max(0, this.hp - amount);
-    this.trauma = addTrauma(this.trauma, Math.min(0.6, amount / 60)); // taking a hit jolts the view + flashes the HUD
-    this.hud.damageFlash(Math.min(1, amount / 50));
+    this.hp = Math.max(0, this.hp - dmg);
+    this.trauma = addTrauma(this.trauma, Math.min(0.6, dmg / 60)); // taking a hit jolts the view + flashes the HUD
+    this.hud.damageFlash(Math.min(1, dmg / 50));
     if (srcX !== undefined && srcZ !== undefined) { // point an on-screen arc at where the hit came from
       const cp = this.player.camera.position, f = this.player.forward(this.tmpDir);
-      this.hud.damageArrow(bearing(Math.atan2(f.x, f.z), cp.x, cp.z, srcX, srcZ), Math.min(1, amount / 40));
+      this.hud.damageArrow(bearing(Math.atan2(f.x, f.z), cp.x, cp.z, srcX, srcZ), Math.min(1, dmg / 40));
     }
     this.hud.setHealth(this.hp, this.myMaxHp(), true);
     if (this.hp > 0) this.audio.hit(); else this.audio.death(this.role === "human"); // drones crash, not grunt
@@ -1524,12 +1640,13 @@ export class Game {
       // PANNED to whichever side the nearest drone is on (relative to where you're looking). AUD tighter → no
       // faraway droning.
       const n = this.remotes.nearestDrone(p.x, p.y, p.z);
-      const AUD = 34;
+      const AUD = 55;          // audible radius (m) — hear the swarm from farther
+      const ROTOR_VOL = 0.32;  // LOUDER drone whir, still fully positional (level by distance, pan by bearing)
       if (n) {
         const f = w.forward(this.tmpDir);
         const brg = bearing(Math.atan2(f.x, f.z), p.x, p.z, n.x, n.z); // where the drone is vs your facing
-        this.audio.setRotor(rotorLevel(n.dist, AUD), rotorPitch(n.dist, AUD), 0.14, rotorPan(brg), rotorCutoff(n.dist, AUD) * frontBrightness(brg));
-      } else this.audio.setRotor(0, 16, 0.14);
+        this.audio.setRotor(rotorLevel(n.dist, AUD), rotorPitch(n.dist, AUD), ROTOR_VOL, rotorPan(brg), rotorCutoff(n.dist, AUD) * frontBrightness(brg));
+      } else this.audio.setRotor(0, 16, ROTOR_VOL);
       if (w.audioStep) { this.audio.footstep(w.audioRun); w.audioStep = false; }
       if (w.audioJump) { this.audio.jump(); w.audioJump = false; }
       if (w.audioLand) { this.audio.land(); w.audioLand = false; }
@@ -2335,7 +2452,7 @@ export class Game {
   private selectWeapon(w: Weapon): void {
     this.weapon = w;
     this.zoomLevel = 0; // a fresh weapon starts at its base zoom stop
-    this.viewmodel.setWeapon(w, this.role); // swap the held model
+    this.viewmodel.setWeapon(w, this.role, this.myClass); // swap the held model
     this.audio.weaponSwitch();
     this.hud.setWeapon(this.role, w, this.ammo[w], classLoadout(this.role, this.myClass));
     this.hud.flash(`${WEAPONS[w].icon} ${WEAPONS[w].name}`);
@@ -2392,8 +2509,7 @@ export class Game {
     return false;
   }
 
-  /** Refill this role's weapon ammo (full mag + full reserve) — the part a supply crate gives. Returns
-   *  whether anything was below full, so a crate isn't wasted on an already-stocked soldier. NO battery. */
+  /** Full arsenal refill (base + respawn): every weapon in the loadout to full mag + full reserve. NO battery. */
   private resupplyAmmo(): boolean {
     let gained = false;
     for (const w of classStats(this.role, this.myClass).loadout) { // read-only walk — no classLoadout .slice() per call
@@ -2404,6 +2520,18 @@ export class Game {
       }
     }
     return gained;
+  }
+
+  /** A STREET crate gives LIMITED ammo for the PRIMARY weapon ONLY (slot 0) — not the whole arsenal. Tops the
+   *  mag up and adds HALF a reserve (grenades / turret / flak / missiles restock ONLY at your base). Returns
+   *  whether anything was gained, so a crate isn't wasted on an already-stocked primary. */
+  private resupplyAmmoCrate(): boolean {
+    const w = classStats(this.role, this.myClass).loadout[0]; // primary gun only → "solo cierta munición, no todo ni cualquiera"
+    const spec = WEAPONS[w], cur = this.ammo[w];
+    if (cur.mag >= spec.magSize && cur.reserve >= spec.maxReserve) return false;
+    cur.mag = spec.magSize;                                                                                 // top up the mag
+    cur.reserve = Math.min(spec.maxReserve, cur.reserve + Math.max(1, Math.ceil(spec.maxReserve / 2)));     // + half a reserve, capped ("más limitado")
+    return true;
   }
 
   /** Refill all weapons + battery (on respawn, and whenever standing in the base). */
@@ -2417,7 +2545,8 @@ export class Game {
    *  spend one bandage and restore BANDAGE_HEAL HP. Moving, firing or taking a hit cancels it (no partial). */
   private bandageFrame(dt: number): void {
     if (this.mode === "free") return;
-    if (!(this.player instanceof Walker)) { this.bandageT = 0; this.bandaging = false; this.hud.setBandages(-1, false, 0); return; } // drones don't bandage
+    if (!(this.player instanceof Walker)) { this.bandageT = 0; this.bandaging = false; this.hud.setBandages(-1, false, 0); this.hud.setStamina(-1, false); return; } // drones don't bandage / tire
+    this.hud.setStamina(this.player.staminaFrac, this.player.sprintExhausted); // soldier sprint reserve
     const inp = this.input;
     const still = !(inp.isDown("keyw") || inp.isDown("keya") || inp.isDown("keys") || inp.isDown("keyd") || inp.isDown("space"));
     const active = inp.isDown("keyb")
@@ -2444,10 +2573,10 @@ export class Game {
     if (!(this.player instanceof Walker) || this.hp <= 0) return; // only a living soldier grabs crates
     const p = this.player.camera.position;
     const i = this.ammoCrates.nearestLive(p.x, p.z);
-    if (i < 0 || !this.resupplyAmmo()) return;                    // nothing near, or already full → don't waste it
+    if (i < 0 || !this.resupplyAmmoCrate()) return;               // nothing near, or primary already full → don't waste it
     this.ammoCrates.take(i, this.time);
     if (this.net.connected) this.net.send({ t: "ammo", i });
-    this.hud.flash("📦 Munición reabastecida");
+    this.hud.flash("📦 Munición (arma principal)");
     this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon], classLoadout(this.role, this.myClass));
     this.audio.pickup(); // bright pickup pluck
   }
@@ -2650,7 +2779,7 @@ export class Game {
       const idx = ["digit1", "digit2", "digit3", "digit4", "digit5", "digit6"].indexOf(code);
       if (idx >= 0 && idx < lo.length) { this.selectWeapon(lo[idx]); return; }
       if (code === "keyv") { this.meleeAttack(); return; } // melee (humans)
-      if (code === "keyr") { this.doScan(); return; }      // 📡 frontal scanner (both roles)
+      if (code === "keyr") { this.reloadOrScan(); return; } // R: reload the mag (tactical → wastes the partial) if useful, else 📡 scan
       if (code === "keyh") { this.hud.toggleHelp(); return; }
       return;
     }
@@ -2837,6 +2966,7 @@ export class Game {
     this.aiFrame(dt);     // co-op: the host simulates + broadcasts the enemy drone swarm; peers render it
     this.smokeFrame();    // sustain active smoke clouds + drop expired ones (LOS blockers)
     this.miniDroneFrame(dt); // fly the soldier's interceptor swarm toward the nearest drones
+    this.lockFrame(dt);      // missile lock-on: acquire the aimed drone + mark it on the HUD
     this.turretFrame(dt);    // deployed sentries auto-fire at the swarm
     this.minimapFrame(dt); // heading-up radar: friends/enemies in range + shot rays
     this.audioFrame();

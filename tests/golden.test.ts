@@ -90,7 +90,9 @@ function carveGolden(): number {
 }
 
 // Golden baselines — captured from commit 10eeef6 (pre-optimization). See header.
-const GOLD_AI = 2341095546;
+// GOLD_AI re-baselined after the DELIBERATE building-entry behaviour rework (bots drop to the door/window band
+// and enter instead of climbing onto the roof). Cook/carve are pure optimizations → their baselines never moved.
+const GOLD_AI = 1779517578;
 const GOLD_COOK = 3326779269;
 const GOLD_CARVE = 683759392;
 

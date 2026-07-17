@@ -444,6 +444,20 @@ describe("enemy AI — building entry (openingSeek + break requests)", () => {
     expect(breaks.length).toBeGreaterThan(0);          // pressed the wall with no opening → asked the game to clear it
     expect(breaks.every((b) => Number.isFinite(b.x) && Number.isFinite(b.y))).toBe(true);
   });
+
+  it("blind near the belief: DROPS to the door band and enters through the opening — never climbs to the roof", () => {
+    const s = new AiSwarm();
+    s.spawnWave(0, 0, 0, 0, () => 0);                   // a cluster at the origin (low seed → not kamikaze), spawned LOW
+    for (const b of s.list) { b.y = 12; b.lsx = 12; b.lsz = 1; b.lsT = 0; b.ba = 1; } // start HIGH; each PERCEIVED you at (12,1), now unseen (inside)
+    // a wall slab at x∈[5,7] (ALL heights — can't be climbed cheaply) with a DOORWAY gap at z∈[-1,3]
+    const solid = (x: number, _y: number, z: number) => { const fx = Math.floor(x); return fx >= 5 && fx <= 7 && !(z >= -1 && z <= 3); };
+    const startMaxY = Math.max(...s.list.map((b) => b.y));
+    for (let i = 0; i < 32; i++) s.tick(0.1, [{ id: 7, x: 12, y: 1, z: 1 }], () => false, () => 0.5, undefined, undefined, solid);
+    const maxY = Math.max(...s.list.map((b) => b.y)), maxX = Math.max(...s.list.map((b) => b.x));
+    expect(maxY).toBeLessThan(startMaxY - 4);          // DESCENDED to the entry band — did NOT climb toward the roof (+8)
+    expect(maxY).toBeLessThan(8);                      // hovering at door/window height, not on top of the wall
+    expect(maxX).toBeGreaterThan(6);                   // pressed THROUGH the doorway (into the x5-7 wall zone), not stuck outside
+  });
 });
 
 describe("enemy AI — EMP stun (crowd control)", () => {

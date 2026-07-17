@@ -320,8 +320,6 @@ export class AiSwarm {
   }
   get count(): number { return this.bots.size; }
   has(id: number): boolean { return this.bots.has(id); }
-  get count(): number { return this.bots.size; }
-  has(id: number): boolean { return this.bots.has(id); }
 
   /** Seed a COARSE inward attractor (e.g. the city centre) so a fresh wave that has perceived nobody yet still
    *  advances into the map to make contact — instead of idling at its spawn point. Fills the blackboard when it's
@@ -456,19 +454,25 @@ export class AiSwarm {
       // just ahead (the game clears it only if it's glass) — so drones enter through doors or by shattering
       // windows, rather than always climbing to the roof. Latched ~1.2 s so they don't dither between openings.
       const gfx = b.fx, gfz = b.fz;                        // == gdx/gDist, gdz/gDist (already stored above — no recompute)
+      // BUILDING ENTRY: a bot that BELIEVES you're near but can't SEE you is up against the building you're
+      // inside. Rather than cruise overhead and climb onto the ROOF (where it can never reach you), it DROPS to
+      // the door/window band, hunts the nearest opening with a wide reach, and — if none is in range — asks to
+      // shatter the window ahead, pressing IN at that height. Kamikazes and the hurt opt out (ram / retreat).
+      const ENTRY_Y = 1.8;                                 // door/low-window band (voxels ~1-8 → 0.25-2 m)
+      const wantEntry = b.kind !== "kamikaze" && !lowHp && perceived && !canSee && gDist < 16; // near the belief but blind → you're inside
       let seekingOpening = false, entryY = 0;
-      const wallAhead = b.kind !== "kamikaze" && !lowHp && solid(b.x + gfx * 0.6, b.y, b.z + gfz * 0.6);
+      const wallAhead = wantEntry && solid(b.x + gfx * 0.9, ENTRY_Y, b.z + gfz * 0.9); // wall between us and you AT ENTRY height (not cruise)
       if (wallAhead) {
         let ok: [number, number, number] | null = null;
         if (b.okT >= 0 && this.t - b.okT < 1.2) ok = [b.okx, b.okz, b.oky];   // reuse the latched opening
-        else { ok = openingSeek(b.x, b.z, gdx, gdz, solid, b.seed); if (ok) { b.okx = ok[0]; b.okz = ok[1]; b.oky = ok[2]; b.okT = this.t; } }
+        else { ok = openingSeek(b.x, b.z, gdx, gdz, solid, b.seed, 12); if (ok) { b.okx = ok[0]; b.okz = ok[1]; b.oky = ok[2]; b.okT = this.t; } } // WIDE reach → find the door along the wall
         if (ok) {
           const odx = ok[0] - b.x, odz = ok[1] - b.z, ol = Math.hypot(odx, odz) || 1e-3;
           mvx = (odx / ol) * 0.9 + gfx * 0.35;  // slide toward the opening (dominant) + a little forward through it
           mvz = (odz / ol) * 0.9 + gfz * 0.35;
           seekingOpening = true; entryY = ok[2];
         } else if (breaks) {
-          breaks.push({ id: b.id, x: b.x + gfx * 0.6, y: b.y, z: b.z + gfz * 0.6, dx: gfx, dz: gfz }); // ask to clear the pane ahead
+          breaks.push({ id: b.id, x: b.x + gfx * 0.9, y: ENTRY_Y, z: b.z + gfz * 0.9, dx: gfx, dz: gfz }); // shatter the window at door height
         }
       }
 
@@ -503,13 +507,14 @@ export class AiSwarm {
       const eyeY = canSee ? aimY : 2;
       let wantY: number;
       if (b.kind === "kamikaze") wantY = eyeY;
+      else if (wantEntry) wantY = ENTRY_Y;                // DROP to the door/window band to go IN — never onto the roof
       else {
         const highMul = b.kind === "diver" ? Math.max(0.15, Math.min(1, gDist / 25)) : 1; // dive by BELIEF range
         wantY = eyeY + a.high * highMul;
-        if (!canSee && perceived) wantY += 5;             // rise to see over the wall toward the believed spot
+        if (!canSee && perceived && gDist > 28) wantY += 5; // rise to peek ONLY over a DISTANT wall — never one you're inside
       }
       if (seekingOpening) wantY = entryY;                 // drop to the door/window band to fly IN, not climb over
-      else if (blocked) wantY = Math.min(45, Math.max(wantY, b.y + 8)); // hit something → climb over it (cap ~45 m)
+      else if (blocked && !wantEntry) wantY = Math.min(45, Math.max(wantY, b.y + 8)); // hop a SHORT obstacle; a building gets ENTERED, not climbed
       let ny = b.y + (wantY - b.y) * lerpK;
       if (ny < b.y && solid(b.x, ny, b.z)) ny = b.y;      // descending into a roof → rest on it, don't sink through
       b.y = ny;

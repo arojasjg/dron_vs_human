@@ -12,6 +12,9 @@ const SENS = 0.0022;
 const HALF = 0.55, RADIUS = 0.3; // capsule → ~1.7 m tall human
 const EYE = 0.6;                 // camera above the capsule centre (roughly eye level)
 const WALK = 9.0, RUN = 15.0;    // m/s
+// Sprint stamina: running drains it, standing/walking regenerates it; empty → forced to walk until it climbs
+// back past STAM_RECOVER. Tuned for ~4 s of sprint and a ~5-6 s recovery.
+const STAM_DRAIN = 0.26, STAM_REGEN = 0.18, STAM_RECOVER = 0.3;
 const JUMP = 4.6;                // m/s launch → ~1 m hop
 const STEP = 0.35;               // max autostep height (climbs the 0.25 m voxel stairs)
 const CAM_SMOOTH = 0.30;         // camera-height easing → smooth stair descent (body stays on the steps)
@@ -52,6 +55,10 @@ export class Walker {
   private readonly bounds?: PlayBounds; // playable-area seal (optional; tests omit it → no confinement)
   private adsFov: number | null = null; // aim-down-sights zoom FOV (scoped weapon); null = hip-fire (base FOV)
   private speedMul = 1;              // per-class walk/run multiplier (scout > 1, heavy < 1)
+  private stamina = 1;              // 0..1 sprint reserve
+  private exhausted = false;        // spent → locked out of RUN until stamina recovers past STAM_RECOVER
+  get staminaFrac(): number { return this.stamina; }   // HUD
+  get sprintExhausted(): boolean { return this.exhausted; }
   private jumpMul = 1;               // per-class jump multiplier
   private climbing = false;          // mid window-vault: movement input is ignored, body is scripted
   private climbT = 0;
@@ -110,6 +117,7 @@ export class Walker {
     this.vy = 0;
     this.fallPeakY = y; this.smoothCamY = y; this.lastFall = 0;
     this.prone = false; this.stance = 0; this.smoothEye = EYE; // always respawn standing
+    this.stamina = 1; this.exhausted = false;                  // fresh legs on respawn
     this.climbing = false; this.climbCooldown = 0;             // never respawn mid-vault
     this.yaw = yaw;
     this.camera.position.set(x, y + EYE, z);
@@ -222,7 +230,12 @@ export class Walker {
 
     const len = Math.hypot(dx, dz);
     const adsSlow = this.adsFov != null ? 0.55 : 1; // scoped in → move slower (steady the shot)
-    const speed = ((input.isDown("shiftleft") || input.isDown("shiftright")) ? RUN : WALK) * si.speedMul * adsSlow * this.speedMul;
+    // sprint gated by stamina: drains while actually running, regenerates otherwise; empty → forced walk until recovered
+    const wantSprint = input.isDown("shiftleft") || input.isDown("shiftright");
+    const sprinting = wantSprint && len > 1e-4 && !this.exhausted && this.stamina > 0;
+    if (sprinting) { this.stamina = Math.max(0, this.stamina - STAM_DRAIN * dt); if (this.stamina === 0) this.exhausted = true; }
+    else { this.stamina = Math.min(1, this.stamina + STAM_REGEN * dt); if (this.exhausted && this.stamina >= STAM_RECOVER) this.exhausted = false; }
+    const speed = (sprinting ? RUN : WALK) * si.speedMul * adsSlow * this.speedMul;
     const vx = len > 1e-4 ? (dx / len) * speed : 0;
     const vz = len > 1e-4 ? (dz / len) * speed : 0;
 

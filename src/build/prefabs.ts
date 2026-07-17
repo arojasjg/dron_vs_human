@@ -615,8 +615,9 @@ const PLOT_W = 57, PLOT_D = 54;
 
 // Map-size presets. The largest ("large") IS the current world; smaller presets shrink the plot grid for
 // fewer players. The size travels with the room (synced in the `begin` message), never a local-only choice.
-export type MapSize = "small" | "medium" | "large";
+export type MapSize = "micro" | "small" | "medium" | "large";
 export const MAP_SIZES: Record<MapSize, { label: string; plotsX: number; plotsZ: number; players: number }> = {
+  micro:  { label: "Micro",    plotsX: 3, plotsZ: 3,  players: 4 },  // a tight arena — no plaza/avenue (CITY_FEATURES off)
   small:  { label: "Pequeño", plotsX: 5, plotsZ: 5,  players: 6 },
   medium: { label: "Mediano", plotsX: 7, plotsZ: 8,  players: 16 },
   large:  { label: "Grande",  plotsX: 9, plotsZ: 11, players: 50 }, // = the current map

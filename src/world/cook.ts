@@ -38,6 +38,15 @@ export function meshChunkCoord(v: number): number {
   return Math.floor(v / MESH_CHUNK);
 }
 
+// Dense membership scratch for greedyBoxesFromKeys: a reusable byte per cell of the keys' bounding
+// box, so a membership probe is one indexed read and a delete one indexed write (vs a packKey hash
+// per probe with a Set). Grow-only and NEVER cleared wholesale: every marked cell belongs to exactly
+// one emitted box and the consume loop zeroes the whole box, so the buffer is all-zero again when the
+// function returns. Bounding boxes above the volume cap (whole-grid greedyBoxes spans ±512 → ~2^30
+// cells; arbitrary debris key sets can too) fall back to the original Set path instead.
+const DENSE_MAX_VOLUME = 4_000_000;
+let denseScratch = new Uint8Array(0);
+
 /**
  * Greedy box decomposition over a set of packed voxel keys: merges runs of solid
  * voxels into a small set of boxes. Expansion stops at the set boundary, so passing
@@ -45,14 +54,83 @@ export function meshChunkCoord(v: number): number {
  * ascending before scanning, so the output depends only on the SET, not iteration order.
  */
 export function greedyBoxesFromKeys(keys: Iterable<number>): Box[] {
-  const remaining = new Set<number>(keys);
+  const SPAN2 = KEY_SPAN * KEY_SPAN;
+  // typed-array numeric sort — keys are non-negative int32, so the order is identical to (a,b)=>a-b.
+  // Duplicate input keys (the Set used to dedupe) are harmless: the seed presence check skips a
+  // repeat exactly like an already-consumed voxel, so the output is unchanged.
+  const sorted = Int32Array.from(keys).sort();
+  const n = sorted.length;
+  const boxes: Box[] = [];
+  if (n === 0) return boxes;
+
+  // Bounding box in biased key components (packKey space — no unbiasing needed for indexing).
+  let minX = KEY_SPAN, maxX = -1, minY = KEY_SPAN, maxY = -1;
+  for (let i = 0; i < n; i++) {
+    const k = sorted[i];
+    const bx = k % KEY_SPAN, by = ((k / KEY_SPAN) | 0) % KEY_SPAN;
+    if (bx < minX) minX = bx;
+    if (bx > maxX) maxX = bx;
+    if (by < minY) minY = by;
+    if (by > maxY) maxY = by;
+  }
+  // z is the key's highest-order component, so sorted order makes it monotonic
+  const minZ = (sorted[0] / SPAN2) | 0, maxZ = (sorted[n - 1] / SPAN2) | 0;
+  const dx = maxX - minX + 1, dy = maxY - minY + 1, dz = maxZ - minZ + 1;
+  const volume = dx * dy * dz;
+  if (volume > DENSE_MAX_VOLUME) return greedyBoxesFromKeysSet(sorted);
+
+  const dxy = dx * dy;
+  if (denseScratch.length < volume) denseScratch = new Uint8Array(volume);
+  const bmp = denseScratch;
+  for (let i = 0; i < n; i++) {
+    const k = sorted[i];
+    bmp[(k % KEY_SPAN) - minX + ((((k / KEY_SPAN) | 0) % KEY_SPAN) - minY) * dx + (((k / SPAN2) | 0) - minZ) * dxy] = 1;
+  }
+
+  // Same scan as the Set path, walking bitmap indices (+1 per x, +dx per y, +dxy per z) instead of
+  // incremental keys. The bbox bound checks replace the Set's implicit stop-on-absent-key: no key
+  // exists outside the bounding box, so both paths stop expansion at exactly the same cells.
+  for (let i = 0; i < n; i++) {
+    const k = sorted[i];
+    const ix = (k % KEY_SPAN) - minX, iy = (((k / KEY_SPAN) | 0) % KEY_SPAN) - minY, iz = ((k / SPAN2) | 0) - minZ;
+    const idx = ix + iy * dx + iz * dxy;
+    if (bmp[idx] === 0) continue;
+    const [x0, y0, z0] = unpackKey(k);
+
+    let xs = 0;
+    for (let j = idx + 1, xr = ix + 1; xr < dx && bmp[j] !== 0; j++, xr++) xs++;
+
+    let ys = 0;
+    expandY: for (let row = idx + dx, yr = iy + 1; yr < dy; row += dx, yr++) {
+      for (let j = row, e = row + xs; j <= e; j++) if (bmp[j] === 0) break expandY;
+      ys++;
+    }
+
+    let zs = 0;
+    expandZ: for (let slab = idx + dxy, zr = iz + 1; zr < dz; slab += dxy, zr++) {
+      for (let jx = slab, ex = slab + xs; jx <= ex; jx++)
+        for (let jy = jx, ey = jx + ys * dx; jy <= ey; jy += dx) if (bmp[jy] === 0) break expandZ;
+      zs++;
+    }
+
+    for (let jx = idx, ex = idx + xs; jx <= ex; jx++)
+      for (let jy = jx, ey = jx + ys * dx; jy <= ey; jy += dx)
+        for (let jz = jy, ez = jy + zs * dxy; jz <= ez; jz += dxy) bmp[jz] = 0;
+
+    boxes.push([x0, y0, z0, x0 + xs, y0 + ys, z0 + zs]);
+  }
+  return boxes;
+}
+
+/** Original Set-based decomposition — the fallback for key sets whose bounding box is too large to
+ *  index densely. Identical scan over the same sorted seeds, so both paths emit identical boxes. */
+function greedyBoxesFromKeysSet(sorted: Int32Array): Box[] {
+  const remaining = new Set<number>(sorted);
   const boxes: Box[] = [];
 
   // packKey is exactly linear (+1 per x, +KEY_SPAN per y, +KEY_SPAN² per z; keys < 2^31), so the
   // probe/delete loops walk incremental integer keys instead of recomputing packKey per voxel.
   const SPAN2 = KEY_SPAN * KEY_SPAN;
-  // typed-array numeric sort — keys are non-negative int32, so the order is identical to (a,b)=>a-b
-  const sorted = Int32Array.from(remaining).sort();
   for (const k of sorted) {
     if (!remaining.has(k)) continue;
     const [x0, y0, z0] = unpackKey(k);

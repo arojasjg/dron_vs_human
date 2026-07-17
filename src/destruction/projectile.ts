@@ -41,6 +41,11 @@ export class Projectiles {
   private readonly grenadeGeo = new THREE.SphereGeometry(0.13, 14, 10);
   private readonly cannonMat = new THREE.MeshStandardMaterial({ color: 0x20242b, roughness: 0.4, metalness: 0.9 });
   private readonly grenadeMat = new THREE.MeshStandardMaterial({ color: 0x3f5a2a, roughness: 0.55, metalness: 0.45, emissive: 0x1a2a0a, emissiveIntensity: 0.5 });
+  // grenade extras: dark fuze cap on top + a thin metal safety lever down the side (shared, no dispose)
+  private readonly grenadeCapGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.06, 10);
+  private readonly grenadeLeverGeo = new THREE.BoxGeometry(0.02, 0.11, 0.012);
+  private readonly grenadeCapMat = new THREE.MeshStandardMaterial({ color: 0x22262a, roughness: 0.5, metalness: 0.7 });
+  private readonly grenadeLeverMat = new THREE.MeshStandardMaterial({ color: 0x8a8f96, roughness: 0.4, metalness: 0.8 });
   // missile parts (assembled along +Y in makeRocketMesh, then aimed along its velocity)
   private readonly rocketBodyGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.42, 10);
   private readonly rocketNoseGeo = new THREE.ConeGeometry(0.07, 0.16, 10);
@@ -85,11 +90,26 @@ export class Projectiles {
   }
 
   launchGrenade(origin: THREE.Vector3, dir: THREE.Vector3, speed = 22, ghost = false, powerMul = 1, ai = false, smoke = false): void {
-    const m = new THREE.Mesh(this.grenadeGeo, this.grenadeMat);
-    m.castShadow = true;
+    const m = this.makeGrenadeMesh();
     this.spawn("grenade", origin, dir, speed, m, {
       radius: 0.13, ccd: true, density: 1200, restitution: 0.0, fuse: 1.6, blast: 2.7, power: BLAST_POWER.grenade * powerMul * WEAPON_BLAST_MUL,
     }, ghost, ai, smoke);
+  }
+
+  /** A proper little grenade: green body + dark fuze cap + a metal safety lever, tumbling with physics
+   *  (the group is aimed by the body rotation like any non-rocket projectile; cleanup is scene.remove-only). */
+  private makeGrenadeMesh(): THREE.Object3D {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(this.grenadeGeo, this.grenadeMat);
+    body.castShadow = true;
+    const cap = new THREE.Mesh(this.grenadeCapGeo, this.grenadeCapMat);
+    cap.position.y = 0.13;
+    cap.castShadow = true;
+    const lever = new THREE.Mesh(this.grenadeLeverGeo, this.grenadeLeverMat);
+    lever.position.set(0.055, 0.085, 0);
+    lever.rotation.z = -0.3;
+    g.add(body, cap, lever);
+    return g;
   }
 
   launchRocket(origin: THREE.Vector3, dir: THREE.Vector3, speed = 52, ghost = false, powerMul = 1): void {

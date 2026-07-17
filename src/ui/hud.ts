@@ -88,6 +88,8 @@ export class Hud {
   private readonly weaponEl: HTMLElement;
   private classEl!: HTMLElement;          // class indicator next to the weapon bar
   private bandageEl!: HTMLElement;        // bandage count + channel progress
+  private staminaEl!: HTMLElement;        // sprint stamina bar
+  private lockEl!: HTMLElement;           // missile lock-on circle + target marker
   private lobbyCb: LobbyCallbacks | null = null; // held so updateLobby can wire the rebuilt class buttons
   private gameOverCb: GameOverCallbacks | null = null; // held so the game-over overlay's buttons stay wired across replays
   private preview: ClassPreview | null = null;   // lobby 3D class preview (dvh only; disposed on match start)
@@ -119,6 +121,8 @@ export class Hud {
     this.weaponEl = document.getElementById("hud-weapon")!;
     this.classEl = document.getElementById("hud-class")!;
     this.bandageEl = document.getElementById("hud-bandage")!;
+    this.staminaEl = document.getElementById("hud-stamina")!;
+    this.lockEl = document.getElementById("hud-lock")!;
     this.scannerEl = document.getElementById("hud-scanner")!;
     this.scanMarks = document.getElementById("hud-scanmarks")!;
     this.battery = document.getElementById("hud-battery")!;
@@ -131,6 +135,7 @@ export class Hud {
     this.killfeedEl = document.getElementById("hud-killfeed")!;
     this.minimap = document.getElementById("hud-minimap") as HTMLCanvasElement;
     this.help.innerHTML = HELP;
+    this.help.style.display = "none"; // hidden by default (uncluttered view); H toggles it back on
   }
 
   /** Draws the HEADING-UP minimap: a radar disc with the player at the centre (arrow = ahead), friends
@@ -393,6 +398,18 @@ export class Hud {
     if (this.bandageEl.style.display !== "flex") this.bandageEl.style.display = "flex";
   }
 
+  /** Sprint-stamina bar. Hidden at full rest (no clutter); shown while draining or recovering. `frac` 0..1,
+   *  `exhausted` = spent → locked to walk (red pulse). `frac < 0` (drones/no soldier) hides it. */
+  setStamina(frac: number, exhausted: boolean): void {
+    if (frac < 0 || (frac >= 1 && !exhausted)) { if (this.staminaEl.style.display !== "none") this.staminaEl.style.display = "none"; return; }
+    const pct = Math.round(Math.max(0, Math.min(1, frac)) * 100);
+    const label = exhausted ? '<span class="stm-do">😮‍💨 Sin aliento</span>' : '<span class="stm-hint">Aliento</span>';
+    const html = `<b>🏃</b> <div class="stm-bar"><i style="width:${pct}%"></i></div>${label}`;
+    if (this.staminaEl.innerHTML !== html) this.staminaEl.innerHTML = html;
+    this.staminaEl.classList.toggle("alert", exhausted);
+    if (this.staminaEl.style.display !== "flex") this.staminaEl.style.display = "flex";
+  }
+
   /** Frontal-scanner status panel. `state`: "ready" (glows amber, prompts R), "charging" (progress bar 0..1),
    *  or "off" (hidden — sandbox). Modeled on the bandage panel. */
   setScanStatus(state: "ready" | "charging" | "off", frac = 0): void {
@@ -415,6 +432,20 @@ export class Hud {
       const deg = m.angle * 180 / Math.PI;
       return `<span class="scanmark ${m.behindWall ? "sm-wall" : "sm-see"}" style="transform:translate(-50%,-50%) rotate(${deg.toFixed(1)}deg) translateY(-34vh)">▲</span>`;
     }).join("");
+  }
+
+  /** Missile lock-on overlay: the centre acquire-CIRCLE (shown while the launcher is out) + a bracket on the
+   *  target drone that fills as it acquires and flips red "LOCK" once held for the full second. */
+  setLock(active: boolean, m: null | { x: number; y: number; progress: number; locked: boolean }): void {
+    const el = this.lockEl;
+    if (!active) { if (el.style.display !== "none") el.style.display = "none"; return; }
+    let html = `<div class="lk-ring"></div>`;
+    if (m) {
+      const pct = Math.round(m.progress * 100);
+      html += `<div class="lk-mark${m.locked ? " on" : ""}" style="left:${m.x.toFixed(1)}%;top:${m.y.toFixed(1)}%"><div class="lk-br"></div><span>${m.locked ? "🔒 FIJADO" : pct + "%"}</span></div>`;
+    }
+    if (el.innerHTML !== html) el.innerHTML = html;
+    if (el.style.display !== "block") el.style.display = "block";
   }
 
   /** Start overlay: pick a mode to CREATE a room (host, gets a random code), or type a code to JOIN one. */
@@ -888,6 +919,15 @@ function inject(): void {
     /* when you can actually heal (hurt+bandage) or a medkit is in reach, the panel glows amber + pulses to catch the eye */
     #hud-bandage.alert { border-color: var(--amber); box-shadow: 0 0 14px rgba(255,182,56,.35); animation: bndpulse 1s ease-in-out infinite; }
     @keyframes bndpulse { 0%,100% { box-shadow: 0 0 10px rgba(255,182,56,.25); } 50% { box-shadow: 0 0 20px rgba(255,182,56,.55); } }
+    #hud-stamina { bottom: 52px; left: 182px; display: none; align-items: center; gap: 8px; padding: 6px 10px;
+      font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    #hud-stamina b { color: #38e6ff; font-size: 13px; }
+    #hud-stamina .stm-hint { color: var(--muted); font-size: 9px; }
+    #hud-stamina .stm-do { color: var(--red); font-size: 10px; font-weight: 700; }
+    #hud-stamina .stm-bar { position: relative; width: 60px; height: 8px; background: rgba(0,0,0,.45); border: 1px solid var(--edge2); overflow: hidden; }
+    #hud-stamina .stm-bar i { display: block; height: 100%; background: #38e6ff; box-shadow: 0 0 8px rgba(56,230,255,.4); transition: width .08s linear; }
+    #hud-stamina.alert { border-color: var(--red); box-shadow: 0 0 14px rgba(255,82,54,.35); animation: bndpulse 1s ease-in-out infinite; }
+    #hud-stamina.alert .stm-bar i { background: var(--red); box-shadow: 0 0 8px rgba(255,82,54,.5); }
     #hud-scanner { bottom: 16px; left: 330px; display: none; align-items: center; gap: 8px; padding: 6px 10px;
       font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
     #hud-scanner b { color: var(--cyan); font-size: 12px; }
@@ -898,6 +938,13 @@ function inject(): void {
     @keyframes scnpulse { 0%,100% { box-shadow: 0 0 10px rgba(56,230,255,.25); } 50% { box-shadow: 0 0 20px rgba(56,230,255,.55); } }
     /* on-screen directional markers pointing at scanned enemies (arrows around the crosshair) */
     #hud-scanmarks { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+    #hud-lock { position: absolute; inset: 0; pointer-events: none; z-index: 5; display: none; }
+    #hud-lock .lk-ring { position: absolute; left: 50%; top: 50%; width: 26vh; height: 26vh; margin: -13vh 0 0 -13vh; border: 1px dashed rgba(255,182,56,.5); border-radius: 50%; }
+    #hud-lock .lk-mark { position: absolute; transform: translate(-50%,-50%); color: var(--amber); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-align: center; white-space: nowrap; }
+    #hud-lock .lk-mark .lk-br { width: 30px; height: 30px; border: 2px solid var(--amber); box-sizing: border-box; margin: 0 auto 3px; }
+    #hud-lock .lk-mark.on { color: var(--red); }
+    #hud-lock .lk-mark.on .lk-br { border-color: var(--red); animation: lkpulse .4s ease-in-out infinite; }
+    @keyframes lkpulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(.72); opacity: .7; } }
     .scanmark { position: absolute; top: 50%; left: 50%; font-size: 20px; line-height: 1; transform-origin: center;
       animation: smpulse 1s ease-in-out infinite; text-shadow: 0 0 8px currentColor; }
     .scanmark.sm-wall { color: var(--cyan); }
@@ -930,8 +977,10 @@ function inject(): void {
     <div id="hud-weapon" class="panel"></div>
     <div id="hud-class" class="panel"></div>
     <div id="hud-bandage" class="panel"></div>
+    <div id="hud-stamina" class="panel"></div>
     <div id="hud-scanner" class="panel"></div>
     <div id="hud-scanmarks"></div>
+    <div id="hud-lock"></div>
     <div id="hud-battery" class="panel"><span class="cap">🔋 Batería</span><div id="hud-battery-bar"><div id="hud-battery-fill"></div></div></div>
     <div id="hud-kda" class="panel"></div>
     <div id="hud-team" class="panel"></div>
@@ -967,7 +1016,7 @@ function inject(): void {
         </div>
         <div id="lobby-classes" class="lroles lclasses" style="display:none"><span>Clase:</span></div>
         <div id="lobby-mapsize" class="lroles" style="display:none"><span>Mapa:</span>
-          <button data-s="small">Pequeño · 6</button><button data-s="medium">Mediano · 16</button><button data-s="large">Grande · 50</button>
+          <button data-s="micro">Micro · 4</button><button data-s="small">Pequeño · 6</button><button data-s="medium">Mediano · 16</button><button data-s="large">Grande · 50</button>
         </div>
         <div id="lobby-mode" class="lroles" style="display:none"><span>Al morir:</span>
           <button id="lobby-hardcore">🔁 Reaparecer</button>

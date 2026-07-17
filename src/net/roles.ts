@@ -81,7 +81,7 @@ export const SOLDIER_CLASSES: Record<SoldierClass, ClassStats> = {
   scout:    { label: "Explorador", maxHp: 80,  moveMul: 1.35, jumpMul: 1.15, loadout: ["smg", "shotgun", "emp", "turret"], tint: 0x3aa0d0,
               profile: { armor: 1, mobility: 5, range: 1, firepower: 3 }, pros: ["Muy rápido", "Ingeniero: torreta + EMP"], cons: ["El más frágil", "Torretas mueren con él"] },
   heavy:    { label: "Pesado",     maxHp: 260, moveMul: 0.70, jumpMul: 0.80, loadout: ["lmg", "shotgun", "glauncher", "flak"], tint: 0x8a5a2b,
-              profile: { armor: 5, mobility: 1, range: 2, firepower: 4 }, pros: ["Mucha vida", "Supresión sostenida"], cons: ["Lento", "Blanco fácil"] },
+              profile: { armor: 5, mobility: 1, range: 2, firepower: 4 }, pros: ["Mucha vida", "Escudo blindado (-40% daño)"], cons: ["Lento", "Blanco fácil"] },
   marksman: { label: "Tirador",    maxHp: 100, moveMul: 0.90, jumpMul: 1.00, loadout: ["sniper", "dmr", "smoke", "lockon"], tint: 0x6a4aa0,
               profile: { armor: 2, mobility: 3, range: 5, firepower: 4 }, pros: ["Un tiro a distancia", "Controla zonas"], cons: ["Cadencia lenta", "Indefenso de cerca"] },
 };

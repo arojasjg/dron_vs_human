@@ -120,6 +120,15 @@ export function tryFire(a: Ammo, magSize: number): { fired: boolean; ammo: Ammo 
   return { fired: false, ammo: a };                  // empty — must recharge at the base
 }
 
+/** MANUAL magazine swap: load a fresh mag from the reserve. The rounds still in the OLD mag are DROPPED
+ *  (a swapped magazine is lost) — a tactical reload wastes whatever was left. No-op with an empty reserve.
+ *  Returns the new state plus how many rounds were thrown away (for HUD feedback). */
+export function reloadMag(a: Ammo, magSize: number): { ammo: Ammo; lost: number } {
+  if (a.reserve <= 0) return { ammo: a, lost: 0 };          // nothing to swap to → keep the current mag
+  const r = Math.min(magSize, a.reserve);
+  return { ammo: { mag: r, reserve: a.reserve - r }, lost: a.mag }; // fresh mag; the old mag's `a.mag` rounds are gone
+}
+
 /** Full resupply (a full mag + a full reserve) — used both to init a weapon and to recharge at base. */
 export function fullAmmo(spec: WeaponSpec): Ammo {
   return { mag: spec.magSize, reserve: spec.maxReserve };
