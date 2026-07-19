@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WEAPONS, roleLoadout, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff, aiHitDamage, aiShotDamage } from "../src/net/weapons";
+import { WEAPONS, roleLoadout, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff, aiHitDamage, aiShotDamage, botHitRange, TRACER_LIFE } from "../src/net/weapons";
 import { roleMaxHp } from "../src/net/roles";
 
 describe("bullet range falloff + TTK intent", () => {
@@ -199,6 +199,26 @@ describe("AI chip shots — the emitted aim decides the hit, with range falloff"
     expect(aiShotDamage(0, 5, 0, 0.1 / l, 0, 1 / l, 0, 5, 30, true)).toBe(0);
     // target behind the shooter (aim +z, target at -z) → no hit
     expect(aiShotDamage(0, 5, 0, 0, 0, 1, 0, 5, -20, true)).toBe(0);
+  });
+});
+
+describe("botHitRange — bot damage reach matches what the tracer shows", () => {
+  it("a non-scoped weapon's hip-fire reach = tracer travel (bulletSpeed × TRACER_LIFE), far past the old 30 m", () => {
+    expect(botHitRange(WEAPONS.mg, false, 0)).toBe((WEAPONS.mg.bulletSpeed ?? 120) * TRACER_LIFE); // = 180 for mg
+    expect(botHitRange(WEAPONS.mg, false, 0)).toBe(180);
+    expect(botHitRange(WEAPONS.mg, false, 0)).toBeGreaterThan(30);    // the old hardcoded 30 read as broken hit reg
+    expect(botHitRange(WEAPONS.smg, false, 0)).toBe(180);
+    expect(botHitRange(WEAPONS.lmg, false, 0)).toBe(180);
+    expect(botHitRange(WEAPONS.laser, false, 0)).toBe(400 * TRACER_LIFE); // = 600
+  });
+
+  it("a scoped weapon uses its per-zoom aiRanges when scoped (clamped) and stays SHORT from the hip", () => {
+    expect(botHitRange(WEAPONS.sniper, true, 0)).toBe(70);            // aiRanges[0]
+    expect(botHitRange(WEAPONS.sniper, true, 1)).toBe(110);           // aiRanges[1]
+    expect(botHitRange(WEAPONS.sniper, true, 5)).toBe(110);           // higher zoom clamps to the last range
+    expect(botHitRange(WEAPONS.sniper, false, 0)).toBe(40);           // hip-fire deliberately short — the scope IS its range
+    expect(botHitRange(WEAPONS.dmr, true, 0)).toBe(55);               // aiRanges[0]
+    expect(botHitRange(WEAPONS.dmr, false, 0)).toBe(40);
   });
 });
 

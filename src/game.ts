@@ -46,7 +46,7 @@ import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
-import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, type Weapon, type Ammo } from "./net/weapons";
+import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, botHitRange, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, KEY_SPAN, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -1011,8 +1011,7 @@ export class Game {
   /** When the local player fires a BULLET weapon, test the aim ray against the bots (nearest, wall-checked). */
   private aiHitscan(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): void {
     const spec = WEAPONS[this.weapon];
-    const ranges = spec.aiRanges;
-    const range = (this.scopedNow && ranges) ? ranges[Math.min(this.zoomLevel, ranges.length - 1)] : 30; // scoped → far, hip-fire → short
+    const range = botHitRange(spec, this.scopedNow, this.zoomLevel); // non-scoped reaches the tracer's travel; scoped hip-fire stays short
     if (this.hitBotAlongRay(ox, oy, oz, dx, dy, dz, range, spec.botDmg ?? 1)) { this.hud.hitMarker("hit"); this.audio.hitMarker(false); }
   }
 

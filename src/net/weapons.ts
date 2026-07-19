@@ -53,6 +53,18 @@ export const WEAPONS: Record<Weapon, WeaponSpec> = {
   laser:     { name: "Láser",         icon: "🔺", fire: "bullet",   cooldown: 0.03, magSize: 160, maxReserve: 320, playerDmg: 5, botDmg: 1, bulletSpeed: 400 }, // fast, low-damage beam — a drone's dogfight weapon
 };
 
+export const TRACER_LIFE = 1.5; // seconds a bullet tracer lives (projectile.ts) → reach = bulletSpeed × life
+
+/** How far a bullet weapon can DAMAGE a co-op bot along the shot line. A SCOPED weapon aimed down its
+ *  sight uses its tuned per-zoom `aiRanges`; fired from the hip it stays short (the scope is its range).
+ *  A non-scoped auto weapon reaches as far as its TRACER visibly travels (bulletSpeed × TRACER_LIFE), so
+ *  a round that visibly strikes a drone actually hurts it — no more "hits but deals nothing". Pure. */
+export function botHitRange(spec: WeaponSpec, scoped: boolean, zoomLevel: number): number {
+  const r = spec.aiRanges;
+  if (r && r.length) return scoped ? r[Math.min(zoomLevel, r.length - 1)] : 40; // scoped weapon: hip-fire deliberately short
+  return (spec.bulletSpeed ?? 120) * TRACER_LIFE;                                // non-scoped: damage reaches the tracer's travel
+}
+
 /** Melee reach test: is target (p) within `range` metres of attacker (a) AND inside the swing cone
  *  (its direction dotted with the aim `d` ≥ minDot)? Point-blank always connects. Pure. */
 export function meleeHit(
