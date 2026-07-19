@@ -25,6 +25,20 @@ export function applyDeath(s: MatchState, victim: Role): MatchState {
     : { ...s, humanKills: s.humanKills + 1 };
 }
 
+/** A death only scores a team kill when a real enemy was involved: the finishing damager (`killerId`)
+ *  or a recent assist. Environmental/suicide deaths (no enemy in the attribution window) are non-scoring,
+ *  so players can't farm the enemy score by dying and accidents don't swing the match. Pure. */
+export function deathScores(killerId: number, assistCount = 0): boolean {
+  return killerId !== 0 || assistCount > 0;
+}
+
+/** Win state for a map with FEWER than 4 objective bases (micro/small presets): with no destroyable
+ *  objectives, both sides count as "bases alive" so ONLY the kill limit can end the match — it resolves
+ *  instead of running forever. Pure. */
+export function killLimitOnlyState(droneKills: number, humanKills: number): MatchState {
+  return { droneObjsAlive: 2, humanObjsAlive: 2, droneKills, humanKills }; // 2 = full bases → HUD shows 🟢🟢, never a false 💥
+}
+
 /** Base-under-attack thresholds (HP fraction). Crossing one DOWNWARD fires a one-shot alert. */
 export const BASE_THRESHOLDS = [0.75, 0.5, 0.25, 0] as const;
 

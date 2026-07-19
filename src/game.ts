@@ -47,7 +47,7 @@ import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, typ
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
 import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, botHitRange, type Weapon, type Ammo } from "./net/weapons";
-import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/objectives";
+import { checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, KEY_SPAN, VoxelGrid, type RayHit } from "./world/voxelGrid";
 import { chunkCoord, VoxelCollider } from "./world/voxelCollider";
@@ -1211,7 +1211,7 @@ export class Game {
         m.px as number, m.py as number, m.pz as number, m.nx as number, m.ny as number, m.nz as number,
       );
     } else if (m.t === "died") {
-      if (this.mode === "dvh") this.addKill(m.role as Role); // a peer died → the enemy team scores (PvP only)
+      if (this.mode === "dvh" && m.scored !== false) this.addKill(m.role as Role); // a peer died to an enemy → their team scores (PvP only; missing field = older peer → old behavior)
       const by = m.by as number, mine = by === this.net.id;
       const victim = (m.role as Role) === "human" ? "🧍" : "🤖";
       const killer = mine ? "Tú" : by ? `J${by % 1000}` : ""; // no name layer → short id label
@@ -1282,27 +1282,35 @@ export class Game {
    *  synced grid, so every client reaches the same verdict. */
   private readonly objMatAt = (x: number, y: number, z: number): MaterialId | undefined => this.grid.get(x, y, z); // hoisted: checkMatchWin runs per frame
   private checkMatchWin(): void {
-    if (this.mode !== "dvh" || this.matchOver || OBJECTIVE_SITES.length < 4) return;
-    const mat = this.objMatAt;
-    // count each team's SURVIVING bases (destroyed = ~75% of its metal razed) + weakest-base HP for the HUD
-    let droneObjsAlive = 0, humanObjsAlive = 0, droneHp = 1, humanHp = 1;
-    for (const s of OBJECTIVE_SITES) {
-      const hp = objectiveHp(s, mat); // one site scan; hp >= 0.25 ⟺ !objectiveDestroyed (prefabs.ts)
-      if (s.team === "drone") { if (hp >= 0.25) droneObjsAlive++; droneHp = Math.min(droneHp, hp); }
-      else { if (hp >= 0.25) humanObjsAlive++; humanHp = Math.min(humanHp, hp); }
+    if (this.mode !== "dvh" || this.matchOver) return;
+    const hasObjectives = OBJECTIVE_SITES.length >= 4; // micro/small presets place no bases → kill-limit-only match
+    let droneObjsAlive = 2, humanObjsAlive = 2, droneHp = 1, humanHp = 1; // objectiveless defaults: full bases (HUD 🟢🟢), never an objective win
+    if (hasObjectives) {
+      const mat = this.objMatAt;
+      // count each team's SURVIVING bases (destroyed = ~75% of its metal razed) + weakest-base HP for the HUD
+      droneObjsAlive = 0; humanObjsAlive = 0;
+      for (const s of OBJECTIVE_SITES) {
+        const hp = objectiveHp(s, mat); // one site scan; hp >= 0.25 ⟺ !objectiveDestroyed (prefabs.ts)
+        if (s.team === "drone") { if (hp >= 0.25) droneObjsAlive++; droneHp = Math.min(droneHp, hp); }
+        else { if (hp >= 0.25) humanObjsAlive++; humanHp = Math.min(humanHp, hp); }
+      }
     }
     this.hud.setScore(this.droneKills, this.humanKills, droneObjsAlive, humanObjsAlive, droneHp, humanHp);
-    // Alert MY team when OUR base crosses a damage threshold, so teams rotate to defend instead of
-    // losing a base unnoticed. Pure crossing detection → every client alerts on the same synced HP.
-    const myHp = this.role === "drone" ? droneHp : humanHp;
-    const myPrev = this.role === "drone" ? this.prevDroneHp : this.prevHumanHp;
-    const alert = baseAlert(myPrev, myHp);
-    if (alert !== null) {
-      this.hud.flash(alert === 0 ? "🛑 ¡Base destruida!" : `⚠ ¡Base bajo ataque! ${Math.round(alert * 100)}%`);
-      this.audio.baseAlarm();
+    if (hasObjectives) {
+      // Alert MY team when OUR base crosses a damage threshold, so teams rotate to defend instead of
+      // losing a base unnoticed. Pure crossing detection → every client alerts on the same synced HP.
+      const myHp = this.role === "drone" ? droneHp : humanHp;
+      const myPrev = this.role === "drone" ? this.prevDroneHp : this.prevHumanHp;
+      const alert = baseAlert(myPrev, myHp);
+      if (alert !== null) {
+        this.hud.flash(alert === 0 ? "🛑 ¡Base destruida!" : `⚠ ¡Base bajo ataque! ${Math.round(alert * 100)}%`);
+        this.audio.baseAlarm();
+      }
+      this.prevDroneHp = droneHp; this.prevHumanHp = humanHp;
     }
-    this.prevDroneHp = droneHp; this.prevHumanHp = humanHp;
-    const state: MatchState = { droneObjsAlive, humanObjsAlive, droneKills: this.droneKills, humanKills: this.humanKills };
+    const state: MatchState = hasObjectives
+      ? { droneObjsAlive, humanObjsAlive, droneKills: this.droneKills, humanKills: this.humanKills }
+      : killLimitOnlyState(this.droneKills, this.humanKills);
     const winner = checkWin(state, Game.KILL_LIMIT);
     if (winner) { this.matchOver = true; this.hud.showWin(winner, this.role); this.releaseCursor(); }
   }
@@ -1442,8 +1450,9 @@ export class Game {
           if (t > killerT) { if (killer) assist.push(killer); killer = id; killerT = t; } else assist.push(id);
         }
         this.damagers.clear();
-        this.net.send({ t: "died", role: this.role, by: killer, assist }); // peers score + credit the killer
-        if (this.mode === "dvh") this.addKill(this.role);                   // team score (relay doesn't echo)
+        const scored = deathScores(killer, assist.length); // environmental/suicide deaths don't score for the enemy
+        this.net.send({ t: "died", role: this.role, by: killer, assist, scored }); // peers score + credit the killer
+        if (this.mode === "dvh" && scored) this.addKill(this.role);         // team score (relay doesn't echo)
       }
     }
   }

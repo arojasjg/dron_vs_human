@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyDeath, checkWin, reconcileKills, baseAlert, type MatchState } from "../src/net/objectives";
+import { applyDeath, checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "../src/net/objectives";
 
 describe("base-under-attack alerts", () => {
   it("fires one alert per downward threshold crossing, none while stable or healing", () => {
@@ -133,6 +133,31 @@ describe("applyDeath — team kill scoring", () => {
   it("does not mutate the input state", () => {
     applyDeath(s, "human");
     expect(s.droneKills).toBe(0);
+  });
+});
+
+describe("deathScores — environmental/suicide deaths don't feed the enemy score", () => {
+  it("a death with no enemy involved (fall/battery/collapse/self-kamikaze) does not score", () => {
+    expect(deathScores(0)).toBe(false);
+    expect(deathScores(0, 0)).toBe(false);
+  });
+  it("a death with an enemy killer or a recent enemy assist scores", () => {
+    expect(deathScores(7)).toBe(true);
+    expect(deathScores(0, 2)).toBe(true);
+  });
+});
+
+describe("killLimitOnlyState — maps without objective bases resolve on the kill limit", () => {
+  it("only the kill limit ends the match", () => {
+    expect(checkWin(killLimitOnlyState(15, 3), 15)).toBe("drone");
+    expect(checkWin(killLimitOnlyState(3, 15), 15)).toBe("human");
+    expect(checkWin(killLimitOnlyState(2, 2), 15)).toBeNull(); // below the limit → still going
+  });
+  it("can never win by objective — both sides always count as alive", () => {
+    const s = killLimitOnlyState(0, 0);
+    expect(s.droneObjsAlive).toBeGreaterThan(0);
+    expect(s.humanObjsAlive).toBeGreaterThan(0);
+    expect(checkWin(s, 15)).toBeNull();
   });
 });
 
