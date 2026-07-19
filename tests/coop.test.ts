@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { respawnDelay, allDead, wallBlocks, smokeOccludes, perimeterSpawn, playerSpawn, cardinalSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, BANDAGE_DUR, canBeginMatch, type SmokeCloud } from "../src/net/coop";
+import { respawnDelay, allDead, wallBlocks, smokeOccludes, perimeterSpawn, playerSpawn, cardinalSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, BANDAGE_DUR, canBeginMatch, beginAddressedToMe, type SmokeCloud } from "../src/net/coop";
 
 const VOX = 0.25;
 // mirror of PLAY_BOUNDS for the current-map extent (city 513×594 vox + 48-vox forest margin) so we can assert
@@ -182,5 +182,21 @@ describe("canBeginMatch — start/restart gate (pure)", () => {
   it("matchOver never gates a menu/lobby start (only relaxes the live-match block)", () => {
     expect(canBeginMatch("menu", true)).toBe(true);
     expect(canBeginMatch("lobby", true)).toBe(true);
+  });
+});
+
+describe("beginAddressedToMe — broadcast vs directed late-join begin (pure)", () => {
+  it("an un-addressed begin (broadcast start/restart) is for everyone", () => {
+    expect(beginAddressedToMe(undefined, 1)).toBe(true);
+    expect(beginAddressedToMe(undefined, 7)).toBe(true);
+  });
+
+  it("a begin directed at ME is acted on", () => {
+    expect(beginAddressedToMe(3, 3)).toBe(true);
+  });
+
+  it("a begin directed at ANOTHER peer is ignored", () => {
+    expect(beginAddressedToMe(3, 1)).toBe(false);
+    expect(beginAddressedToMe(1, 3)).toBe(false);
   });
 });

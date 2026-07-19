@@ -24,6 +24,13 @@ export function canBeginMatch(phase: "menu" | "lobby" | "playing", matchOver: bo
   return phase !== "playing" || matchOver;
 }
 
+/** A `begin` may be broadcast to everyone (first start / restart, no `to`) or DIRECTED at one late-joiner
+ *  (the host replays it so a mid-match joiner isn't stranded in the lobby). Only act on a begin that is
+ *  un-addressed or addressed to us. Pure. */
+export function beginAddressedToMe(to: number | undefined, myId: number): boolean {
+  return to == null || to === myId;
+}
+
 /** A shot at a target is BLOCKED when a wall sits nearer than the target along the ray (beyond a small
  *  edge margin so a wall flush behind the target doesn't eat the hit). Keeps bullets from passing through
  *  walls to hit a drone. Pure. */

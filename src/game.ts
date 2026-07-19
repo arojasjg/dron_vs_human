@@ -45,7 +45,7 @@ import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, TEAM_LABEL, type Role, type Team, type UnitClass } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
-import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
+import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
 import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, botHitRange, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
@@ -1142,6 +1142,12 @@ export class Game {
       // that already has destruction to send us its diff, so our grid matches theirs (fixes the desync
       // where a late joiner sees a building standing that everyone else already collapsed).
       this.net.send({ t: "needsync" });
+    } else if (m.t === "join") {
+      // A peer connected mid-match. If WE are the host and a match is live, replay `begin` DIRECTED at them
+      // so they enter the running match instead of being stranded in the lobby; their beginMatch then fires
+      // needsync → gridsync to reconcile our destruction. (Older relay peers already ignore an unknown `join`.)
+      if (this.phase === "playing" && !this.matchOver && this.net.id === (hostOf(this.lobby) ?? this.net.id))
+        this.net.send({ t: "begin", to: m.id, mode: this.mode, map: this.mapSize, hardcore: this.coopHardcore });
     } else if (m.t === "lobby") {
       if (this.phase !== "lobby") return;
       this.lobby = m.role ? applyPick(this.lobby, m.id as number, m.role as Role) : applyJoin(this.lobby, m.id as number);
@@ -1154,6 +1160,10 @@ export class Game {
       this.refreshLobby();
     } else if (m.t === "begin") {
       // first start (from the lobby) OR a host-driven RESTART after the match ended — but never mid-fight.
+      if (!beginAddressedToMe(m.to as number | undefined, this.net.id)) return; // a directed late-join begin is only for its target
+      // begin always comes FROM the host (relay stamps m.id); a late joiner's roster is just itself, so record
+      // the host here → hostOf() resolves to the real host, not the joiner (else the joiner could hijack a restart).
+      if (typeof m.id === "number" && m.id !== this.net.id) this.lobby = applyJoin(this.lobby, m.id);
       if (canBeginMatch(this.phase, this.matchOver)) { if (m.mode) this.pendingMode = m.mode as Mode; if (m.map && MAP_SIZES[m.map as MapSize]) this.pendingMapSize = m.map as MapSize; this.coopHardcore = !!m.hardcore; this.beginMatch(); }
     } else if (m.t === "ai") {
       if (this.mode === "coop" && !this.hosting) { // peers render the host's swarm from its broadcast
