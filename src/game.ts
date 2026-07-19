@@ -46,7 +46,7 @@ import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
-import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, type Weapon, type Ammo } from "./net/weapons";
+import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, KEY_SPAN, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -657,13 +657,19 @@ export class Game {
   private aiShoot(x: number, y: number, z: number, dx: number, dy: number, dz: number, targetId: number, blind = false): void {
     this.muzzleFlash(new THREE.Vector3(x, y, z), new THREE.Vector3(dx, dy, dz), 0.3);
     if (this.net.connected) this.net.send({ t: "aifire", x: +x.toFixed(1), y: +y.toFixed(1), z: +z.toFixed(1), dx: +dx.toFixed(2), dy: +dy.toFixed(2), dz: +dz.toFixed(2) });
+    // The emitted aim (lead + spread) DECIDES the hit — one pure model (aiShotDamage) for host and
+    // peers, so strafing actually dodges shots and both players eat identical fire.
     if (targetId === this.net.id) {
       // BLIND suppression only chips us if the bot can ACTUALLY see us — no through-wall damage (pure pressure).
       const p = this.player.camera.position;
       const sees = !blind || this.aiCanSee(x, y, z, p.x, p.y, p.z);
-      if (this.hp > 0 && sees && Math.random() < 0.55) this.damageDrone(4, x, z);
+      const dmg = this.hp > 0 ? aiShotDamage(x, y, z, dx, dy, dz, p.x, p.y, p.z, sees) : 0;
+      if (dmg > 0) this.damageDrone(dmg, x, z);
     } else if (this.net.connected && !blind) { // peer target: only confirmed (sighted) shots deal damage
-      this.net.send({ t: "aihit", to: targetId, dmg: 4, x: +x.toFixed(1), z: +z.toFixed(1) });
+      const tgt = this.aiTargetBuf.find((t) => t.id === targetId); // filled this frame right before s.tick() → valid here
+      if (!tgt) return;
+      const dmg = aiShotDamage(x, y, z, dx, dy, dz, tgt.x, tgt.y, tgt.z, true); // non-blind peer shot → already sighted
+      if (dmg > 0) this.net.send({ t: "aihit", to: targetId, dmg, x: +x.toFixed(1), z: +z.toFixed(1) });
     }
   }
 

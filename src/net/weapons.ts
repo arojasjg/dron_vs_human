@@ -98,6 +98,28 @@ export function bulletFalloff(weapon: string, dist: number): number {
   return 1;                                                 // mg/lmg/dmr/sniper flat; unknown → version-safe 1.0
 }
 
+/** AI chip-shot damage vs range: full `base` ≤ 20 m, linear taper to 50% at 60 m, floored at 1 so a
+ *  landed hit never rounds to 0 while in range. Deterministic. Pure. */
+export function aiHitDamage(base: number, dist: number): number {
+  const k = dist <= 20 ? 1 : dist >= 60 ? 0.5 : 1 - 0.5 * ((dist - 20) / (60 - 20));
+  return Math.max(1, base * k);
+}
+
+/** The single source of the AI "the emitted aim decides the hit" model, shared by host and peer
+ *  resolution in game.ts. Returns the integer damage to apply, or 0 for a miss/blocked shot:
+ *  0 if the shooter can't see the target (`sees` — the blind-suppression LOS gate) or the aim
+ *  direction (dx,dy,dz, already normalized) misses the body sphere; else the range-falloff damage.
+ *  Pure so the whole hit decision is unit-testable without a Game/renderer/network. */
+export function aiShotDamage(
+  sx: number, sy: number, sz: number, dx: number, dy: number, dz: number,
+  tx: number, ty: number, tz: number, sees: boolean, base = 4, bodyR = 1.1,
+): number {
+  if (!sees) return 0;
+  const dist = Math.hypot(tx - sx, ty - sy, tz - sz);
+  if (!rayHitsSphere(sx, sy, sz, dx, dy, dz, tx, ty, tz, dist + bodyR, bodyR)) return 0;
+  return Math.round(aiHitDamage(base, dist));
+}
+
 const DRONE_LOADOUT: Weapon[] = ["mg", "grenade", "kamikaze"];
 const HUMAN_LOADOUT: Weapon[] = ["mg", "shotgun", "glauncher", "swarm", "sniper", "smoke"];
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WEAPONS, roleLoadout, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff } from "../src/net/weapons";
+import { WEAPONS, roleLoadout, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff, aiHitDamage, aiShotDamage } from "../src/net/weapons";
 import { roleMaxHp } from "../src/net/roles";
 
 describe("bullet range falloff + TTK intent", () => {
@@ -164,6 +164,41 @@ describe("bullet-vs-player hit test (rayHitsSphere)", () => {
     expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 3, 0, 5, 20, R)).toBe(false);   // 3 m to the side → wide
     expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 0, 0, -5, 20, R)).toBe(false);  // target behind the shooter
     expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 0, 0, 5, 3, R)).toBe(false);    // a wall stops the bullet at 3 m
+  });
+});
+
+describe("AI chip shots — the emitted aim decides the hit, with range falloff", () => {
+  const BODY_R = 1.1; // forgiving body radius used by aiShoot
+  it("a shot aimed at the target's body hits; one offset past the body radius at range misses", () => {
+    // bot at (0,5,0) firing straight +z at a target 30 m down-range, dead centre → hit
+    expect(rayHitsSphere(0, 5, 0, 0, 0, 1, 0, 5, 30, 30 + BODY_R, BODY_R)).toBe(true);
+    // slightly off-centre but still inside the body radius → hit
+    expect(rayHitsSphere(0, 5, 0, 0, 0, 1, 0.8, 5, 10, 10 + BODY_R, BODY_R)).toBe(true);
+    // spread jitter of 0.1 sideways puts the ray ~3 m off the body at 30 m → dodged
+    const l = Math.hypot(0.1, 1);
+    expect(rayHitsSphere(0, 5, 0, 0.1 / l, 0, 1 / l, 0, 5, 30, 30 + BODY_R, BODY_R)).toBe(false);
+  });
+  it("damage is full up close, tapers with range, and never rounds to 0 in range", () => {
+    expect(aiHitDamage(4, 3)).toBe(4);                                // point-blank = base
+    expect(aiHitDamage(4, 20)).toBe(4);                               // full out to 20 m
+    expect(aiHitDamage(4, 40)).toBeLessThan(4);                       // tapering…
+    expect(aiHitDamage(4, 40)).toBeGreaterThan(aiHitDamage(4, 60));   // …monotonically
+    expect(aiHitDamage(4, 60)).toBe(2);                               // 50% at 60 m
+    expect(aiHitDamage(4, 200)).toBe(2);                              // clamped beyond
+    expect(Math.round(aiHitDamage(1, 500))).toBeGreaterThanOrEqual(1); // a landed hit always chips
+  });
+  it("aiShotDamage fuses the LOS gate, the ray test and falloff into the one decision game.ts wires", () => {
+    // dead-on shot (bot at 0,5,0 firing +z), target 3 m down-range, sees=true → full base damage
+    expect(aiShotDamage(0, 5, 0, 0, 0, 1, 0, 5, 3, true)).toBe(4);
+    // same geometry at 60 m → 50% falloff
+    expect(aiShotDamage(0, 5, 0, 0, 0, 1, 0, 5, 60, true)).toBe(2);
+    // blind gate: even a perfect shot deals 0 when the bot can't see (sees=false)
+    expect(aiShotDamage(0, 5, 0, 0, 0, 1, 0, 5, 3, false)).toBe(0);
+    // spread jitter (0.1 off) makes the ray miss the body at 30 m → 0, so strafing dodges
+    const l = Math.hypot(0.1, 1);
+    expect(aiShotDamage(0, 5, 0, 0.1 / l, 0, 1 / l, 0, 5, 30, true)).toBe(0);
+    // target behind the shooter (aim +z, target at -z) → no hit
+    expect(aiShotDamage(0, 5, 0, 0, 0, 1, 0, 5, -20, true)).toBe(0);
   });
 });
 
