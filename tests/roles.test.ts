@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { assignRole, roleMaxHp, roleWeapon, teamCounts, type Role } from "../src/net/roles";
+import { assignRole, roleMaxHp, roleWeapon, teamCounts, teamForRole, enemyTeam, type Role } from "../src/net/roles";
+import { applyDeath, type MatchState } from "../src/net/objectives";
 
 describe("assignRole — balanced drone/human teams", () => {
   it("fills the smaller team first", () => {
@@ -39,5 +40,27 @@ describe("assignRole — balanced drone/human teams", () => {
       expect(m.cooldownMul).toBeGreaterThan(0);          // never free-fire or divide-by-zero
       expect(m.powerMul).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("teamForRole — dvh side derives from the role", () => {
+  it("puts drones on team 0 and humans on team 1", () => {
+    expect(teamForRole("drone")).toBe(0);
+    expect(teamForRole("human")).toBe(1);
+  });
+
+  it("keeps the two roles on OPPOSITE teams (cross-role = enemy, same-role = friendly)", () => {
+    expect(teamForRole("drone")).not.toBe(teamForRole("human"));
+    expect(enemyTeam(teamForRole("drone"))).toBe(teamForRole("human"));
+  });
+
+  it("scores kills on the SAME axis friendly-fire uses: a human death credits the drone side", () => {
+    const s0: MatchState = { droneObjsAlive: 2, humanObjsAlive: 2, droneKills: 0, humanKills: 0 };
+    const s1 = applyDeath(s0, "human"); // in dvh only a cross-team (= cross-role) shot can kill
+    expect(s1.droneKills).toBe(1);
+    expect(s1.humanKills).toBe(0);
+    // the crediting side IS the killer's derived team — no independent Rojo/Azul pick can disagree
+    expect(teamForRole("drone")).toBe(0);
+    expect(teamForRole("drone")).not.toBe(teamForRole("human"));
   });
 });

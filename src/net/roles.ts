@@ -51,6 +51,13 @@ export const TEAM_LABEL: Record<Team, string> = { 0: "ROJO", 1: "AZUL" };
 /** The opposing team. */
 export function enemyTeam(t: Team): Team { return t === 0 ? 1 : 0; }
 
+/** DvH is a two-SIDE match where the side IS the role: drones are team 0, humans team 1. Deriving the
+ *  team from the role (not an independent Rojo/Azul pick) keeps friendly-fire, spawn, radar, the shot
+ *  team-tags, kill scoring and the win check all reading the SAME axis. Pure. */
+export function teamForRole(role: Role): Team {
+  return role === "drone" ? 0 : 1;
+}
+
 // ---- Classes (4 per side, parallel drone↔soldier) -----------------------------------------------
 // Each class is strong on ONE axis (survivability / mobility / range) and weak on the others; the
 // "assault" of each side is the balanced middle. The invariant — enforced by tests/classes.test.ts —

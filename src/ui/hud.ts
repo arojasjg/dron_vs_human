@@ -470,7 +470,7 @@ export class Hud {
     el("lobby-code").textContent = code;
     el("lobby-title").textContent = mode === "coop" ? "🪖 Co-op vs IA" : "⚔ Jugador vs Jugador";
     el("lobby-roles").style.display = mode === "dvh" ? "flex" : "none"; // role/team only in PvP (co-op forces soldier)
-    el("lobby-team").style.display = mode === "dvh" ? "flex" : "none";
+    el("lobby-team").style.display = mode === "vs" ? "flex" : "none"; // dvh: team IS the role → no Rojo/Azul pick
     // class choice + 3D preview in BOTH PvP and co-op (co-op = pick your soldier class vs the AI)
     const classy = mode === "dvh" || mode === "coop";
     el("lobby-classes").style.display = classy ? "flex" : "none";
@@ -494,7 +494,9 @@ export class Hud {
     el("hud-lobby").style.display = "flex";
   }
 
-  updateLobby(rows: LobbyRow[], myId: number, hostId: number, myRole: Role | null, myTeam = 0, myClass = "", myMap = "large"): void {
+  updateLobby(rows: LobbyRow[], myId: number, hostId: number, myRole: Role | null, myTeam = 0, myClass = "", myMap = "large", mode = ""): void {
+    // dvh derives the team from the role, so the Rojo/Azul pick is dead there; only free vs keeps it
+    if (mode) document.getElementById("lobby-team")!.style.display = mode === "vs" ? "flex" : "none";
     const list = document.getElementById("lobby-list")!;
     list.innerHTML = rows.map((p) => {
       const icon = p.role === "drone" ? "🤖" : p.role === "human" ? "🧍" : "❓";

@@ -42,7 +42,7 @@ import { BaseModels } from "./fx/baseModels";
 import { Viewmodel } from "./engine/viewmodel";
 import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
-import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, TEAM_LABEL, type Role, type Team, type UnitClass } from "./net/roles";
+import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, TEAM_LABEL, type Role, type Team, type UnitClass } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
@@ -507,7 +507,7 @@ export class Game {
   private refreshLobby(): void {
     if (this.phase !== "lobby") return;
     const host = hostOf(this.lobby) ?? this.net.id;
-    this.hud.updateLobby(this.lobby.players.map((p) => ({ id: p.id, role: p.role })), this.net.id, host, this.myRole, this.pendingTeam, this.pendingClass, this.pendingMapSize);
+    this.hud.updateLobby(this.lobby.players.map((p) => ({ id: p.id, role: p.role })), this.net.id, host, this.myRole, this.pendingTeam, this.pendingClass, this.pendingMapSize, this.pendingMode);
   }
 
   /** Everyone runs this on the host's "begin": build the shared seed-world + spawn with the chosen role. */
@@ -521,8 +521,9 @@ export class Game {
     this.hud.hideWin(); this.hud.hideDeath(); // clear any prior game-over/death overlay on a replay (idempotent on a first start)
     this.bandages = BANDAGE_MAX;              // fresh match → full bandages
     this.hud.setMode(this.mode, this.roomCode);
-    // team: co-op is one team vs the AI; PvP honours the pick, else auto-balances by roster join order
-    this.myTeam = this.mode === "coop" ? 0 : (this.teamChosen ? this.pendingTeam : this.autoTeam());
+    // team: co-op is one team vs the AI; dvh derives it from the role (the side IS the role, so FF/spawn/
+    // radar/scoring all share one axis); free vs honours the Rojo/Azul pick, else auto-balances
+    this.myTeam = this.mode === "coop" ? 0 : this.mode === "dvh" ? teamForRole(this.myRole ?? "human") : (this.teamChosen ? this.pendingTeam : this.autoTeam());
     this.myClass = this.pendingClass;
     this.applyChosenRole(this.mode === "coop" ? "human" : (this.myRole ?? "human"), this.pendingClass);
     this.spawnPlayerInBuilding();
@@ -1235,8 +1236,9 @@ export class Game {
   private assignRoleAndController(): void {
     // Headless/non-lobby path: co-op → everyone's a soldier; PvP → auto-balance by id. The LOBBY path calls
     // applyChosenRole directly with the role the player picked.
-    this.myTeam = this.mode === "coop" ? 0 : this.autoTeam();
-    this.applyChosenRole(this.mode === "coop" ? "human" : assignRole([], this.net.id));
+    const r: Role = this.mode === "coop" ? "human" : assignRole([], this.net.id);
+    this.myTeam = this.mode === "coop" ? 0 : this.mode === "dvh" ? teamForRole(r) : this.autoTeam();
+    this.applyChosenRole(r);
   }
 
   /** Applies a role + class: swaps the local controller (Walker human / flying drone Player), then sets
