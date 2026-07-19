@@ -45,7 +45,7 @@ IDs por cluster: **NET** (red/PvP), **CBT** (combate), **RND** (render/perf/mode
 
 - [x] CBT-C1 · IA "apunta" pero el disparo era `Math.random()<0.55` sin raycast — `src/game.ts:657-668`. **HECHO (ffea274):** `aiShotDamage()` pura fusiona gate de visión + ray-vs-cuerpo sobre la dirección emitida + falloff; el spread ahora causa fallos reales → esquivar moviéndose funciona.
 - [x] CBT-C2 · Asimetría host/peer (peer daño incondicional, host 55%) — `src/game.ts:664` vs `666`. **HECHO (ffea274):** mismo `aiShotDamage()` para host y peer → fuego idéntico.
-- [ ] CBT-H1 · Daño de balas del jugador vs bots capado a 30 m mientras el tracer vuela ~180 m (impactos visibles = 0 daño) — `src/game.ts:1008`. Rango hip-fire por arma en `WeaponSpec`, alineado al tracer.
+- [x] CBT-H1 · Daño de balas vs bots capado a 30 m mientras el tracer vuela ~180 m — `src/game.ts:1012`. **HECHO (85076b6):** `botHitRange()` pura — no-scoped dañan hasta el alcance del tracer (bulletSpeed×TRACER_LIFE), scoped usan aiRanges al apuntar / 40 m al hip.
 - [ ] UX-M3 · `beginMatch` no limpia estado transitorio (miniDrones, scanPings, lockId, firing, ads…) — `src/game.ts:514-542`. `resetTransientCombatState()`.
 - [x] **NET-C1** · **(bug corona PvP)** DvH mezclaba eje rol y eje Rojo/Azul → scoring/win/spawn/FF discrepaban. **HECHO (b159300):** `teamForRole()` pura deriva team del rol (drone=0/human=1); `myTeam` así en dvh (beginMatch + assignRoleAndController); picker Rojo/Azul oculto en dvh (solo vs). FF/spawn/radar/tags/scoring/checkWin ya leen un solo eje.
 - [ ] NET-C2 · Late-join imposible; el que entra a match en curso queda atascado en lobby — `src/game.ts:1120,1128,1137-1139`, `server/relay.mjs:65-70`. Host manda `begin` dirigido + `needsync` al ver un `join` en `playing` (o relay persiste último `begin` por sala).
@@ -73,6 +73,8 @@ IDs por cluster: **NET** (red/PvP), **CBT** (combate), **RND** (render/perf/mode
 - [ ] CBT-M5 · Bots pueden disparar sin telegrafía al primer peek — `src/net/ai.ts:345,528`. Delay de adquisición.
 - [ ] CBT-M6 · Grenade/kamikaze IA daño magic `30` sin falloff — `src/game.ts:686-687`. Escala por distancia.
 - [ ] CBT-M7 · Spawn en anillo determinista — `src/net/ai.ts:339`. Jitter con rng sembrado.
+- [ ] CBT-tune1 · _(nuevo, ciclo 3)_ Balance de alcance vs bots: smg (identidad close-range) y laser ahora plinkean a 180/600 m con `botDmg` plano — considerar falloff de botDmg o cap por arma. `src/net/weapons.ts:botHitRange`.
+- [ ] CBT-tune2 · _(nuevo, ciclo 3)_ `TRACER_LIFE=1.5` duplica el literal en `projectile.ts:168`; unificar (projectile importa la const) para que tuning del tracer no diverja del alcance de daño.
 
 ### P2 — Rendimiento (stutters)
 
@@ -129,3 +131,4 @@ _(cada ciclo añade una línea: `Ciclo N | fecha | ítem | commit | gate | notas
 - Ciclo 0 | 2026-07-18 | Recon+plan | (sin commit) | baseline tsc+vitest PASA | 4 clusters mapeados, backlog ~65 ítems.
 - Ciclo 1 | 2026-07-18 | CBT-C1+C2 (IA raycast) | ffea274 | tsc0·vitest454·review-adversarial-OK·smoke-OK | ejecutor Fable5 + refactor pura aiShotDamage p/cerrar hueco de cobertura del review. Dev server vivo en :5173 p/checks.
 - Ciclo 2 | 2026-07-19 | NET-C1 (dvh team=rol) | b159300 | tsc0·vitest457·review-adversarial-OK·smoke-OK | bug corona PvP; helper puro teamForRole; picker Rojo/Azul oculto en dvh. Fable5.
+- Ciclo 3 | 2026-07-19 | CBT-H1 (rango balas vs bots) | 85076b6 | tsc0·vitest459·auto-review-cross-model-OK·smoke-OK | botHitRange pura; review por Opus directo (cambio pequeño); +2 items de tuning al backlog. Fable5.
