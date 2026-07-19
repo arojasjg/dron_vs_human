@@ -519,6 +519,7 @@ export class Game {
     this.phase = "playing";
     this.hud.hideLobby();
     this.hud.hideWin(); this.hud.hideDeath(); // clear any prior game-over/death overlay on a replay (idempotent on a first start)
+    this.resetTransientCombatState();
     this.bandages = BANDAGE_MAX;              // fresh match → full bandages
     this.hud.setMode(this.mode, this.roomCode);
     // team: co-op is one team vs the AI; dvh derives it from the role (the side IS the role, so FF/spawn/
@@ -818,6 +819,17 @@ export class Game {
   private despawnMini(i: number): void {
     this.renderer.scene.remove(this.miniDrones[i].mesh);
     this.miniDrones.splice(i, 1);
+  }
+
+  /** A restart must not inherit the old match's combat leftovers: mini-drone meshes would ghost in the
+   *  scene, a held LMB/RMB would fire/scope on spawn, and stale lock/chain/radar state would replay. */
+  private resetTransientCombatState(): void {
+    for (let i = this.miniDrones.length - 1; i >= 0; i--) this.despawnMini(i);
+    this.tankChain.length = 0;
+    this.recentShots.length = 0;
+    this.scanPings.length = 0;
+    this.lockId = -1; this.lockT = 0; this.hud.setLock(false, null);
+    this.firing = false; this.ads = false;
   }
 
   /** Missile lock-on: while the soldier holds the seeking-missile launcher, the drone kept inside the centre
