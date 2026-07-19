@@ -43,8 +43,8 @@ IDs por cluster: **NET** (red/PvP), **CBT** (combate), **RND** (render/perf/mode
 
 ### P0 — Correctness / crashes / hit-registration (primero)
 
-- [ ] CBT-C1 · IA "apunta" pero el disparo es `Math.random()<0.55` sin raycast — `src/game.ts:657-668` (`aiShoot`). Hit-test el rayo emitido contra la esfera del objetivo (reusar `rayHitsSphere`), daño con falloff, cono de miss desde `spread(wave)`. **Núcleo de "la IA no funciona".**
-- [ ] CBT-C2 · Asimetría host/peer: peer recibe daño incondicional, host solo 55% — `src/game.ts:664` vs `666`. Unificar modelo de hit (mismo ray test para ambos).
+- [x] CBT-C1 · IA "apunta" pero el disparo era `Math.random()<0.55` sin raycast — `src/game.ts:657-668`. **HECHO (ffea274):** `aiShotDamage()` pura fusiona gate de visión + ray-vs-cuerpo sobre la dirección emitida + falloff; el spread ahora causa fallos reales → esquivar moviéndose funciona.
+- [x] CBT-C2 · Asimetría host/peer (peer daño incondicional, host 55%) — `src/game.ts:664` vs `666`. **HECHO (ffea274):** mismo `aiShotDamage()` para host y peer → fuego idéntico.
 - [ ] CBT-H1 · Daño de balas del jugador vs bots capado a 30 m mientras el tracer vuela ~180 m (impactos visibles = 0 daño) — `src/game.ts:1008`. Rango hip-fire por arma en `WeaponSpec`, alineado al tracer.
 - [ ] UX-M3 · `beginMatch` no limpia estado transitorio (miniDrones, scanPings, lockId, firing, ads…) — `src/game.ts:514-542`. `resetTransientCombatState()`.
 - [ ] **NET-C1** · **(bug corona PvP)** DvH mezcla eje rol(drone/human) y eje equipo(Rojo/Azul) → scoring/win/spawn/FF discrepan; un match all-human puede "ganarlo los Drones" — `src/game.ts:472-473,525,1265,1270,1284-1290,1906`, `src/net/objectives.ts:44-50`. Colapsar a UN eje autoritativo: en dvh derivar team del rol (drones=team0, humans=team1), quitar picker Rojo/Azul en dvh; FF/spawn/radar/hit/kill/objetivo/scoreboard leen el mismo campo.
@@ -126,4 +126,5 @@ IDs por cluster: **NET** (red/PvP), **CBT** (combate), **RND** (render/perf/mode
 
 _(cada ciclo añade una línea: `Ciclo N | fecha | ítem | commit | gate | notas`)_
 
-- Ciclo 0 | 2026-07-18 | Recon+plan | (sin commit) | baseline tsc+vitest PASA | 4 clusters mapeados, backlog ~60 ítems.
+- Ciclo 0 | 2026-07-18 | Recon+plan | (sin commit) | baseline tsc+vitest PASA | 4 clusters mapeados, backlog ~65 ítems.
+- Ciclo 1 | 2026-07-18 | CBT-C1+C2 (IA raycast) | ffea274 | tsc0·vitest454·review-adversarial-OK·smoke-OK | ejecutor Fable5 + refactor pura aiShotDamage p/cerrar hueco de cobertura del review. Dev server vivo en :5173 p/checks.
