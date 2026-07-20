@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  seekDir, shouldFire, waveSize, spawnRingPos, pickTarget, orbitDir, jink, leadAim, spread,
+  seekDir, shouldFire, waveSize, spawnRingPos, pickTarget, orbitDir, jink, evadeStrafe, leadAim, spread,
   speedScale, fireCdScale, hpBonus, pickKind, ARCHETYPES, AiSwarm, shouldDrop, homingStep, type AiDrop, type AiKind,
   acquireDelay, type AiFire, type AiTarget,
   dmgScale, archDamage, difficultyMul,
@@ -99,6 +99,14 @@ describe("enemy AI — pure decision helpers", () => {
 
   it("jink oscillates within [-1,1]", () => {
     for (let t = 0; t < 5; t += 0.3) { const j = jink(0.5, t); expect(j).toBeGreaterThanOrEqual(-1); expect(j).toBeLessThanOrEqual(1); }
+  });
+
+  it("evadeStrafe REVERSES direction (juke, not a constant circle), stays bounded, is seed-distinct and deterministic", () => {
+    let min = Infinity, max = -Infinity;
+    for (let t = 0; t <= 6; t += 0.1) { const v = evadeStrafe(0.4, t); min = Math.min(min, v); max = Math.max(max, v); expect(Math.abs(v)).toBeLessThanOrEqual(1.6); }
+    expect(min).toBeLessThan(0); expect(max).toBeGreaterThan(0);     // swings through both signs → the strafe reverses
+    expect(evadeStrafe(0.2, 1.3)).not.toBe(evadeStrafe(0.8, 1.3));   // distinct seeds → bots don't juke in sync
+    expect(evadeStrafe(0.4, 2.5)).toBe(evadeStrafe(0.4, 2.5));       // pure → same (seed,t) repeats exactly
   });
 
   it("leadAim aims AHEAD of a moving target (and straight at a still one)", () => {

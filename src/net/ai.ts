@@ -140,6 +140,11 @@ export function orbitDir(dx: number, dz: number, sign: number): [number, number]
 /** Lateral weave factor in [-1,1] that oscillates over time (seeded per bot) → a jinking approach. Pure. */
 export function jink(seed: number, t: number): number { return Math.sin(t * 2.3 + seed * 6.283); }
 
+/** Signed strafe factor (~[-1.5,1.5]) whose sign FLIPS and magnitude BURSTS over time → an evasive, direction-reversing juke instead of a constant circle. Seeded per bot, pure (no rng). */
+export function evadeStrafe(seed: number, t: number): number {
+  return Math.sin(t * 1.7 + seed * 6.283) * (1 + 0.5 * Math.sin(t * 4.3 + seed * 3.14));
+}
+
 /** Aim direction that LEADS a moving target (predicts where it'll be when a `projSpeed` round arrives). Pure. */
 export function leadAim(
   bx: number, by: number, bz: number, tx: number, ty: number, tz: number, tvx: number, tvz: number, projSpeed: number,
@@ -490,9 +495,10 @@ export class AiSwarm {
         const rdx = ringX - b.x, rdz = ringZ - b.z, rl = Math.hypot(rdx, rdz) || 1e-3;
         mvx = (rdx / rl) * 0.75 + dir[0] * 0.5 + ox * 0.45 * jk;
         mvz = (rdz / rl) * 0.75 + dir[2] * 0.5 + oz * 0.45 * jk;
-      } else {                                            // in the pocket → ORBIT-dominant + gentle hold-range drift
+      } else {                                            // in the pocket → EVASIVE juke-strafe + gentle hold-range drift
         const adj = gDist < hold * 0.6 ? -0.8 : (gDist > hold * 1.1 ? 0.5 : 0);
-        mvx = ox * 1.2 + dir[0] * adj; mvz = oz * 1.2 + dir[2] * adj;
+        const es = evadeStrafe(b.seed, this.t);           // was a constant ox*1.2 circle → reversing, bursting juke
+        mvx = ox * 1.2 * es + dir[0] * adj; mvz = oz * 1.2 * es + dir[2] * adj;
       }
       // BUILDING ENTRY: if a wall blocks the straight line to the belief, steer toward the nearest door/window
       // (slip through) instead of grinding up and OVER it. If no open gap is near, REQUEST a break of the voxel

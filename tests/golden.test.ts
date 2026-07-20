@@ -93,9 +93,11 @@ function carveGolden(): number {
 // GOLD_AI re-baselined after the DELIBERATE building-entry behaviour rework (bots drop to the door/window band
 // and enter instead of climbing onto the roof), then again after the DELIBERATE sight-acquisition delay (CBT-M5:
 // a bot must hold LOS for acquireDelay before its FIRST shot), then again for CBT-M7 (spawn positions jittered off
-// the perfect even ring — ONLY x/z moved; cd/gcd/seed/orbit and the rng stream are byte-identical, proven).
+// the perfect even ring — ONLY x/z moved; cd/gcd/seed/orbit and the rng stream are byte-identical, proven),
+// then again for CBT-H7 (in-pocket orbit made EVASIVE — evadeStrafe modulates the tangent, a pure sin of seed+t;
+// ONLY positions move, no rng draw → aim/spawn streams byte-identical).
 // Cook/carve are pure optimizations → never moved.
-const GOLD_AI = 306083037;
+const GOLD_AI = 186377577;
 const GOLD_COOK = 3326779269;
 const GOLD_CARVE = 683759392;
 
