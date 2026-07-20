@@ -46,7 +46,7 @@ import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
-import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, botHitRange, type Weapon, type Ammo } from "./net/weapons";
+import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, KEY_SPAN, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -168,6 +168,8 @@ export class Game {
   private readonly msFinMat = new THREE.MeshStandardMaterial({ color: 0x2e3236, roughness: 0.7, metalness: 0.4 });
   private readonly msGlowMat = new THREE.MeshBasicMaterial({ color: 0x7cffd0 }); // exhaust glow
   private weaponReadyAt = 0;      // shared per-shot cooldown gate
+  private bloom = 0;              // accumulated auto-fire spread (radians); grows per shot, decays between shots
+  private lastBloomT = 0;         // when bloom was last decayed (lazy decay at the next shot)
   private firing = false;         // LMB held → auto-fire (machine gun) each frame at the weapon's rate
   private ads = false;            // RMB held → aim down sights (only engages for a scoped weapon; see applyAds)
   private bulletReadyAt = 0;      // free-mode auto-fire cadence gate
@@ -302,6 +304,7 @@ export class Game {
 
   private readonly tmpDir = new THREE.Vector3();
   private readonly tmpMuzzle = new THREE.Vector3(); // reused: viewmodel barrel-tip world pos for the muzzle flash
+  private readonly tmpSpread = new THREE.Vector3(); // reused: bloom-perturbed fire direction (no per-shot allocation)
   private readonly crateGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
   private readonly crateMat = new THREE.MeshStandardMaterial({ color: 0x9c6b34, roughness: 0.8, metalness: 0 });
 
@@ -830,6 +833,7 @@ export class Game {
     this.scanPings.length = 0;
     this.lockId = -1; this.lockT = 0; this.hud.setLock(false, null);
     this.firing = false; this.ads = false;
+    this.bloom = 0; this.lastBloomT = 0;
   }
 
   /** Missile lock-on: while the soldier holds the seeking-missile launcher, the drone kept inside the centre
@@ -1274,6 +1278,7 @@ export class Game {
     }
     this.hp = this.myMaxHp(); // per-class max (heavy tank … scout fragile)
     this.weapon = classLoadout(this.role, this.myClass)[0]; // start on the class primary
+    this.bloom = 0; // fresh weapon → no inherited spread bloom
     this.viewmodel.setWeapon(this.weapon, this.role, this.myClass); // hold the class primary (soldiers only; drone → nothing)
     const mv = classMove(this.role, this.myClass);
     this.player.setClassMods(mv.speedMul, mv.jumpMul); // scout runs, heavy lumbers, interceptor screams
@@ -2417,7 +2422,16 @@ export class Game {
     this.weaponReadyAt = this.time + spec.cooldown;
     const w = roleWeapon(this.role);
     switch (spec.fire) {
-      case "bullet":    this.shoot(origin, dir, spec.playerDmg ?? 0, spec.bulletSpeed ?? 120); break;
+      case "bullet": {
+        this.bloom = decayBloom(spec, this.bloom, this.time - this.lastBloomT); // lazy decay since last shot
+        this.lastBloomT = this.time;
+        // The perturbed dir is what shoot() traces/broadcasts, so peers replay the SAME final dir —
+        // Math.random is safe here (unlike the shotgun's many locally-replayed pellets, which are seeded).
+        const [sx, sy, sz] = coneSpread(dir.x, dir.y, dir.z, spreadAngle(spec, this.bloom, this.scopedNow), Math.random(), Math.random());
+        this.shoot(origin, this.tmpSpread.set(sx, sy, sz), spec.playerDmg ?? 0, spec.bulletSpeed ?? 120);
+        this.bloom = addBloom(spec, this.bloom);
+        break;
+      }
       case "shotgun":   this.fireShotgun(origin, dir, spec.pellets ?? 8, spec.playerDmg ?? 0); break;
       case "grenade":   this.projectiles.launchGrenade(origin.clone(), dir, 22, false, w.powerMul); this.broadcastWeapon("grenade", origin, dir); break;
       case "explosive": this.projectiles.launchRocket(origin.clone(), dir, 52, false, w.powerMul); this.broadcastWeapon("missile", origin, dir); break;
@@ -2489,6 +2503,7 @@ export class Game {
 
   private selectWeapon(w: Weapon): void {
     this.weapon = w;
+    this.bloom = 0;     // spread bloom never carries over to the next weapon
     this.zoomLevel = 0; // a fresh weapon starts at its base zoom stop
     this.viewmodel.setWeapon(w, this.role, this.myClass); // swap the held model
     this.audio.weaponSwitch();

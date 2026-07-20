@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WEAPONS, roleLoadout, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff, aiHitDamage, aiShotDamage, botHitRange, TRACER_LIFE } from "../src/net/weapons";
+import { WEAPONS, roleLoadout, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff, aiHitDamage, aiShotDamage, botHitRange, TRACER_LIFE, spreadAngle, addBloom, decayBloom, coneSpread } from "../src/net/weapons";
 import { roleMaxHp } from "../src/net/roles";
 
 describe("bullet range falloff + TTK intent", () => {
@@ -219,6 +219,81 @@ describe("botHitRange — bot damage reach matches what the tracer shows", () =>
     expect(botHitRange(WEAPONS.sniper, false, 0)).toBe(40);           // hip-fire deliberately short — the scope IS its range
     expect(botHitRange(WEAPONS.dmr, true, 0)).toBe(55);               // aiRanges[0]
     expect(botHitRange(WEAPONS.dmr, false, 0)).toBe(40);
+  });
+});
+
+describe("weapon spread / bloom — auto fire cones out, ADS tightens, sniper stays pinpoint", () => {
+  const len = (v: [number, number, number]) => Math.hypot(v[0], v[1], v[2]);
+  const dot = (a: [number, number, number], b: [number, number, number]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+  it("coneSpread with angle=0 returns the normalized input", () => {
+    expect(coneSpread(0, 0, 2, 0, 0.3, 0.7)).toEqual([0, 0, 1]);
+    const [x, y, z] = coneSpread(3, 4, 0, 0, 0.5, 0.5);
+    expect(x).toBeCloseTo(0.6, 10); expect(y).toBeCloseTo(0.8, 10); expect(z).toBeCloseTo(0, 10);
+  });
+
+  it("coneSpread always returns a UNIT vector, including near-vertical dirs", () => {
+    const dirs: [number, number, number][] = [
+      [0, 0, 1], [1, 0, 0], [0, 1, 0], [0, -1, 0], [0.001, 0.9999, 0.001], [1, 1, 1], [-2, 0.5, 3],
+    ];
+    for (const [dx, dy, dz] of dirs) {
+      for (const r1 of [0, 0.25, 0.5, 0.99]) for (const r2 of [0, 0.5, 0.99]) {
+        const out = coneSpread(dx, dy, dz, 0.05, r1, r2);
+        expect(len(out)).toBeCloseTo(1, 6);
+      }
+    }
+  });
+
+  it("coneSpread stays within the cone: dot(input, output) >= cos(angle)", () => {
+    for (const angle of [0.005, 0.02, 0.055, 0.09]) {
+      for (const [dx, dy, dz] of [[0, 0, 1], [0, 1, 0], [0, -1, 0], [1, 2, -1]] as [number, number, number][]) {
+        const l = Math.hypot(dx, dy, dz), unit: [number, number, number] = [dx / l, dy / l, dz / l];
+        for (const r1 of [0, 0.2, 0.6, 0.95]) for (const r2 of [0, 0.4, 0.999]) {
+          const out = coneSpread(dx, dy, dz, angle, r1, r2);
+          expect(dot(unit, out)).toBeGreaterThanOrEqual(Math.cos(angle) - 1e-6);
+        }
+      }
+    }
+  });
+
+  it("no-spread weapon (grenade) → spreadAngle/addBloom/decayBloom all 0 (pinpoint path untouched)", () => {
+    expect(WEAPONS.grenade.spread).toBeUndefined();
+    expect(spreadAngle(WEAPONS.grenade, 0.5, false)).toBe(0);
+    expect(addBloom(WEAPONS.grenade, 0.5)).toBe(0);
+    expect(decayBloom(WEAPONS.grenade, 0.5, 1)).toBe(0);
+  });
+
+  it("addBloom grows by perShot and caps at max", () => {
+    const s = WEAPONS.mg.spread!;
+    expect(addBloom(WEAPONS.mg, 0)).toBeCloseTo(s.perShot, 10);
+    let b = 0;
+    for (let i = 0; i < 100; i++) b = addBloom(WEAPONS.mg, b);
+    expect(b).toBe(s.max);                                    // capped after sustained fire
+    expect(addBloom(WEAPONS.mg, s.max)).toBe(s.max);          // never exceeds max
+  });
+
+  it("decayBloom reduces by decay*dt and floors at 0", () => {
+    const s = WEAPONS.mg.spread!;
+    expect(decayBloom(WEAPONS.mg, 0.05, 0.1)).toBeCloseTo(0.05 - s.decay * 0.1, 10);
+    expect(decayBloom(WEAPONS.mg, 0.01, 100)).toBe(0);        // long pause → fully settled
+    expect(decayBloom(WEAPONS.mg, 0.02, -5)).toBe(0.02);      // negative dt never grows bloom
+  });
+
+  it("aiming down sights tightens the cone; sniper is pinpoint even at full bloom", () => {
+    expect(spreadAngle(WEAPONS.mg, 0.03, true)).toBeLessThan(spreadAngle(WEAPONS.mg, 0.03, false));
+    expect(spreadAngle(WEAPONS.mg, 0, false)).toBeGreaterThan(0);           // hip fire never laser-accurate
+    expect(spreadAngle(WEAPONS.sniper, 0, true)).toBe(0);                   // sniper stays a precision one-shot
+    expect(spreadAngle(WEAPONS.sniper, 0, false)).toBe(0);
+    expect(addBloom(WEAPONS.sniper, 0)).toBe(0);                            // and never accumulates bloom
+  });
+
+  it("every auto bullet weapon has spread; bloom makes sustained fire measurably wider", () => {
+    for (const w of ["mg", "smg", "lmg", "laser", "dmr"] as const) {
+      const s = WEAPONS[w].spread!;
+      expect(s.base).toBeGreaterThan(0);
+      expect(s.max).toBeGreaterThanOrEqual(s.base);
+      expect(spreadAngle(WEAPONS[w], s.max, false)).toBeGreaterThan(spreadAngle(WEAPONS[w], 0, false));
+    }
   });
 });
 

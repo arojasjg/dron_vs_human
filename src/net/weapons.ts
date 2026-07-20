@@ -24,11 +24,12 @@ export interface WeaponSpec {
   botDmg?: number;      // co-op: HP dealt to an AI bot per hitscan hit (default 1 — a bot has 3)
   bulletSpeed?: number; // tracer projectile speed (m/s, visual only — the hit is hitscan). Default 120
   boltAction?: boolean; // fires ONE round per trigger pull (no auto-fire while held) + a bolt-cycle reload sound
+  spread?: { base: number; perShot: number; max: number; decay: number; adsMul: number }; // radians; decay rad/s; adsMul scales spread while scoped
 }
 
 export const WEAPONS: Record<Weapon, WeaponSpec> = {
   // Drone arsenal — light: rapid MG, a FEW grenades, and a one-shot kamikaze self-detonation.
-  mg:        { name: "Metralleta",    icon: "🔫", fire: "bullet",    cooldown: 0.08, magSize: 40, maxReserve: 200, playerDmg: 11 },
+  mg:        { name: "Metralleta",    icon: "🔫", fire: "bullet",    cooldown: 0.08, magSize: 40, maxReserve: 200, playerDmg: 11, spread: { base: 0.006, perShot: 0.007, max: 0.055, decay: 0.09, adsMul: 0.3 } },
   grenade:   { name: "Granada",       icon: "💣", fire: "grenade",   cooldown: 1.2,  magSize: 2,  maxReserve: 4 },
   kamikaze:  { name: "Kamikaze",      icon: "☢️", fire: "kamikaze",  cooldown: 0.0,  magSize: 1,  maxReserve: 0 },
   // Human arsenal — MG, spread shotgun, explosive grenade launcher, a net to catch a drone, and a
@@ -36,21 +37,21 @@ export const WEAPONS: Record<Weapon, WeaponSpec> = {
   shotgun:   { name: "Escopeta",      icon: "🎯", fire: "shotgun",   cooldown: 0.8,  magSize: 6,  maxReserve: 30, pellets: 9, playerDmg: 50 },
   glauncher: { name: "Lanzagranadas", icon: "🎆", fire: "explosive", cooldown: 1.0,  magSize: 4,  maxReserve: 12 },
   net:       { name: "Lanzarredes",   icon: "🕸️", fire: "net",       cooldown: 2.5,  magSize: 2,  maxReserve: 4 }, // DORMANT: replaced by the swarm in the human loadout
-  sniper:    { name: "Francotirador", icon: "🔭", fire: "bullet",    cooldown: 1.3,  magSize: 5,  maxReserve: 20, playerDmg: 85, scope: true, zoomMags: [5, 10], aiRanges: [70, 110], botDmg: 3, bulletSpeed: 340, boltAction: true },
+  sniper:    { name: "Francotirador", icon: "🔭", fire: "bullet",    cooldown: 1.3,  magSize: 5,  maxReserve: 20, playerDmg: 85, scope: true, zoomMags: [5, 10], aiRanges: [70, 110], botDmg: 3, bulletSpeed: 340, boltAction: true, spread: { base: 0.0, perShot: 0.0, max: 0.0, decay: 1.0, adsMul: 0.0 } },
   smoke:     { name: "Granada de humo", icon: "💨", fire: "smoke",   cooldown: 3.0,  magSize: 2,  maxReserve: 4 }, // deploys a sightline-blocking cloud
   swarm:     { name: "Enjambre",      icon: "🐝", fire: "swarm",     cooldown: 6.0,  magSize: 1,  maxReserve: 3 }, // ~5 homing interceptor mini-drones
   // Class weapons — assigned per class (roles.ts), not by role. All fire "bullet" so they reuse the
   // existing hitscan/broadcast path (no new net message type). Their identities live in the stats:
-  smg:       { name: "Subfusil",      icon: "⚡", fire: "bullet",    cooldown: 0.05, magSize: 30,  maxReserve: 240, playerDmg: 8,  botDmg: 1 }, // scout/interceptor: shreds up close, useless far (falloff)
-  lmg:       { name: "Ametralladora", icon: "💢", fire: "bullet",    cooldown: 0.10, magSize: 100, maxReserve: 300, playerDmg: 15, botDmg: 2 }, // heavy: sustained suppression, huge mag
-  dmr:       { name: "Tiro medido",   icon: "🎖️", fire: "bullet",    cooldown: 0.45, magSize: 12,  maxReserve: 72,  playerDmg: 45, botDmg: 2, scope: true, zoomMags: [3], aiRanges: [55], bulletSpeed: 240 }, // marksman/artillery: semi-auto punch between mg and sniper
+  smg:       { name: "Subfusil",      icon: "⚡", fire: "bullet",    cooldown: 0.05, magSize: 30,  maxReserve: 240, playerDmg: 8,  botDmg: 1, spread: { base: 0.010, perShot: 0.010, max: 0.090, decay: 0.14, adsMul: 0.4 } }, // scout/interceptor: shreds up close, useless far (falloff)
+  lmg:       { name: "Ametralladora", icon: "💢", fire: "bullet",    cooldown: 0.10, magSize: 100, maxReserve: 300, playerDmg: 15, botDmg: 2, spread: { base: 0.007, perShot: 0.008, max: 0.075, decay: 0.06, adsMul: 0.3 } }, // heavy: sustained suppression, huge mag
+  dmr:       { name: "Tiro medido",   icon: "🎖️", fire: "bullet",    cooldown: 0.45, magSize: 12,  maxReserve: 72,  playerDmg: 45, botDmg: 2, scope: true, zoomMags: [3], aiRanges: [55], bulletSpeed: 240, spread: { base: 0.004, perShot: 0.003, max: 0.020, decay: 0.50, adsMul: 0.1 } }, // marksman/artillery: semi-auto punch between mg and sniper
   // Anti-drone soldier tools — the answer to "hard to resist the AI swarm": AREA, CONTROL and AUTOMATION.
   flak:      { name: "Cañón Flak",    icon: "🎇", fire: "flak",     cooldown: 1.1,  magSize: 3,   maxReserve: 12 }, // airbursts among clustered drones — big AoE vs the swarm
   emp:       { name: "Granada EMP",   icon: "🌀", fire: "emp",      cooldown: 5.0,  magSize: 2,   maxReserve: 4 },  // stuns/disables every drone in radius for a few seconds (crowd control)
   lockon:    { name: "Misil buscador", icon: "🛰️", fire: "lockon",  cooldown: 2.4,  magSize: 2,   maxReserve: 8 },  // homing missile that hunts the drone you aim at (kills evasive fliers)
   turret:    { name: "Torreta",       icon: "🗼", fire: "turret",   cooldown: 14.0, magSize: 1,   maxReserve: 1 },  // SCARCE auto-sentry: only 2 per resupply, long redeploy, capped active — the engineer's tool
   // Drone PvP variety (NOT given to the AI — the swarm stays as-is): a rapid laser beam.
-  laser:     { name: "Láser",         icon: "🔺", fire: "bullet",   cooldown: 0.03, magSize: 160, maxReserve: 320, playerDmg: 5, botDmg: 1, bulletSpeed: 400 }, // fast, low-damage beam — a drone's dogfight weapon
+  laser:     { name: "Láser",         icon: "🔺", fire: "bullet",   cooldown: 0.03, magSize: 160, maxReserve: 320, playerDmg: 5, botDmg: 1, bulletSpeed: 400, spread: { base: 0.003, perShot: 0.0025, max: 0.025, decay: 0.16, adsMul: 0.5 } }, // fast, low-damage beam — a drone's dogfight weapon
 };
 
 export const TRACER_LIFE = 1.5; // seconds a bullet tracer lives (projectile.ts) → reach = bulletSpeed × life
@@ -63,6 +64,43 @@ export function botHitRange(spec: WeaponSpec, scoped: boolean, zoomLevel: number
   const r = spec.aiRanges;
   if (r && r.length) return scoped ? r[Math.min(zoomLevel, r.length - 1)] : 40; // scoped weapon: hip-fire deliberately short
   return (spec.bulletSpeed ?? 120) * TRACER_LIFE;                                // non-scoped: damage reaches the tracer's travel
+}
+
+/** Total half-angle (radians) of the shot cone: the weapon's base + accumulated bloom, tightened while
+ *  scoped (adsMul). No spread spec → 0 (pinpoint). Pure. */
+export function spreadAngle(spec: WeaponSpec, bloom: number, scoped: boolean): number {
+  const s = spec.spread;
+  if (!s) return 0;
+  return (s.base + bloom) * (scoped ? s.adsMul : 1);
+}
+
+/** Bloom AFTER a shot: grows by perShot, capped at max. No spec → 0. Pure. */
+export function addBloom(spec: WeaponSpec, bloom: number): number {
+  const s = spec.spread;
+  return s ? Math.min(s.max, bloom + s.perShot) : 0;
+}
+
+/** Bloom after `dt` seconds of not shooting: decays toward 0 at `decay` rad/s. No spec → 0. Pure. */
+export function decayBloom(spec: WeaponSpec, bloom: number, dt: number): number {
+  const s = spec.spread;
+  return s ? Math.max(0, bloom - s.decay * Math.max(0, dt)) : 0;
+}
+
+/** Perturb a (not-necessarily-unit) direction by a random offset within a cone of half-angle `angle`
+ *  (radians), using r1,r2 in [0,1). Returns a UNIT vector; angle<=0 returns the normalized input. The
+ *  offset is uniform in the tangent disk (sqrt(r2)), rotated by t1/t2 built ⟂ to the dir. Pure. */
+export function coneSpread(dx: number, dy: number, dz: number, angle: number, r1: number, r2: number): [number, number, number] {
+  const len = Math.hypot(dx, dy, dz) || 1; dx /= len; dy /= len; dz /= len;
+  if (angle <= 0) return [dx, dy, dz];
+  const a = r1 * 2 * Math.PI, rad = Math.tan(angle) * Math.sqrt(r2);
+  const upx = Math.abs(dy) < 0.99 ? 0 : 1, upy = Math.abs(dy) < 0.99 ? 1 : 0; // up axis not parallel to dir
+  let t1x = upy * dz, t1y = -upx * dz, t1z = upx * dy - upy * dx;              // cross(up, dir), upz = 0
+  const t1l = Math.hypot(t1x, t1y, t1z) || 1; t1x /= t1l; t1y /= t1l; t1z /= t1l;
+  const t2x = dy * t1z - dz * t1y, t2y = dz * t1x - dx * t1z, t2z = dx * t1y - dy * t1x; // cross(dir, t1)
+  const ox = Math.cos(a) * rad, oy = Math.sin(a) * rad;
+  const vx = dx + t1x * ox + t2x * oy, vy = dy + t1y * ox + t2y * oy, vz = dz + t1z * ox + t2z * oy;
+  const vl = Math.hypot(vx, vy, vz) || 1;
+  return [vx / vl, vy / vl, vz / vl];
 }
 
 /** Melee reach test: is target (p) within `range` metres of attacker (a) AND inside the swing cone
