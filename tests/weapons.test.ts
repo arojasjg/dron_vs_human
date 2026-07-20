@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WEAPONS, roleLoadout, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff, aiHitDamage, aiShotDamage, botHitRange, TRACER_LIFE, spreadAngle, addBloom, decayBloom, coneSpread } from "../src/net/weapons";
+import { WEAPONS, roleLoadout, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, hitZone, HEADSHOT_MULT, bulletFalloff, aiHitDamage, aiShotDamage, botHitRange, TRACER_LIFE, spreadAngle, addBloom, decayBloom, coneSpread } from "../src/net/weapons";
 import { roleMaxHp } from "../src/net/roles";
 
 describe("bullet range falloff + TTK intent", () => {
@@ -194,6 +194,32 @@ describe("bullet-vs-player hit test (rayHitsSphere)", () => {
     expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 3, 0, 5, 20, R)).toBe(false);   // 3 m to the side → wide
     expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 0, 0, -5, 20, R)).toBe(false);  // target behind the shooter
     expect(rayHitsSphere(0, 0, 0, 0, 0, 1, 0, 0, 5, 3, R)).toBe(false);    // a wall stops the bullet at 3 m
+  });
+});
+
+describe("hitZone — two-zone body/head test (body gate unchanged, head flags the multiplier)", () => {
+  const BODY_R = 1.0, HEAD_DY = 0.15, HEAD_R = 0.4; // the PvP tuning game.ts wires
+  it("a ray straight at the head center is a headshot", () => {
+    // shooter at origin firing +z; target center 5 m down-range; aim at center + headDy
+    expect(hitZone(0, HEAD_DY, 0, 0, 0, 1, 0, 0, 5, 20, BODY_R, HEAD_DY, HEAD_R)).toEqual({ hit: true, head: true });
+  });
+  it("a body hit BELOW the head is a normal hit (no multiplier)", () => {
+    // ray passes bodyR*0.6 below center → inside the body, outside the 0.4 head sphere at +0.15
+    expect(hitZone(0, -BODY_R * 0.6, 0, 0, 0, 1, 0, 0, 5, 20, BODY_R, HEAD_DY, HEAD_R)).toEqual({ hit: true, head: false });
+  });
+  it("a wide miss is {hit:false, head:false}", () => {
+    expect(hitZone(0, 0, 0, 0, 0, 1, 3, 0, 5, 20, BODY_R, HEAD_DY, HEAD_R)).toEqual({ hit: false, head: false });
+  });
+  it("the body gate is UNCHANGED: any shot rayHitsSphere(bodyR) accepts still registers as hit", () => {
+    const shots: [number, number, number][] = [[0, 0, 5], [0.5, 0, 5], [0, -0.9, 5], [0.9, 0.3, 8]];
+    for (const [tx, ty, tz] of shots) {
+      const old = rayHitsSphere(0, 0, 0, 0, 0, 1, tx, ty, tz, 20, BODY_R);
+      expect(hitZone(0, 0, 0, 0, 0, 1, tx, ty, tz, 20, BODY_R, HEAD_DY, HEAD_R).hit).toBe(old);
+    }
+  });
+  it("a wall short of the target blocks both zones, and the multiplier rewards (>1)", () => {
+    expect(hitZone(0, HEAD_DY, 0, 0, 0, 1, 0, 0, 5, 3, BODY_R, HEAD_DY, HEAD_R)).toEqual({ hit: false, head: false });
+    expect(HEADSHOT_MULT).toBeGreaterThan(1);
   });
 });
 

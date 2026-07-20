@@ -46,7 +46,7 @@ import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
-import { WEAPONS, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, type Weapon, type Ammo } from "./net/weapons";
+import { WEAPONS, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, hitZone, HEADSHOT_MULT, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, KEY_SPAN, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -1005,9 +1005,9 @@ export class Game {
 
   /** Tests a shot ray (unit dir) against the co-op bots within `range` and damages the NEAREST — but ONLY if
    *  no wall sits between the shooter and that bot (grid raycast), so a bullet can't pass through a wall to
-   *  hit a drone. Host applies the damage; a peer reports it. Returns whether a bot was hit. */
-  private hitBotAlongRay(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, range: number, botDmg: number): boolean {
-    if (this.mode !== "coop" || this.aiBots.size === 0) return false;
+   *  hit a drone. Host applies the damage; a peer reports it. Returns 0 miss, 1 body hit, 2 headshot. */
+  private hitBotAlongRay(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, range: number, botDmg: number): 0 | 1 | 2 {
+    if (this.mode !== "coop" || this.aiBots.size === 0) return 0;
     let hitId = -1, hitT = range;
     for (const [id, p] of this.aiBots) {
       const wx = p.x - ox, wy = p.y - oy, wz = p.z - oz;
@@ -1016,21 +1016,25 @@ export class Game {
       const cx = ox + dx * t - p.x, cy = oy + dy * t - p.y, cz = oz + dz * t - p.z;
       if (cx * cx + cy * cy + cz * cz < 1.4) { hitId = id; hitT = t; } // within ~1.2 m of the line
     }
-    if (hitId < 0) return false;
+    if (hitId < 0) return 0;
     const wall = this.grid.raycast(ox, oy, oz, dx, dy, dz, hitT); // a wall nearer than the bot blocks the shot
-    if (wall && wallBlocks(hitT, wall.distance)) return false;
+    if (wall && wallBlocks(hitT, wall.distance)) return 0;
     const bp = this.aiBots.get(hitId)!;
-    if (this.smokeBlocks(ox, oy, oz, bp.x, bp.y, bp.z)) return false; // …and you can't shoot a bot THROUGH smoke either
-    if (this.hosting && this.swarm) { if (this.swarm.damageBot(hitId, botDmg, dx, dz)) this.onBotDead(hitId); } // pass the shot dir → tanks shield their front
-    else if (this.net.connected) this.net.send({ t: "aihitbot", bot: hitId, dmg: botDmg });
-    return true;
+    if (this.smokeBlocks(ox, oy, oz, bp.x, bp.y, bp.z)) return 0; // …and you can't shoot a bot THROUGH smoke either
+    // Head sub-zone: the drone's core IS its head (dy 0) — a tight 0.5 sphere inside the forgiving 1.4 gate
+    const head = rayHitsSphere(ox, oy, oz, dx, dy, dz, bp.x, bp.y + 0.0, bp.z, hitT + 0.5, 0.5);
+    const dealt = head ? Math.max(1, Math.round(botDmg * HEADSHOT_MULT)) : botDmg;
+    if (this.hosting && this.swarm) { if (this.swarm.damageBot(hitId, dealt, dx, dz)) this.onBotDead(hitId); } // pass the shot dir → tanks shield their front
+    else if (this.net.connected) this.net.send({ t: "aihitbot", bot: hitId, dmg: dealt });
+    return head ? 2 : 1;
   }
 
   /** When the local player fires a BULLET weapon, test the aim ray against the bots (nearest, wall-checked). */
   private aiHitscan(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): void {
     const spec = WEAPONS[this.weapon];
     const range = botHitRange(spec, this.scopedNow, this.zoomLevel); // non-scoped reaches the tracer's travel; scoped hip-fire stays short
-    if (this.hitBotAlongRay(ox, oy, oz, dx, dy, dz, range, spec.botDmg ?? 1)) { this.hud.hitMarker("hit"); this.audio.hitMarker(false); }
+    const z = this.hitBotAlongRay(ox, oy, oz, dx, dy, dz, range, spec.botDmg ?? 1);
+    if (z) { this.hud.hitMarker(z === 2 ? "kill" : "hit"); this.audio.hitMarker(z === 2); } // headshot → louder cue
   }
 
   /** A bot died (host authority): mini explosion + falling wreckage, drop its avatar, credit the shooter. */
@@ -1356,10 +1360,11 @@ export class Game {
       this.projectiles.launchBullet(o, d, WEAPONS[m.w as Weapon]?.bulletSpeed ?? 120, true); // sniper tracer is faster
       this.muzzleFlash(o, d, 0.34); // enemy gunfire is visible/spottable at range
       const base = (m.dmg as number) || 0; // a bullet in our line of fire hurts us — unless it's a teammate's (PvP)
-      if (base > 0 && this.hp > 0 && !this.friendlyFire(m.tm) && this.bulletHitsMe(o, d)) {
+      const z = this.bulletHitsMe(o, d);
+      if (base > 0 && this.hp > 0 && !this.friendlyFire(m.tm) && z.hit) {
         const p = this.player.camera.position;
-        const dmg = base * bulletFalloff((m.w as string) || "", Math.hypot(p.x - o.x, p.y - o.y, p.z - o.z));
-        this.recordDamager(m.id as number); this.damageDrone(Math.round(dmg), o.x, o.z); // range-scaled (shotgun close = lethal, far = weak)
+        const dmg = base * bulletFalloff((m.w as string) || "", Math.hypot(p.x - o.x, p.y - o.y, p.z - o.z)) * (z.head ? HEADSHOT_MULT : 1); // range-scaled + headshot reward
+        this.recordDamager(m.id as number); this.damageDrone(Math.round(dmg), o.x, o.z);
       }
     } else if (m.k === "grenade") this.projectiles.launchGrenade(o, d, 22, true);
     else if (m.k === "missile") this.projectiles.launchRocket(o, d, 52, true);
@@ -1377,18 +1382,20 @@ export class Game {
     const wall = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 220);
     const maxD = wall ? wall.distance : 220;
     for (const p of this.enemyBuf) {
-      if (rayHitsSphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, maxD, 1.0)) {
-        this.hud.hitMarker("hit"); this.audio.hitMarker(false); return;
+      const z = hitZone(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, maxD, 1.0, 0.15, 0.4);
+      if (z.hit) { // headshot → louder cue; the victim stays authoritative on the damage
+        this.hud.hitMarker(z.head ? "kill" : "hit"); this.audio.hitMarker(z.head); return;
       }
     }
   }
 
-  /** Does an incoming shot's line of fire strike our own player, before a wall stops the bullet? */
-  private bulletHitsMe(o: THREE.Vector3, d: THREE.Vector3): boolean {
+  /** Does an incoming shot's line of fire strike our own player, before a wall stops the bullet?
+   *  Body sphere (1.0, unchanged gate) decides the hit; a small sphere above the eye flags a headshot. */
+  private bulletHitsMe(o: THREE.Vector3, d: THREE.Vector3): { hit: boolean; head: boolean } {
     const hit = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 220);
     const wall = hit ? hit.distance : 220;
     const p = this.player.camera.position;
-    return rayHitsSphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, wall, 1.0);
+    return hitZone(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, wall, 1.0, 0.15, 0.4);
   }
 
   /** Connects with an explicit mode/room (used by the automated multiplayer test). */

@@ -132,6 +132,20 @@ export function rayHitsSphere(
   return cx * cx + cy * cy + cz * cz < radius * radius;
 }
 
+export const HEADSHOT_MULT = 1.8; // a clean head hit rewards precise aim
+
+/** Two-zone hit test on a target: the BODY sphere (bodyR at center) is the overall gate — unchanged from
+ *  the old single-sphere test so nothing that hit before now misses; the HEAD sphere (smaller headR, headDy
+ *  above center) is tested only to flag a headshot. Returns {hit, head}. Pure — reuses rayHitsSphere. */
+export function hitZone(
+  ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
+  cx: number, cy: number, cz: number, maxDist: number, bodyR: number, headDy: number, headR: number,
+): { hit: boolean; head: boolean } {
+  if (!rayHitsSphere(ox, oy, oz, dx, dy, dz, cx, cy, cz, maxDist, bodyR)) return { hit: false, head: false };
+  const head = rayHitsSphere(ox, oy, oz, dx, dy, dz, cx, cy + headDy, cz, maxDist, headR);
+  return { hit: true, head };
+}
+
 /** Range damage multiplier for a bullet weapon: the SHOTGUN hits hard up close (its niche against a
  *  strafing drone) and fades with range; the MG is flat at all ranges. An unknown weapon → 1.0, so an
  *  older client that doesn't tag its shots degrades to the previous behaviour (version-safe). Pure. */
