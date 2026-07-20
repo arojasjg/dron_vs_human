@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { respawnDelay, spawnProtected, allDead, wallBlocks, smokeOccludes, perimeterSpawn, playerSpawn, cardinalSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, BANDAGE_DUR, canBeginMatch, beginAddressedToMe, type SmokeCloud } from "../src/net/coop";
+import { respawnDelay, spawnProtected, allDead, wallBlocks, smokeOccludes, perimeterSpawn, playerSpawn, safestSpawn, cardinalSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, BANDAGE_DUR, canBeginMatch, beginAddressedToMe, type SmokeCloud } from "../src/net/coop";
 
 const VOX = 0.25;
 // mirror of PLAY_BOUNDS for the current-map extent (city 513×594 vox + 48-vox forest margin) so we can assert
@@ -53,6 +53,43 @@ describe("player spawns — scaled to map size + player count (pure)", () => {
     const big = playerSpawn(513, 594, VOX, 1, 10, 50).x;   // east band on the large map
     const small = playerSpawn(285, 285, VOX, 1, 10, 50).x; // east band on a small map (5×57 × 5×54-ish)
     expect(small).toBeLessThan(big);                        // the east edge is nearer on the small map
+  });
+});
+
+describe("safestSpawn — perimeter slot farthest from living enemies (pure)", () => {
+  it("picks the candidate farthest from a single enemy", () => {
+    const cands = [{ x: 0, z: 0 }, { x: 10, z: 0 }, { x: 100, z: 0 }];
+    expect(safestSpawn(cands, [{ x: 0, z: 0 }])).toBe(2);
+  });
+
+  it("maximizes the MIN distance to any enemy, not the sum", () => {
+    // idx 0 sits between two enemies (min dist 5); idx 1 is far from both (min dist 20) though its SUM is larger too —
+    // craft a case where a larger-sum candidate has a smaller min so we prove it's min, not sum.
+    const cands = [{ x: 0, z: 0 }, { x: 50, z: 0 }];
+    const enemies = [{ x: -6, z: 0 }, { x: 6, z: 0 }]; // idx0 min=6, sum=12; idx1 min=44, sum=100
+    expect(safestSpawn(cands, enemies)).toBe(1);
+    // now make idx0 have the bigger SUM but a tiny MIN → must still be rejected
+    const cands2 = [{ x: 0, z: 0 }, { x: 30, z: 0 }];
+    const enemies2 = [{ x: 1, z: 0 }, { x: 1000, z: 0 }]; // idx0 min=1 (sum≈1001); idx1 min=29 (sum≈999)
+    expect(safestSpawn(cands2, enemies2)).toBe(1);
+  });
+
+  it("no enemies → index 0 (keep the default slot)", () => {
+    expect(safestSpawn([{ x: 5, z: 5 }, { x: 9, z: 9 }], [])).toBe(0);
+  });
+
+  it("no candidates → 0", () => {
+    expect(safestSpawn([], [{ x: 0, z: 0 }])).toBe(0);
+  });
+
+  it("ties → lowest index", () => {
+    const cands = [{ x: 10, z: 0 }, { x: -10, z: 0 }]; // both 10 from the enemy at origin
+    expect(safestSpawn(cands, [{ x: 0, z: 0 }])).toBe(0);
+  });
+
+  it("a candidate exactly on an enemy is never chosen if a farther one exists", () => {
+    const cands = [{ x: 0, z: 0 }, { x: 7, z: 0 }];
+    expect(safestSpawn(cands, [{ x: 0, z: 0 }])).toBe(1);
   });
 });
 

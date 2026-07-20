@@ -45,7 +45,7 @@ import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, buildScoreboard, mvp, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, difficultyMul, type Difficulty, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
-import { respawnDelay, spawnProtected, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
+import { respawnDelay, spawnProtected, wallBlocks, smokeOccludes, playerSpawn, safestSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
 import { WEAPONS, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, hitZone, HEADSHOT_MULT, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
@@ -2010,7 +2010,16 @@ export class Game {
   private spawnPlayerInBuilding(): void {
     const team: 0 | 1 | null = this.mode === "dvh" ? this.myTeam : null;
     const slots = MAP_SIZES[this.mapSize].players;
-    const s = playerSpawn(CITY_VOX.x1, CITY_VOX.z1, VOXEL, team, Math.max(0, this.net.id - 1), slots);
+    // Living enemies to spawn away from: the swarm (co-op) or the enemy-team peers (dvh/vs). Local-only.
+    const enemies: { x: number; z: number }[] = [];
+    if (this.mode === "coop") { for (const p of this.aiBots.values()) enemies.push({ x: p.x, z: p.z }); }
+    else if (this.mode !== "free") { this.remotes.enemyPositions(this.myTeam, this.mode === "vs", this.scanEnemyBuf); for (const p of this.scanEnemyBuf) enemies.push({ x: p.x, z: p.z }); }
+    // No threat → byte-identical default slot (match-start / offline unchanged); else pick the safest perimeter slot.
+    let s = playerSpawn(CITY_VOX.x1, CITY_VOX.z1, VOXEL, team, Math.max(0, this.net.id - 1), slots);
+    if (enemies.length > 0) {
+      const candidates = Array.from({ length: slots }, (_, i) => playerSpawn(CITY_VOX.x1, CITY_VOX.z1, VOXEL, team, i, slots));
+      s = candidates[safestSpawn(candidates.map((c) => ({ x: c.x, z: c.z })), enemies)];
+    }
     this.player.spawn(s.x, s.y, s.z, s.yaw);
     // spawn protection guards a fresh spawn against instant re-death / camping — combat modes only (no PvP in sandbox)
     if (this.mode !== "free") { this.spawnProtectedUntil = this.time + Game.SPAWN_PROTECT; this.hud.flash("🛡 Protegido 2s"); }

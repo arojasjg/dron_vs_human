@@ -154,3 +154,17 @@ export function playerSpawn(
   const yaw = Math.atan2(w * 0.5 - x, d * 0.5 - z);   // face the city centre
   return { x, y: 2, z, yaw };
 }
+
+/** Index of the candidate spawn FARTHEST from the nearest enemy (max of the min-distance to any enemy).
+ *  No enemies → index 0 (keep the default slot). Ties → lowest index. Pure. */
+export function safestSpawn(candidates: { x: number; z: number }[], enemies: { x: number; z: number }[]): number {
+  if (candidates.length === 0) return 0;
+  if (enemies.length === 0) return 0;
+  let best = 0, bestMin = -Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    let min = Infinity;
+    for (const e of enemies) { const dx = candidates[i].x - e.x, dz = candidates[i].z - e.z; const d = dx * dx + dz * dz; if (d < min) min = d; }
+    if (min > bestMin) { bestMin = min; best = i; } // strict > → first (lowest index) wins ties
+  }
+  return best;
+}
