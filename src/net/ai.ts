@@ -26,7 +26,7 @@ export interface AiTarget {
   firing?: boolean;                         // threat scoring: punish whoever's shooting
   aimX?: number; aimZ?: number;             // the target's aim dir (XZ) — bots dodge when it points at them
 }
-export interface AiFire { id: number; x: number; y: number; z: number; dx: number; dy: number; dz: number; targetId: number; blind?: boolean; }
+export interface AiFire { id: number; x: number; y: number; z: number; dx: number; dy: number; dz: number; targetId: number; dmg: number; blind?: boolean; }
 /** A NOISE the swarm can hear: origin XZ + `loud` = the radius (m) within which a bot perceives it. */
 export interface AiNoise { x: number; z: number; loud: number; }
 /** A bot RELEASES a grenade (an aerial bomb) at (x,y,z) — it falls under gravity and explodes below. */
@@ -37,14 +37,14 @@ export interface AiBoom { id: number; x: number; y: number; z: number; targetId:
  *  cleared. The game side breaks it ONLY if it's glass (a window) — ai.ts is material-agnostic. */
 export interface AiBreak { id: number; x: number; y: number; z: number; dx: number; dz: number; }
 
-/** Per-archetype base stats. speed m/s · hp bullets-to-kill · hold stand-off (m) · fireCd s · high hover height (m). */
-export const ARCHETYPES: Record<AiKind, { speed: number; hp: number; hold: number; fireCd: number; high: number }> = {
-  chaser:   { speed: 10.5, hp: 2,  hold: 5,  fireCd: 1.7, high: 3 },   // fast + fragile — rushes into your face
-  gunner:   { speed: 6.0,  hp: 3,  hold: 24, fireCd: 0.9, high: 8 },   // kites at range, fires often
-  diver:    { speed: 9.0,  hp: 3,  hold: 9,  fireCd: 1.3, high: 18 },  // hovers HIGH, dives as it closes
-  tank:     { speed: 3.8,  hp: 9,  hold: 18, fireCd: 0.8, high: 6 },   // armored suppressor, frontal shield
-  kamikaze: { speed: 13.0, hp: 2,  hold: 0,  fireCd: 0,   high: 4 },   // rams straight in + detonates, no gun
-  support:  { speed: 7.0,  hp: 4,  hold: 30, fireCd: 2.2, high: 12 },  // hangs back, heals + hastens the swarm
+/** Per-archetype base stats. speed m/s · hp bullets-to-kill · hold stand-off (m) · fireCd s · high hover height (m) · dmg shot base damage. */
+export const ARCHETYPES: Record<AiKind, { speed: number; hp: number; hold: number; fireCd: number; high: number; dmg: number }> = {
+  chaser:   { speed: 10.5, hp: 2,  hold: 5,  fireCd: 1.7, high: 3,  dmg: 3 },   // fast + fragile — rushes into your face, chips
+  gunner:   { speed: 6.0,  hp: 3,  hold: 24, fireCd: 0.9, high: 8,  dmg: 4 },   // kites at range, fires often — the ranged workhorse
+  diver:    { speed: 9.0,  hp: 3,  hold: 9,  fireCd: 1.3, high: 18, dmg: 5 },   // hovers HIGH, dives as it closes — commits, hits harder
+  tank:     { speed: 3.8,  hp: 9,  hold: 18, fireCd: 0.8, high: 6,  dmg: 7 },   // armored suppressor, frontal shield — a REAL threat
+  kamikaze: { speed: 13.0, hp: 2,  hold: 0,  fireCd: 0,   high: 4,  dmg: 0 },   // rams straight in + detonates, no gun
+  support:  { speed: 7.0,  hp: 4,  hold: 30, fireCd: 2.2, high: 12, dmg: 2 },   // hangs back, heals + hastens the swarm — barely fights
 };
 
 const HEAL_RADIUS = 14;   // a support tops up allies within this radius
@@ -82,6 +82,10 @@ export function fireCdScale(wave: number): number { return 1 / (1 + Math.min(2.2
 export function hpBonus(wave: number): number { return Math.floor(Math.max(0, wave) / 2); }
 /** Aim spread (radians of jitter added to the fire dir) — TIGHTENS with the wave, so late drones are deadly. */
 export function spread(wave: number): number { return Math.max(0.008, 0.2 - Math.max(0, wave) * 0.025); }
+/** Gentle per-wave damage ramp for AI shots — bounded so late waves sting without one-shotting. Pure. */
+export function dmgScale(wave: number): number { return 1 + Math.min(0.8, Math.max(0, wave) * 0.06); }
+/** Per-archetype AI shot damage at a given wave: the archetype's base × the wave ramp. Pure. */
+export function archDamage(kind: AiKind, wave: number): number { return ARCHETYPES[kind].dmg * dmgScale(wave); }
 
 /** Unit direction from (bx,by,bz) toward (tx,ty,tz); a coincident pair yields a harmless +Y. Pure. */
 export function seekDir(bx: number, by: number, bz: number, tx: number, ty: number, tz: number): [number, number, number] {
@@ -532,14 +536,14 @@ export class AiSwarm {
         const fdy = aim[1] + (aimRng() - 0.5) * 2 * sprd;
         const fdz = aim[2] + (aimRng() - 0.5) * 2 * sprd;
         const fl = Math.hypot(fdx, fdy, fdz) || 1;
-        fires.push({ id: b.id, x: b.x, y: b.y, z: b.z, dx: fdx / fl, dy: fdy / fl, dz: fdz / fl, targetId: t.id });
+        fires.push({ id: b.id, x: b.x, y: b.y, z: b.z, dx: fdx / fl, dy: fdy / fl, dz: fdz / fl, targetId: t.id, dmg: archDamage(b.kind, this.wave) });
       } else if (!canSee && shouldSuppress(b.kind, heardBelief, b.cd) && aimRng() < 0.15) {
         b.cd = a.fireCd * fcd;
         const aim = seekDir(b.x, b.y, b.z, gx, aimY, gz);   // toward the HEARD point, no velocity lead
         const w = sprd * 3;                                 // sprays a rough area, doesn't track
         const fdx = aim[0] + (aimRng() - 0.5) * 2 * w, fdy = aim[1] + (aimRng() - 0.5) * 2 * w, fdz = aim[2] + (aimRng() - 0.5) * 2 * w;
         const fl = Math.hypot(fdx, fdy, fdz) || 1;
-        fires.push({ id: b.id, x: b.x, y: b.y, z: b.z, dx: fdx / fl, dy: fdy / fl, dz: fdz / fl, targetId: b.bt >= 0 ? b.bt : t.id, blind: true });
+        fires.push({ id: b.id, x: b.x, y: b.y, z: b.z, dx: fdx / fl, dy: fdy / fl, dz: fdz / fl, targetId: b.bt >= 0 ? b.bt : t.id, dmg: archDamage(b.kind, this.wave), blind: true });
       }
 
       b.gcd -= dt;

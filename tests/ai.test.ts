@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   seekDir, shouldFire, waveSize, pickTarget, orbitDir, jink, leadAim, spread,
-  speedScale, fireCdScale, hpBonus, pickKind, ARCHETYPES, AiSwarm, shouldDrop, homingStep, type AiDrop,
+  speedScale, fireCdScale, hpBonus, pickKind, ARCHETYPES, AiSwarm, shouldDrop, homingStep, type AiDrop, type AiKind,
+  dmgScale, archDamage,
   pickThreatTarget, beingAimedAt, separation, shouldBoom, applyHeal, type AiBoom,
   beliefAccuracy, beliefGoal, pickAudible, holdMult, shouldSuppress, searchPoint, openingSeek, type AiNoise, type AiBreak,
 } from "../src/net/ai";
@@ -54,6 +55,28 @@ describe("enemy AI — pure decision helpers", () => {
     expect(still[2]).toBeCloseTo(0, 6);                  // target still → aim straight (no z lead)
     const moving = leadAim(0, 0, 0, 10, 0, 0, 0, 5, 90); // target drifting +z
     expect(moving[2]).toBeGreaterThan(0);                // aim leads into its motion (+z)
+  });
+
+  it("dmgScale ramps gently with the wave, caps at 1.8, and guards negatives", () => {
+    expect(dmgScale(0)).toBe(1);
+    expect(dmgScale(-3)).toBe(1);                        // negative wave → no discount
+    for (let w = 0; w < 13; w++) expect(dmgScale(w + 1)).toBeGreaterThan(dmgScale(w)); // monotonic while under the cap
+    expect(dmgScale(1000)).toBe(1.8);                    // bounded — late waves sting, never one-shot
+  });
+
+  it("archDamage differentiates archetypes (tank > gunner > chaser), zeroes kamikaze, keeps gunner=4 at wave 0", () => {
+    for (const w of [0, 3, 8, 20]) {
+      expect(archDamage("tank", w)).toBeGreaterThan(archDamage("chaser", w));
+      expect(archDamage("tank", w)).toBeGreaterThan(archDamage("gunner", w));
+      expect(archDamage("kamikaze", w)).toBe(0);         // no gun — contact detonation is a separate path
+    }
+    expect(archDamage("gunner", 0)).toBe(4);             // preserves the old flat value at wave 0
+    expect(archDamage("tank", 10)).toBeGreaterThan(archDamage("tank", 0)); // the wave ramp raises it
+  });
+
+  it("every archetype declares a non-negative dmg base", () => {
+    const kinds: AiKind[] = ["chaser", "gunner", "diver", "tank", "kamikaze", "support"];
+    for (const k of kinds) expect(ARCHETYPES[k].dmg).toBeGreaterThanOrEqual(0);
   });
 
   it("spread TIGHTENS with the wave (deadlier late) and floors", () => {
