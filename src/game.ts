@@ -42,7 +42,7 @@ import { BaseModels } from "./fx/baseModels";
 import { Viewmodel } from "./engine/viewmodel";
 import { Net, type NetMsg, type NetStatus } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
-import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, buildScoreboard, mvp, playerRoster, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
+import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, buildScoreboard, mvp, playerRoster, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, difficultyMul, kindIdx, kindFromIdx, archTint, type Difficulty, type AiKind, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, spawnProtected, wallBlocks, smokeOccludes, playerSpawn, safestSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
@@ -546,7 +546,10 @@ export class Game {
     this.hud.setMode(this.mode, this.roomCode);
     // team: co-op is one team vs the AI; dvh defaults to the role-derived side but an explicit Rojo/Azul
     // pick wins (so two same-unit players can be enemies); free vs honours the pick, else auto-balances
-    this.myTeam = this.mode === "coop" ? 0 : this.mode === "dvh" ? (this.teamChosen ? this.pendingTeam : teamForRole(this.myRole ?? "human")) : (this.teamChosen ? this.pendingTeam : this.autoTeam());
+    // PvP (dvh/vs): an explicit Rojo/Azul pick wins; otherwise AUTO-BALANCE by roster slot so two players are
+    // always on OPPOSITE teams and can fight — even if they pick the same unit (two drones no longer land on the
+    // same role-derived team, which silently disabled all friendly-fire between them).
+    this.myTeam = this.mode === "coop" ? 0 : (this.teamChosen ? this.pendingTeam : this.autoTeam());
     this.myClass = this.pendingClass;
     this.applyChosenRole(this.mode === "coop" ? "human" : (this.myRole ?? "human"), this.pendingClass);
     this.spawnPlayerInBuilding();
@@ -1304,7 +1307,7 @@ export class Game {
     // Headless/non-lobby path: co-op → everyone's a soldier; PvP → auto-balance by id. The LOBBY path calls
     // applyChosenRole directly with the role the player picked.
     const r: Role = this.mode === "coop" ? "human" : assignRole([], this.net.id);
-    this.myTeam = this.mode === "coop" ? 0 : this.mode === "dvh" ? (this.teamChosen ? this.pendingTeam : teamForRole(r)) : this.autoTeam();
+    this.myTeam = this.mode === "coop" ? 0 : (this.teamChosen ? this.pendingTeam : this.autoTeam());
     this.applyChosenRole(r);
   }
 
