@@ -1,6 +1,7 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
 import { BLAST_POWER, WEAPON_BLAST_MUL } from "../config";
+import { TRACER_LIFE } from "../net/weapons";
 import type { Physics } from "../engine/physics";
 import type { RayHit, VoxelGrid } from "../world/voxelGrid";
 
@@ -165,7 +166,7 @@ export class Projectiles {
     mesh.quaternion.setFromUnitVectors(BULLET_AXIS, dir);
     mesh.position.copy(p);
     this.scene.add(mesh);
-    this.list.push({ body, collider, mesh, kind: "bullet", fuse: 0, life: 1.5, armed: 0, radius: 0, power: 0, prev: p.clone(), ghost });
+    this.list.push({ body, collider, mesh, kind: "bullet", fuse: 0, life: TRACER_LIFE, armed: 0, radius: 0, power: 0, prev: p.clone(), ghost });
   }
 
   private spawn(
