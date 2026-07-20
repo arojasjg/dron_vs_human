@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  seekDir, shouldFire, waveSize, pickTarget, orbitDir, jink, leadAim, spread,
+  seekDir, shouldFire, waveSize, spawnRingPos, pickTarget, orbitDir, jink, leadAim, spread,
   speedScale, fireCdScale, hpBonus, pickKind, ARCHETYPES, AiSwarm, shouldDrop, homingStep, type AiDrop, type AiKind,
   acquireDelay, type AiFire, type AiTarget,
   dmgScale, archDamage, difficultyMul,
@@ -37,6 +37,35 @@ describe("enemy AI — pure decision helpers", () => {
     expect(waveSize(100)).toBe(60);                      // stays at the plateau
     expect(waveSize(5, 5, 40)).toBe(40);                 // cap is configurable
     expect(waveSize(-5)).toBe(5);                        // guards a negative
+  });
+
+  it("spawnRingPos jitters off the perfect ring deterministically, staying in the ±15% radius / ±jitter angle band (CBT-M7)", () => {
+    const cx = 45, cz = 0, n = 8, wave = 3, radius = 30;
+    // deterministic for a given seed
+    expect(spawnRingPos(cx, cz, 2, n, wave, radius, 0.37)).toEqual(spawnRingPos(cx, cz, 2, n, wave, radius, 0.37));
+    // radius stays within radius·[0.85, 1.15]
+    for (const seed of [0, 0.1, 0.33, 0.5, 0.75, 0.999]) {
+      const p = spawnRingPos(cx, cz, 4, n, wave, radius, seed);
+      const r = Math.hypot(p.x - cx, p.z - cz);
+      expect(r).toBeGreaterThanOrEqual(radius * 0.85 - 1e-9);
+      expect(r).toBeLessThanOrEqual(radius * 1.15 + 1e-9);
+    }
+    // angle stays within base ± the jitter bound (≤ π/n·0.7)
+    const i = 3, base = (i / n) * Math.PI * 2 + wave, bound = (Math.PI / n) * 0.7;
+    for (const seed of [0, 0.25, 0.5, 0.8, 1 - 1e-9]) {
+      const p = spawnRingPos(cx, cz, i, n, wave, radius, seed);
+      let da = Math.atan2(p.z - cz, p.x - cx) - base;
+      while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+      expect(Math.abs(da)).toBeLessThanOrEqual(bound + 1e-9);
+    }
+    // seed=0.5 → angJit is 0 → lands exactly on the base ring ANGLE (the radius still varies via radFrac)
+    const mid = spawnRingPos(cx, cz, i, n, wave, radius, 0.5);
+    let dmid = Math.atan2(mid.z - cz, mid.x - cx) - base;
+    while (dmid > Math.PI) dmid -= 2 * Math.PI; while (dmid < -Math.PI) dmid += 2 * Math.PI;
+    expect(dmid).toBeCloseTo(0, 9);
+    // distinct seeds → distinct positions (not the perfect ring)
+    const a = spawnRingPos(cx, cz, i, n, wave, radius, 0.2), b = spawnRingPos(cx, cz, i, n, wave, radius, 0.8);
+    expect(a.x !== b.x || a.z !== b.z).toBe(true);
   });
 
   it("orbitDir is a unit vector PERPENDICULAR to the approach (the strafe tangent); sign flips it", () => {

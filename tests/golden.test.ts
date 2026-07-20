@@ -92,8 +92,10 @@ function carveGolden(): number {
 // Golden baselines — captured from commit 10eeef6 (pre-optimization). See header.
 // GOLD_AI re-baselined after the DELIBERATE building-entry behaviour rework (bots drop to the door/window band
 // and enter instead of climbing onto the roof), then again after the DELIBERATE sight-acquisition delay (CBT-M5:
-// a bot must hold LOS for acquireDelay before its FIRST shot). Cook/carve are pure optimizations → never moved.
-const GOLD_AI = 3871970713;
+// a bot must hold LOS for acquireDelay before its FIRST shot), then again for CBT-M7 (spawn positions jittered off
+// the perfect even ring — ONLY x/z moved; cd/gcd/seed/orbit and the rng stream are byte-identical, proven).
+// Cook/carve are pure optimizations → never moved.
+const GOLD_AI = 306083037;
 const GOLD_COOK = 3326779269;
 const GOLD_CARVE = 683759392;
 

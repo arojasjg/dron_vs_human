@@ -77,6 +77,18 @@ export function waveSize(wave: number, base = 5, cap = 60): number {
   return Math.min(cap, Math.ceil(base * Math.pow(1.6, Math.max(0, wave))));
 }
 
+/** Jittered spawn position on the wave ring: the even-ring base angle (i/n·2π + wave) nudged by up to
+ *  ~±70% of the inter-bot half-spacing, and the radius by ±15%, both derived DETERMINISTICALLY from the
+ *  bot's own `seed` ([0,1)) — so no extra rng draw is consumed (the stream stays byte-identical). Pure. */
+export function spawnRingPos(cx: number, cz: number, i: number, n: number, wave: number, radius: number, seed: number): { x: number; z: number } {
+  const base = (i / n) * Math.PI * 2 + wave;
+  const angJit = (seed - 0.5) * (Math.PI / Math.max(1, n)) * 1.4;      // ≤ ~70% of the half-spacing → no overlap/gaps
+  const radFrac = ((seed * 101.7) % 1);                                 // a second [0,1) value decorrelated from seed
+  const r = radius * (1 + (radFrac - 0.5) * 0.30);                      // ±15% radius
+  const a = base + angJit;
+  return { x: cx + Math.cos(a) * r, z: cz + Math.sin(a) * r };
+}
+
 export type Difficulty = "easy" | "normal" | "hard";
 /** Swarm difficulty as a single multiplier (>1 harder): scales wave size, speed, fire rate, accuracy, damage.
  *  normal = 1 → byte-identical to the untiered swarm. Pure. */
@@ -351,13 +363,14 @@ export class AiSwarm {
     const n = Math.max(1, Math.round(waveSize(w) * this.difficulty));
     const bonus = hpBonus(w);
     for (let i = 0; i < n; i++) {
-      const a = (i / n) * Math.PI * 2 + w;
       const kind = pickKind(rng, w);
       const st = ARCHETYPES[kind];
       const hp = st.hp + bonus;
+      const cd = rng() * st.fireCd, gcd = rng() * this.GREN_CD, seed = rng(), orbit = rng() < 0.5 ? 1 : -1;
+      const p = spawnRingPos(cx, cz, i, n, w, radius, seed); // CBT-M7: jitter spawn off the perfect ring (from seed, no extra rng draw)
       this.bots.set(this.nextId, {
-        id: this.nextId, x: cx + Math.cos(a) * radius, y: y + st.high * 0.5, z: cz + Math.sin(a) * radius,
-        hp, maxHp: hp, cd: rng() * st.fireCd, gcd: rng() * this.GREN_CD, kind, seed: rng(), orbit: rng() < 0.5 ? 1 : -1,
+        id: this.nextId, x: p.x, y: y + st.high * 0.5, z: p.z,
+        hp, maxHp: hp, cd, gcd, kind, seed, orbit,
         lsx: cx, lsz: cz, lsT: -1, ba: 0, bt: -1, fx: 0, fz: 0, okx: 0, okz: 0, oky: 0, okT: -1, stun: 0, sacq: 0,
       });
       this.nextId++;
