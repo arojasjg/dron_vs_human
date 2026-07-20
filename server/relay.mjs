@@ -7,6 +7,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join, extname, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isReservedRelayType } from "./relayGuards.mjs";
 
 const PORT = Number(process.env.PORT) || 8787;
 const DIST = fileURLToPath(new URL("../dist", import.meta.url));
@@ -65,6 +66,7 @@ wss.on("connection", (ws, req) => {
   ws.on("message", (data) => {
     let msg;
     try { msg = JSON.parse(typeof data === "string" ? data : data.toString()); } catch { return; }
+    if (!msg || typeof msg !== "object" || isReservedRelayType(msg.t)) return; // drop garbage + forged relay-control messages
     msg.id = id; // stamp the sender so peers know who it's from
     broadcast(room, ws, JSON.stringify(msg));
   });
