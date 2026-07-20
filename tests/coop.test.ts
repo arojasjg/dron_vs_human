@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { respawnDelay, allDead, wallBlocks, smokeOccludes, perimeterSpawn, playerSpawn, cardinalSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, BANDAGE_DUR, canBeginMatch, beginAddressedToMe, type SmokeCloud } from "../src/net/coop";
+import { respawnDelay, spawnProtected, allDead, wallBlocks, smokeOccludes, perimeterSpawn, playerSpawn, cardinalSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, BANDAGE_DUR, canBeginMatch, beginAddressedToMe, type SmokeCloud } from "../src/net/coop";
 
 const VOX = 0.25;
 // mirror of PLAY_BOUNDS for the current-map extent (city 513×594 vox + 48-vox forest margin) so we can assert
@@ -162,6 +162,18 @@ describe("co-op survival rules (pure)", () => {
     expect(s.cx).toBeCloseTo(cityHalfX, 5);          // centred on the city
     expect(s.cz).toBeCloseTo(cityHalfZ, 5);
     expect(s.r).toBeGreaterThan(Math.max(cityHalfX, cityHalfZ)); // ring is beyond the city → outside
+  });
+});
+
+describe("spawnProtected — post-spawn invulnerability window (pure)", () => {
+  it("is protected before the window expires, not at or after it", () => {
+    expect(spawnProtected(1, 3)).toBe(true);   // before → protected
+    expect(spawnProtected(3, 3)).toBe(false);  // boundary: not protected AT the expiry
+    expect(spawnProtected(4, 3)).toBe(false);  // after → vulnerable
+  });
+
+  it("no window set (until 0) → never protected", () => {
+    expect(spawnProtected(0, 0)).toBe(false);
   });
 });
 

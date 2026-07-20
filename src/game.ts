@@ -45,7 +45,7 @@ import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, buildScoreboard, mvp, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, difficultyMul, type Difficulty, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
-import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
+import { respawnDelay, spawnProtected, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
 import { WEAPONS, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, hitZone, HEADSHOT_MULT, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
@@ -304,6 +304,8 @@ export class Game {
   private netSent = 0;       // diagnostic: count of state messages sent
   private lastState: NetMsg | null = null; // last state sent — re-emitted by the background heartbeat
   private respawnAt = 0;     // when dead, time to respawn
+  private spawnProtectedUntil = 0; // brief post-spawn invulnerability (combat modes) — breaks the instant you fire
+  private static readonly SPAWN_PROTECT = 2.0; // seconds of spawn protection
 
   private readonly tmpDir = new THREE.Vector3();
   private readonly tmpMuzzle = new THREE.Vector3(); // reused: viewmodel barrel-tip world pos for the muzzle flash
@@ -1471,6 +1473,7 @@ export class Game {
    *  each client and broadcast via the periodic state message, so health stays consistent. */
   private damageDrone(amount: number, srcX?: number, srcZ?: number): void {
     if (this.hp <= 0) return;
+    if (spawnProtected(this.time, this.spawnProtectedUntil)) return; // invulnerable in the spawn window
     // the heavy soldier carries an armored riot shield → 40% damage reduction (combat modes only)
     const shielded = this.role === "human" && this.myClass === "heavy" && (this.mode === "dvh" || this.mode === "vs" || this.mode === "coop");
     const dmg = shielded ? amount * 0.6 : amount;
@@ -2004,6 +2007,8 @@ export class Game {
     const slots = MAP_SIZES[this.mapSize].players;
     const s = playerSpawn(CITY_VOX.x1, CITY_VOX.z1, VOXEL, team, Math.max(0, this.net.id - 1), slots);
     this.player.spawn(s.x, s.y, s.z, s.yaw);
+    // spawn protection guards a fresh spawn against instant re-death / camping — combat modes only (no PvP in sandbox)
+    if (this.mode !== "free") { this.spawnProtectedUntil = this.time + Game.SPAWN_PROTECT; this.hud.flash("🛡 Protegido 2s"); }
   }
 
   /** Auto-balanced team for a player who didn't pick one: split by JOIN ORDER in the roster (even index →
@@ -2483,6 +2488,7 @@ export class Game {
     if (!res.fired) { this.hud.flash("Sin munición — recarga en tu base"); this.audio.emptyClick(); return; }
     this.ammo[this.weapon] = res.ammo;
     this.weaponReadyAt = this.time + spec.cooldown;
+    this.spawnProtectedUntil = 0; // firing = you've acted → spawn protection ends (anti-exploit)
     const w = roleWeapon(this.role);
     switch (spec.fire) {
       case "bullet": {
@@ -2553,6 +2559,7 @@ export class Game {
   private meleeAttack(): void {
     if (!(this.player instanceof Walker) || this.hp <= 0 || this.time < this.meleeReadyAt) return;
     this.meleeReadyAt = this.time + 0.7;
+    this.spawnProtectedUntil = 0; // melee deals damage → attacking ends spawn protection (anti-exploit)
     this.audio.melee();
     const o = this.player.camera.position, d = this.player.forward(this.tmpDir).clone();
     if (this.net.connected) {

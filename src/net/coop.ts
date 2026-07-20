@@ -12,6 +12,9 @@ export function respawnDelay(deaths: number): number {
   return 10 + Math.max(0, deaths - 1) * 5;
 }
 
+/** True while a just-spawned player is still within their protection window. Pure. */
+export function spawnProtected(now: number, until: number): boolean { return now < until; }
+
 /** Team wipe: true when there is at least one player and EVERY player's hp is ≤ 0. Pure. */
 export function allDead(hps: readonly number[]): boolean {
   return hps.length > 0 && hps.every((h) => h <= 0);
