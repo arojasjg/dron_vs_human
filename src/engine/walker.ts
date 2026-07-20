@@ -203,7 +203,9 @@ export class Walker {
     if (this.climbing) { this.updateClimb(dt); return; } // mid-vault: all movement input ignored
     // start a window vault: grounded, pushing forward, and a glassless window right ahead
     const g = this.grid;
-    if (g && this.grounded && this.climbCooldown <= 0 && input.isDown("keyw")) {
+    // no movement/actions while the pointer is unlocked — a menu/panel is open
+    const canAct = input.locked;
+    if (g && canAct && this.grounded && this.climbCooldown <= 0 && input.isDown("keyw")) {
       const c = this.body.translation();
       const t = windowVault((x, y, z) => g.has(x, y, z), c.x, c.y - FEET, c.z, Math.sin(this.yaw), Math.cos(this.yaw));
       if (t) {
@@ -217,22 +219,24 @@ export class Walker {
     const fx = Math.sin(this.yaw), fz = Math.cos(this.yaw);   // horizontal forward
     const rx = -Math.cos(this.yaw), rz = Math.sin(this.yaw);  // horizontal right
     let dx = 0, dz = 0;
-    if (input.isDown("keyw")) { dx += fx; dz += fz; }
-    if (input.isDown("keys")) { dx -= fx; dz -= fz; }
-    if (input.isDown("keyd")) { dx += rx; dz += rz; }
-    if (input.isDown("keya")) { dx -= rx; dz -= rz; }
+    if (canAct) {
+      if (input.isDown("keyw")) { dx += fx; dz += fz; }
+      if (input.isDown("keys")) { dx -= fx; dz -= fz; }
+      if (input.isDown("keyd")) { dx += rx; dz += rz; }
+      if (input.isDown("keya")) { dx -= rx; dz -= rz; }
+    }
     // stance: Z toggles prone, holding Ctrl crouches; each lowers the eye + slows movement
-    const proneKey = input.isDown("keyz");
+    const proneKey = canAct && input.isDown("keyz");
     if (proneKey && !this.proneWasDown) this.prone = !this.prone;
     this.proneWasDown = proneKey;
-    const crouch = input.isDown("keyc"); // crouch (C — Ctrl would fire browser Ctrl+W/Ctrl+digit)
+    const crouch = canAct && input.isDown("keyc"); // crouch (C — Ctrl would fire browser Ctrl+W/Ctrl+digit)
     this.stance = this.prone ? 2 : crouch ? 1 : 0;
     const si = stanceInfo(this.stance);
 
     const len = Math.hypot(dx, dz);
     const adsSlow = this.adsFov != null ? 0.55 : 1; // scoped in → move slower (steady the shot)
     // sprint gated by stamina: drains while actually running, regenerates otherwise; empty → forced walk until recovered
-    const wantSprint = input.isDown("shiftleft") || input.isDown("shiftright");
+    const wantSprint = canAct && (input.isDown("shiftleft") || input.isDown("shiftright"));
     const sprinting = wantSprint && len > 1e-4 && !this.exhausted && this.stamina > 0;
     if (sprinting) { this.stamina = Math.max(0, this.stamina - STAM_DRAIN * dt); if (this.stamina === 0) this.exhausted = true; }
     else { this.stamina = Math.min(1, this.stamina + STAM_REGEN * dt); if (this.exhausted && this.stamina >= STAM_RECOVER) this.exhausted = false; }
@@ -240,7 +244,7 @@ export class Walker {
     const vx = len > 1e-4 ? (dx / len) * speed : 0;
     const vz = len > 1e-4 ? (dz / len) * speed : 0;
 
-    this.move(dt, vx, vz, input.isDown("space"));
+    this.move(dt, vx, vz, canAct && input.isDown("space"));
 
     const p = this.body.translation();
     // ease the camera's HEIGHT toward the body so descending the stepped stairs glides instead of

@@ -9,7 +9,7 @@ beforeAll(async () => { await RAPIER.init(); });
 const box = (w: RAPIER.World, hx: number, hy: number, hz: number, x: number, y: number, z: number) =>
   w.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z));
 const mockInput = (walk: boolean): Input =>
-  ({ locked: false, consumeMouseDelta: () => ({ x: 0, y: 0 }), isDown: (c: string) => walk && c === "keyw" } as unknown as Input);
+  ({ locked: true, consumeMouseDelta: () => ({ x: 0, y: 0 }), isDown: (c: string) => walk && c === "keyw" } as unknown as Input);
 
 describe("walker descent — smooth camera, no false fall", () => {
   it("the camera glides down the stairs while the body steps, and no fall is registered", () => {

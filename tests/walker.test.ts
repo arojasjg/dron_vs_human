@@ -102,7 +102,7 @@ describe("Walker — gravity, collision, stairs", () => {
 
 describe("Walker — per-class movement mods (setClassMods)", () => {
   // a held-forward input at run speed, so update() drives the class-scaled speed
-  const fwd = { locked: false, consumeMouseDelta: () => ({ x: 0, y: 0 }), isDown: (k: string) => k === "keyw" } as unknown as Input;
+  const fwd = { locked: true, consumeMouseDelta: () => ({ x: 0, y: 0 }), isDown: (k: string) => k === "keyw" } as unknown as Input;
 
   it("a scout (higher speedMul) travels farther than a heavy (lower) over the same time", () => {
     const dist = (speedMul: number) => {
@@ -118,6 +118,19 @@ describe("Walker — per-class movement mods (setClassMods)", () => {
     const scout = dist(1.35), heavy = dist(0.70), base = dist(1.0);
     expect(scout).toBeGreaterThan(base);
     expect(base).toBeGreaterThan(heavy);
+  });
+
+  it("suppresses movement while the pointer is UNLOCKED (a menu/panel is open)", () => {
+    const fwdUnlocked = { locked: false, consumeMouseDelta: () => ({ x: 0, y: 0 }), isDown: (k: string) => k === "keyw" } as unknown as Input;
+    const physics = new Physics();
+    physics.wind.x = 0; physics.wind.y = 0; physics.wind.z = 0;
+    physics.world.createCollider(RAPIER.ColliderDesc.cuboid(60, 0.5, 60).setTranslation(0, -0.5, 0));
+    const w = new Walker(physics);
+    w.spawn(0, 0.85, 0);
+    const p0 = w.position;
+    for (let i = 0; i < 120; i++) { w.update(1 / 60, fwdUnlocked); physics.world.step(); }
+    const p = w.position;
+    expect(Math.hypot(p.x - p0.x, p.z - p0.z)).toBeLessThan(0.05);
   });
 
   it("jumpMul scales the jump; the default (1) still clears the 0.3 m bar", () => {

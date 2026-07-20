@@ -9,7 +9,7 @@ import type { Input } from "../src/engine/input";
 beforeAll(async () => { await RAPIER.init(); });
 
 const keyInput = (down: string): Input => ({
-  locked: false, consumeMouseDelta: () => ({ x: 0, y: 0 }), isDown: (c: string) => c === down,
+  locked: true, consumeMouseDelta: () => ({ x: 0, y: 0 }), isDown: (c: string) => c === down,
 } as unknown as Input);
 
 function scene() {
