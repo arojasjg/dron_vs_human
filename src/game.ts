@@ -42,7 +42,7 @@ import { BaseModels } from "./fx/baseModels";
 import { Viewmodel } from "./engine/viewmodel";
 import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
-import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, buildScoreboard, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
+import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, buildScoreboard, mvp, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, difficultyMul, type Difficulty, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
@@ -661,7 +661,8 @@ export class Game {
     this.matchOver = true;
     const wave = this.swarm?.wave ?? 0;
     this.hud.hideDeath();
-    this.hud.showGameOver(this.sessionKills, wave);
+    const rows = this.buildScoreRows();
+    this.hud.showGameOver(this.sessionKills, wave, rows, this.teamScoresNow(), mvp(rows));
     this.releaseCursor();
     this.audio.death(true);
     if (this.net.connected) this.net.send({ t: "coopover", k: this.sessionKills, w: wave });
@@ -1220,7 +1221,7 @@ export class Game {
       this.aiBots.delete(m.bot as number); this.remotes.remove(-(m.bot as number));
       this.droneDeathFx(m.x as number, m.y as number, m.z as number);
     } else if (m.t === "coopover") {
-      this.matchOver = true; this.hud.hideDeath(); this.hud.showGameOver(m.k as number, m.w as number); this.releaseCursor(); // host declared team-wipe
+      this.matchOver = true; this.hud.hideDeath(); const rows = this.buildScoreRows(); this.hud.showGameOver(m.k as number, m.w as number, rows, this.teamScoresNow(), mvp(rows)); this.releaseCursor(); // host declared team-wipe
     } else if (m.t === "needsync") {
       // a peer joined and asked for the world's destruction. If we have any, send our compact diff
       // (only real gameplay destruction, not window/door cuts) addressed to that joiner.
@@ -1366,7 +1367,7 @@ export class Game {
       ? { droneObjsAlive, humanObjsAlive, droneKills: this.droneKills, humanKills: this.humanKills }
       : killLimitOnlyState(this.droneKills, this.humanKills);
     const winner = checkWin(state, Game.KILL_LIMIT);
-    if (winner) { this.matchOver = true; this.hud.showWin(winner, this.role); this.releaseCursor(); }
+    if (winner) { const rows = this.buildScoreRows(); this.matchOver = true; this.hud.showWin(winner, this.role, rows, this.teamScoresNow(), mvp(rows)); this.releaseCursor(); }
   }
 
   /** Spawns a GHOST of a weapon a remote player fired — it flies for the visuals but never mutates
@@ -2748,16 +2749,25 @@ export class Game {
   /** Builds the TAB scoreboard from every peer PLUS the local player, sorts it (buildScoreboard) and paints
    *  it with each team's kill total. */
   private refreshScoreboard(): void {
+    this.hud.setScoreboard(buildScoreboard(this.buildScoreRows()), this.teamScoresNow(), true);
+  }
+
+  /** The roster rows (every peer PLUS the local player) — shared by the live TAB board and the results screen. */
+  private buildScoreRows(): ScoreRow[] {
     const rows: ScoreRow[] = this.remotes.peers().map((p) => ({
       id: p.id, team: p.team, isHuman: p.isHuman, kills: p.kills, assists: p.assists, deaths: p.deaths, you: false,
     }));
     rows.push({ id: this.net.id, team: this.myTeam, isHuman: this.role === "human", kills: this.myKills, assists: this.myAssists, deaths: this.myDeaths, you: true });
-    const teamScores = this.mode === "coop"
+    return rows;
+  }
+
+  /** Per-team totals for the current mode — shared by the live TAB board and the results screen. */
+  private teamScoresNow(): { label: string; score: number }[] {
+    return this.mode === "coop"
       ? [{ label: "🤖 Drones eliminados", score: this.sessionKills }] // co-op: one shared team total
       : this.mode === "dvh"
       ? [{ label: "🤖 Drones", score: this.droneKills }, { label: "🧍 Humanos", score: this.humanKills }]
       : [{ label: TEAM_LABEL[0], score: 0 }, { label: TEAM_LABEL[1], score: 0 }]; // vs: Rojo/Azul (droneKills/humanKills son dvh-only → no aplican)
-    this.hud.setScoreboard(buildScoreboard(rows), teamScores, true);
   }
 
   /** Our own bullet reached a voxel: broadcast the hit so every client applies the same grid change,

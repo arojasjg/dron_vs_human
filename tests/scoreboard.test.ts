@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildScoreboard, type ScoreRow } from "../src/net/roles";
+import { buildScoreboard, mvp, type ScoreRow } from "../src/net/roles";
 
 const row = (o: Partial<ScoreRow>): ScoreRow => ({
   id: 0, team: 0, isHuman: false, kills: 0, assists: 0, deaths: 0, you: false, ...o,
@@ -47,6 +47,47 @@ describe("buildScoreboard — grouping + stable sort", () => {
     const input = [row({ id: 1, team: 1 }), row({ id: 2, team: 0 })];
     const snapshot = input.map((r) => r.id);
     buildScoreboard(input);
+    expect(input.map((r) => r.id)).toEqual(snapshot);
+  });
+});
+
+describe("mvp — match most-valuable player", () => {
+  it("picks the most kills", () => {
+    const out = mvp([
+      row({ id: 1, kills: 2 }), row({ id: 2, kills: 7 }), row({ id: 3, kills: 5 }),
+    ]);
+    expect(out?.id).toBe(2);
+  });
+
+  it("breaks equal kills by assists-desc", () => {
+    const out = mvp([
+      row({ id: 1, kills: 4, assists: 1 }), row({ id: 2, kills: 4, assists: 6 }),
+    ]);
+    expect(out?.id).toBe(2);
+  });
+
+  it("breaks equal kills+assists by deaths-asc", () => {
+    const out = mvp([
+      row({ id: 1, kills: 4, assists: 2, deaths: 5 }), row({ id: 2, kills: 4, assists: 2, deaths: 1 }),
+    ]);
+    expect(out?.id).toBe(2);
+  });
+
+  it("breaks a full tie by id-asc", () => {
+    const out = mvp([
+      row({ id: 9, kills: 3, assists: 2, deaths: 1 }), row({ id: 4, kills: 3, assists: 2, deaths: 1 }),
+    ]);
+    expect(out?.id).toBe(4);
+  });
+
+  it("returns null for an empty roster", () => {
+    expect(mvp([])).toBeNull();
+  });
+
+  it("does not mutate the input array", () => {
+    const input = [row({ id: 1, kills: 1 }), row({ id: 2, kills: 9 }), row({ id: 3, kills: 3 })];
+    const snapshot = input.map((r) => r.id);
+    mvp(input);
     expect(input.map((r) => r.id)).toEqual(snapshot);
   });
 });

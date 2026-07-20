@@ -1,5 +1,5 @@
 import { MATERIALS, type MaterialId } from "../world/materials";
-import { classList, classStats, classLoadout, TEAM_LABEL, type Role, type ScoreRow } from "../net/roles";
+import { classList, classStats, classLoadout, buildScoreboard, TEAM_LABEL, type Role, type ScoreRow } from "../net/roles";
 import { WEAPONS, roleLoadout, type Weapon, type Ammo } from "../net/weapons";
 import { MAP_SIZES } from "../build/prefabs";
 import { ClassPreview } from "./classPreview";
@@ -304,9 +304,15 @@ export class Hud {
 
   /** Builds the game-over card: the result message + the two action buttons (🔄 replay / 🏠 menu), wired to
    *  the stored callbacks, and shows the overlay. Shared by the PvP win and co-op game-over screens. */
-  private renderGameOver(msg: string): void {
+  private renderGameOver(msg: string, rows?: ScoreRow[], teamScores?: { label: string; score: number }[], mvpRow?: ScoreRow | null): void {
+    // Final results (scoreboard + MVP) only when a roster is supplied — absent/empty → old message-only card.
+    const results = rows && rows.length
+      ? `<div class="wboard">${this.scoreboardHtml(buildScoreboard(rows), teamScores ?? [])}</div>` +
+        (mvpRow ? `<div class="wmvp">🏅 MVP: Jugador ${mvpRow.id}${mvpRow.you ? " (tú)" : ""} · ${mvpRow.kills} bajas</div>` : "")
+      : "";
     this.win.innerHTML =
       `<div class="wcard"><div class="wmsg">${msg}</div>` +
+      results +
       `<div class="wact">` +
       `<button id="hud-win-restart">🔄 Jugar de nuevo</button>` +
       `<button id="hud-win-menu">🏠 Menú</button>` +
@@ -318,10 +324,10 @@ export class Hud {
   }
 
   /** Match-over overlay for Drones vs Humans. */
-  showWin(winner: Role, myRole: Role): void {
+  showWin(winner: Role, myRole: Role, rows?: ScoreRow[], teamScores?: { label: string; score: number }[], mvpRow?: ScoreRow | null): void {
     const team = winner === "drone" ? "los Drones 🤖" : "los Humanos 🧍";
     const head = winner === myRole ? "🏆 ¡Victoria!" : "☠ Derrota";
-    this.renderGameOver(`${head}<br><span class="wsub">Ganaron ${team}</span>`);
+    this.renderGameOver(`${head}<br><span class="wsub">Ganaron ${team}</span>`, rows, teamScores, mvpRow);
   }
 
   hideWin(): void { this.win.style.display = "none"; this.refreshGear(); }
@@ -335,9 +341,9 @@ export class Hud {
   }
 
   /** Co-op session-over overlay (reuses the win overlay): final drones-killed + waves survived. */
-  showGameOver(kills: number, wave: number): void {
+  showGameOver(kills: number, wave: number, rows?: ScoreRow[], teamScores?: { label: string; score: number }[], mvpRow?: ScoreRow | null): void {
     this.renderGameOver(`☠ Fin de la partida<br>` +
-      `<span class="wsub">Drones eliminados: <b>${kills}</b> · Oleadas: <b>${Math.max(1, wave)}</b></span>`);
+      `<span class="wsub">Drones eliminados: <b>${kills}</b> · Oleadas: <b>${Math.max(1, wave)}</b></span>`, rows, teamScores, mvpRow);
   }
 
   setHealth(hp: number, max: number, show: boolean): void {
@@ -401,6 +407,13 @@ export class Hud {
    *  K/A/M row per player (the local one marked "tú"). `rows` come pre-sorted (buildScoreboard). */
   setScoreboard(rows: ScoreRow[], teamScores: { label: string; score: number }[], visible: boolean): void {
     if (!visible) { this.scoreboard.style.display = "none"; return; }
+    this.scoreboard.innerHTML = this.scoreboardHtml(rows, teamScores);
+    this.scoreboard.style.display = "block";
+  }
+
+  /** The scoreboard table markup (title + each team's header/score + a K/A/M row per player) — shared by the
+   *  live TAB overlay and the end-of-match results screen so both render identically. `rows` come pre-sorted. */
+  private scoreboardHtml(rows: ScoreRow[], teamScores: { label: string; score: number }[]): string {
     let html = "";
     let lastTeam: number | null = null;
     for (const r of rows) {
@@ -415,8 +428,7 @@ export class Hud {
       html += `<div class="sb-row${r.you ? " me" : ""}">${icon} Jugador ${r.id}${you} · ` +
         `<span class="sb-tag">K</span> ${r.kills} / <span class="sb-tag">A</span> ${r.assists} / <span class="sb-tag">M</span> ${r.deaths}</div>`;
     }
-    this.scoreboard.innerHTML = `<div class="sb-title">Marcador</div>${html}`;
-    this.scoreboard.style.display = "block";
+    return `<div class="sb-title">Marcador</div>${html}`;
   }
 
   /** Combat HUD: the current class + team badge next to the weapon bar (PvP). Empty label hides it. */
@@ -838,14 +850,14 @@ function inject(): void {
       min-width: 340px; max-height: 80vh; overflow-y: auto; padding: 18px 22px; font-variant-numeric: tabular-nums;
       background: linear-gradient(180deg, rgba(10,20,15,.94), rgba(5,11,8,.94)); border: 1px solid var(--edge);
       box-shadow: 0 20px 60px rgba(0,0,0,.6), inset 0 0 60px rgba(0,0,0,.4); }
-    #hud-scoreboard .sb-title { font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: var(--phos);
+    #hud-scoreboard .sb-title, #hud-win .sb-title { font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: var(--phos);
       text-align: center; margin-bottom: 12px; }
-    #hud-scoreboard .sb-head { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--phos-dim);
+    #hud-scoreboard .sb-head, #hud-win .sb-head { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--phos-dim);
       border-bottom: 1px solid var(--edge2); margin: 12px 0 5px; padding-bottom: 3px; }
-    #hud-scoreboard .sb-head b { color: var(--phos); }
-    #hud-scoreboard .sb-row { font-size: 12px; padding: 3px 0; color: var(--ink); white-space: nowrap; }
-    #hud-scoreboard .sb-row.me { color: var(--phos); }
-    #hud-scoreboard .sb-tag { color: var(--phos-dim); font-size: 9px; letter-spacing: .1em; }
+    #hud-scoreboard .sb-head b, #hud-win .sb-head b { color: var(--phos); }
+    #hud-scoreboard .sb-row, #hud-win .sb-row { font-size: 12px; padding: 3px 0; color: var(--ink); white-space: nowrap; }
+    #hud-scoreboard .sb-row.me, #hud-win .sb-row.me { color: var(--phos); }
+    #hud-scoreboard .sb-tag, #hud-win .sb-tag { color: var(--phos-dim); font-size: 9px; letter-spacing: .1em; }
     #hud-menu { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
       pointer-events: auto; backdrop-filter: blur(3px);
       background:
@@ -881,6 +893,12 @@ function inject(): void {
     #hud-win .wcard { display: flex; flex-direction: column; align-items: center; gap: 30px; }
     #hud-win .wmsg { line-height: 1.28; }
     #hud-win .wsub { font-size: 20px; font-weight: 400; }
+    #hud-win .wboard { font-family: var(--mono); font-weight: 400; font-size: 13px; letter-spacing: normal;
+      text-transform: none; text-shadow: none; text-align: left; min-width: 320px; padding: 4px 22px 10px;
+      background: linear-gradient(180deg, rgba(10,20,15,.8), rgba(5,11,8,.8)); border: 1px solid var(--edge);
+      max-height: 42vh; overflow-y: auto; font-variant-numeric: tabular-nums; }
+    #hud-win .wmvp { font-size: 16px; font-weight: 700; letter-spacing: .04em; text-transform: none;
+      color: var(--amber); text-shadow: 0 0 14px rgba(255,182,56,.4); }
     #hud-win .wact { display: flex; gap: 16px; }
     #hud-win .wact button { pointer-events: auto; cursor: pointer; font-family: var(--mono); font-size: 14px;
       font-weight: 700; letter-spacing: .12em; text-transform: uppercase; padding: 13px 26px; color: var(--ink);
