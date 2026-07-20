@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
-  loadSettings, saveSettings, autoSettings, clampViewDist, clampResScale,
-  DEFAULT_SETTINGS, VIEW_MIN, VIEW_MAX, RES_MIN_MANUAL, type VisualSettings,
+  loadSettings, saveSettings, autoSettings, clampViewDist, clampResScale, clampSensitivity,
+  DEFAULT_SETTINGS, VIEW_MIN, VIEW_MAX, RES_MIN_MANUAL, SENS_MIN, SENS_MAX, type VisualSettings,
 } from "../src/engine/settings";
 
 // node has no localStorage — install a minimal in-memory stand-in so save↔load can be exercised.
@@ -29,7 +29,7 @@ describe("visual settings — pure, validated model", () => {
   });
 
   it("round-trips a valid settings object through save → load", () => {
-    const s: VisualSettings = { quality: "alto", resAuto: false, resScale: 0.75, viewDist: 120 };
+    const s: VisualSettings = { quality: "alto", resAuto: false, resScale: 0.75, viewDist: 120, sensitivity: 2.5 };
     saveSettings(s);
     expect(loadSettings()).toEqual(s);
   });
@@ -54,13 +54,35 @@ describe("visual settings — pure, validated model", () => {
   });
 
   it("saveSettings keeps the legacy 'quality' key in sync (renderer reads it at boot)", () => {
-    saveSettings({ quality: "bajo", resAuto: true, resScale: 1, viewDist: 100 });
+    saveSettings({ quality: "bajo", resAuto: true, resScale: 1, viewDist: 100, sensitivity: 1 });
     expect(localStorage.getItem("quality")).toBe("bajo");
   });
 
   it("autoSettings detects the preset from the GPU string and hands resolution to Auto", () => {
-    expect(autoSettings("Google SwiftShader")).toEqual({ quality: "bajo", resAuto: true, resScale: 1, viewDist: DEFAULT_SETTINGS.viewDist });
+    expect(autoSettings("Google SwiftShader")).toEqual({ quality: "bajo", resAuto: true, resScale: 1, viewDist: DEFAULT_SETTINGS.viewDist, sensitivity: 1 });
     expect(autoSettings("NVIDIA GeForce RTX 4090").quality).toBe("medio");
     expect(autoSettings("anything").resAuto).toBe(true);
+  });
+
+  it("clamps sensitivity, rejects NaN → 1, and rounds to 2 decimals", () => {
+    expect(clampSensitivity(99)).toBe(SENS_MAX);   // above max → max
+    expect(clampSensitivity(0.01)).toBe(SENS_MIN); // below min → min
+    expect(clampSensitivity(NaN)).toBe(1);         // garbage → 1 (the invariant default)
+    expect(clampSensitivity(1.239)).toBe(1.24);    // rounded to 2 decimals
+    expect(clampSensitivity(1)).toBe(1);           // 1 stays 1 → look byte-identical
+  });
+
+  it("INVARIANT: default sensitivity is 1 so the look is unchanged for a player who never touches it", () => {
+    expect(DEFAULT_SETTINGS.sensitivity).toBe(1);
+    expect(autoSettings("anything").sensitivity).toBe(1);
+  });
+
+  it("round-trips sensitivity through save → load, and defaults to 1 when absent / garbage", () => {
+    saveSettings({ quality: "medio", resAuto: true, resScale: 1, viewDist: 100, sensitivity: 3.2 });
+    expect(loadSettings().sensitivity).toBe(3.2);
+    localStorage.setItem("visualSettings", JSON.stringify({ quality: "medio" })); // no sensitivity field
+    expect(loadSettings().sensitivity).toBe(1);
+    localStorage.setItem("visualSettings", JSON.stringify({ sensitivity: "fast" })); // garbage → 1
+    expect(loadSettings().sensitivity).toBe(1);
   });
 });

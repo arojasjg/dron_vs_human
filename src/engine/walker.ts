@@ -4,6 +4,7 @@ import { GRAVITY } from "../config";
 import type { Physics } from "./physics";
 import type { Input } from "./input";
 import { headBob, HUMAN_FOV } from "./cameraFeel";
+import { lookSens } from "./settings";
 import { stanceInfo, type Stance } from "../net/humanPose";
 import { windowVault } from "../net/windowVault";
 import type { VoxelGrid } from "../world/voxelGrid";
@@ -191,7 +192,7 @@ export class Walker {
       // aiming a scope STEADIES the look: sensitivity scales with the optical zoom (the scope circle
       // magnifies, so a small turn moves a lot inside it). The main camera FOV is left UNCHANGED — the
       // zoom is a separate circular scope render (renderer.renderScope), so the periphery stays 1×.
-      const sens = SENS * ((this.adsFov ?? HUMAN_FOV) / HUMAN_FOV);
+      const sens = SENS * ((this.adsFov ?? HUMAN_FOV) / HUMAN_FOV) * lookSens.value; // ×player sensitivity
       this.yaw -= d.x * sens;
       this.pitch -= d.y * sens;
       const lim = Math.PI / 2 - 0.02;

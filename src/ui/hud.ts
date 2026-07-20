@@ -55,6 +55,7 @@ export interface SettingsCallbacks {
   setResAuto: (on: boolean) => void;
   setResScale: (scale: number) => void;
   setViewDist: (metres: number) => void;
+  setSensitivity: (mult: number) => void;
   auto: () => VisualSettings;
 }
 
@@ -616,16 +617,20 @@ export class Hud {
     const resVal = $<HTMLElement>("set-res-val");
     const view = $<HTMLInputElement>("set-view");
     const viewVal = $<HTMLElement>("set-view-val");
+    const sens = $<HTMLInputElement>("set-sens");
+    const sensVal = $<HTMLElement>("set-sens-val");
 
     const paintQ = (q: string) => qbtns.forEach((b) => b.classList.toggle("on", b.dataset.q === q));
     const paintRes = () => { res.disabled = auto.checked; resVal.textContent = auto.checked ? "Auto" : `${res.value}%`; };
     const paintView = () => { viewVal.textContent = `${view.value} m`; };
+    const paintSens = () => { sensVal.textContent = `${(+sens.value).toFixed(1)}×`; };
     const paintAll = (v: VisualSettings) => {
       paintQ(v.quality);
       auto.checked = v.resAuto;
       res.value = String(Math.round(v.resScale * 100));
       view.value = String(v.viewDist);
-      paintRes(); paintView();
+      sens.value = String(v.sensitivity);
+      paintRes(); paintView(); paintSens();
     };
     paintAll(s);
 
@@ -633,6 +638,7 @@ export class Hud {
     auto.onchange = () => { cb.setResAuto(auto.checked); paintRes(); };
     res.oninput = () => { auto.checked = false; cb.setResScale(+res.value / 100); paintRes(); };
     view.oninput = () => { cb.setViewDist(+view.value); paintView(); };
+    sens.oninput = () => { cb.setSensitivity(+sens.value); paintSens(); };
     $<HTMLButtonElement>("set-auto").onclick = () => paintAll(cb.auto());
     $<HTMLButtonElement>("set-close").onclick = () => this.hideSettings();
     $<HTMLElement>("hud-settings").style.display = "flex";
@@ -1089,6 +1095,8 @@ function inject(): void {
         <input type="range" id="set-res" class="srange" min="50" max="100" step="5" />
         <div class="srow"><span class="slabel">Distancia de vista <b id="set-view-val"></b></span></div>
         <input type="range" id="set-view" class="srange" min="50" max="160" step="10" />
+        <div class="srow"><span class="slabel">Sensibilidad del ratón <b id="set-sens-val"></b></span></div>
+        <input type="range" id="set-sens" class="srange" min="0.2" max="4" step="0.1" />
         <div class="sactions">
           <button id="set-auto" class="sprimary">🔍 Automático</button>
           <button id="set-close">Cerrar</button>

@@ -3,6 +3,7 @@ import * as THREE from "three";
 import type { Physics } from "./physics";
 import type { Input } from "./input";
 import { droneBank, hoverSway, speedFov, DRONE_FOV_BASE, DRONE_FOV_BOOST } from "./cameraFeel";
+import { lookSens } from "./settings";
 
 const SENS = 0.0022;
 const CRUISE = 18.0;       // m/s normal flight speed
@@ -106,8 +107,8 @@ export class Player {
   update(dt: number, input: Input): void {
     if (input.locked) {
       const d = input.consumeMouseDelta();
-      this.yaw -= d.x * SENS;
-      this.pitch -= d.y * SENS;
+      this.yaw -= d.x * SENS * lookSens.value;   // player-set sensitivity multiplier (1 = base)
+      this.pitch -= d.y * SENS * lookSens.value;
       const lim = Math.PI / 2 - 0.02;
       this.pitch = Math.max(-lim, Math.min(lim, this.pitch));
     }
