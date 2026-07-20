@@ -610,6 +610,26 @@ describe("enemy AI — building entry (openingSeek + break requests)", () => {
   });
 });
 
+describe("enemy AI — roof un-stranding (roofEdgeDir wired into the step loop)", () => {
+  it("a perceived-but-blind bot stranded ON a roof steers to the edge and DROPS OFF instead of idling on top", () => {
+    const s = new AiSwarm();
+    s.spawnWave(15, 5, 0, 17, () => 0.6);
+    const solid = (x: number, y: number, z: number) => x >= 0 && x <= 30 && z >= 0 && z <= 30 && y >= 0 && y <= 15;
+    for (const extra of s.list.slice(1)) s.damageBot(extra.id, 1e6);
+    expect(s.list.length).toBe(1);
+    const b = s.list[0];
+    b.x = 15; b.z = 5; b.y = 17;
+    const noises = [{ x: 15, z: 13, loud: 100 }];
+    let escaped = false;
+    for (let i = 0; i < 80; i++) {
+      s.tick(0.05, [{ id: 7, x: 15, y: 1, z: 13 }], () => false, () => 0.5, undefined, undefined, solid, noises);
+      if ((b.x < 0 || b.x > 30 || b.z < 0 || b.z > 30) && b.y < 8) escaped = true;
+    }
+    expect(escaped).toBe(true);                   // walked past a roof EDGE and dropped well below the roof top (15)
+    expect(roofEdgeDir(33, 17, 5, -1, 0, solid)).toBeNull(); // open air beside the building → the gate never fires
+  });
+});
+
 describe("enemy AI — EMP stun (crowd control)", () => {
   it("stunBots disables bots in radius; a stunned bot does not move or fire", () => {
     const s = new AiSwarm();

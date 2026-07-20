@@ -556,6 +556,11 @@ export class AiSwarm {
           breaks.push({ id: b.id, x: b.x + gfx * 0.9, y: ENTRY_Y, z: b.z + gfz * 0.9, dx: gfx, dz: gfz }); // shatter the window at door height
         }
       }
+      // roof-stranded (solid column below blocks the normal descent) → steer to the nearest roof edge so it drops off
+      if (wantEntry && !seekingOpening) {
+        const edge = roofEdgeDir(b.x, b.y, b.z, gdx, gdz, solid);
+        if (edge) { mvx = edge[0] * 0.95; mvz = edge[1] * 0.95; }
+      }
 
       if (aimedAt) { mvx += ox * 1.2; mvz += oz * 1.2; }   // DODGE when the crosshair is on us
 
