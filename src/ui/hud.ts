@@ -11,6 +11,10 @@ import { toRadar, compassMarks } from "./radar";
 export interface RadarBlip { x: number; z: number; enemy: boolean; }
 export interface RadarShot { x: number; z: number; dx: number; dz: number; life: number; }
 
+/** Dev/perf overlays (the on-screen stats panel + the GPU-demo link) show only when the URL has `?perf`.
+ *  Pure so it unit-tests. Pass `location.search`. */
+export function devOverlaysEnabled(search: string): boolean { return new URLSearchParams(search).has("perf"); }
+
 export type Tool = "shoot" | "grenade" | "cannon" | "missile" | "build" | "erase";
 // Selectable modes: "coop" (soldiers vs an AI drone swarm) and "dvh" (PvP, drone vs human). "vs"/"free" remain
 // as dormant internal values (no menu entry) so the sandbox/deathmatch code compiles without a risky rip-out.
@@ -148,6 +152,11 @@ export class Hud {
     this.minimap = document.getElementById("hud-minimap") as HTMLCanvasElement;
     this.help.innerHTML = HELP;
     this.help.style.display = "none"; // hidden by default (uncluttered view); H toggles it back on
+    // Dev artifacts (stats panel + GPU-demo link) stay hidden unless the URL carries ?perf — so normal play looks finished
+    if (devOverlaysEnabled(typeof location !== "undefined" ? location.search : "")) {
+      this.stats.style.display = "block";
+      document.getElementById("gpu-link")?.style.removeProperty("display");
+    }
   }
 
   /** Draws the HEADING-UP minimap: a radar disc with the player at the centre (arrow = ahead), friends
@@ -694,7 +703,7 @@ function inject(): void {
     #hud-help { top: 14px; left: 14px; max-width: 366px; }
     #hud-help hr { border: none; border-top: 1px solid var(--edge2); margin: 7px 0; }
     #hud-help b { color: var(--phos); font-weight: 700; }
-    #hud-stats { top: 14px; right: 14px; font-variant-numeric: tabular-nums; color: var(--muted); letter-spacing: .06em; }
+    #hud-stats { display: none; top: 14px; right: 14px; font-variant-numeric: tabular-nums; color: var(--muted); letter-spacing: .06em; }
     #hud-bottom { bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 16px; align-items: center; }
     #hud-bottom .tag { color: var(--phos-dim); font-size: 10px; text-transform: uppercase; letter-spacing: .16em; }
     #hud .sw { display: inline-block; width: 12px; height: 12px; margin-right: 6px;
