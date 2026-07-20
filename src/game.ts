@@ -1179,6 +1179,9 @@ export class Game {
       // where a late joiner sees a building standing that everyone else already collapsed).
       this.net.send({ t: "needsync" });
     } else if (m.t === "join") {
+      // A peer connected. If WE are the host and still in the LOBBY, re-announce our lobby so the newcomer learns
+      // the room's MODE + map (else their coop default sticks and their `lobby` echo would even flip us — see below).
+      if (this.phase === "lobby" && this.net.id === (hostOf(this.lobby) ?? this.net.id)) this.broadcastLobby();
       // A peer connected mid-match. If WE are the host and a match is live, replay `begin` DIRECTED at them
       // so they enter the running match instead of being stranded in the lobby; their beginMatch then fires
       // needsync → gridsync to reconcile our destruction. (Older relay peers already ignore an unknown `join`.)
@@ -1187,11 +1190,15 @@ export class Game {
     } else if (m.t === "lobby") {
       if (this.phase !== "lobby") return;
       this.lobby = m.role ? applyPick(this.lobby, m.id as number, m.role as Role) : applyJoin(this.lobby, m.id as number);
-      if (m.map && MAP_SIZES[m.map as MapSize]) this.pendingMapSize = m.map as MapSize; // joiner learns the room's map size
-      if (m.mode && this.pendingMode !== m.mode) { // joiner learned the room's mode from the host
-        this.pendingMode = m.mode as Mode;
-        if (m.mode === "coop") this.myRole = "human"; // co-op: everyone's a soldier
-        this.showLobbyUi();
+      // MODE + map are HOST-authoritative: only adopt them from the host (lowest id), NEVER from a joiner's coop
+      // default — otherwise a joiner's `lobby` echo flips the host's chosen Jugador-vs-Jugador back to Co-op.
+      if (m.id === hostOf(this.lobby)) {
+        if (m.map && MAP_SIZES[m.map as MapSize]) this.pendingMapSize = m.map as MapSize; // learn the room's map size
+        if (m.mode && this.pendingMode !== m.mode) {
+          this.pendingMode = m.mode as Mode;
+          if (m.mode === "coop") this.myRole = "human"; // co-op: everyone's a soldier
+          this.showLobbyUi();
+        }
       }
       this.refreshLobby();
     } else if (m.t === "begin") {
