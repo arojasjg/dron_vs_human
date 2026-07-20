@@ -24,6 +24,7 @@ export interface WeaponSpec {
   botDmg?: number;      // co-op: HP dealt to an AI bot per hitscan hit (default 1 — a bot has 3)
   bulletSpeed?: number; // tracer projectile speed (m/s, visual only — the hit is hitscan). Default 120
   boltAction?: boolean; // fires ONE round per trigger pull (no auto-fire while held) + a bolt-cycle reload sound
+  reloadTime?: number; // seconds a reload locks out firing (override; default derived in reloadDuration)
   spread?: { base: number; perShot: number; max: number; decay: number; adsMul: number }; // radians; decay rad/s; adsMul scales spread while scoped
 }
 
@@ -199,6 +200,17 @@ export function reloadMag(a: Ammo, magSize: number): { ammo: Ammo; lost: number 
   if (a.reserve <= 0) return { ammo: a, lost: 0 };          // nothing to swap to → keep the current mag
   const r = Math.min(magSize, a.reserve);
   return { ammo: { mag: r, reserve: a.reserve - r }, lost: a.mag }; // fresh mag; the old mag's `a.mag` rounds are gone
+}
+
+/** Seconds a reload locks out firing. Explicit `reloadTime` wins; else derived from the weapon class:
+ *  bolt-action racks slow, a huge belt (lmg) is slowest, a small shotgun tube is slow-ish, else brisk. Pure. */
+export function reloadDuration(spec: WeaponSpec): number {
+  if (spec.reloadTime != null) return spec.reloadTime;
+  if (spec.boltAction) return 2.4;
+  if (spec.magSize >= 90) return 3.2;   // lmg belt / laser cell
+  if (spec.magSize <= 8) return 2.4;    // shotgun tube
+  if (spec.magSize >= 30) return 1.8;   // smg / mg
+  return 2.0;                            // dmr and the rest
 }
 
 /** Full resupply (a full mag + a full reserve) — used both to init a weapon and to recharge at base. */

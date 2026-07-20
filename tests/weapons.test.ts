@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WEAPONS, roleLoadout, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff, aiHitDamage, aiShotDamage, botHitRange, TRACER_LIFE, spreadAngle, addBloom, decayBloom, coneSpread } from "../src/net/weapons";
+import { WEAPONS, roleLoadout, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, bulletFalloff, aiHitDamage, aiShotDamage, botHitRange, TRACER_LIFE, spreadAngle, addBloom, decayBloom, coneSpread } from "../src/net/weapons";
 import { roleMaxHp } from "../src/net/roles";
 
 describe("bullet range falloff + TTK intent", () => {
@@ -148,6 +148,36 @@ describe("ammo — limited, auto-reload, base-refilled", () => {
     function fullReloadNoWaste() {                            // reloading a FULL mag still costs the leftover if forced, but the UI gates it
       const full = reloadMag({ mag: 5, reserve: 0 }, 5);      // empty reserve → no-op, keep the mag
       return full.ammo.mag === 5 && full.lost === 0;
+    }
+  });
+});
+
+describe("reloadDuration — a reload takes TIME (firing locked out meanwhile)", () => {
+  it("bolt-action (sniper) racks slower than a default mag weapon (dmr)", () => {
+    expect(reloadDuration(WEAPONS.sniper)).toBeGreaterThan(reloadDuration(WEAPONS.dmr));
+  });
+
+  it("a huge belt/cell (lmg 100, laser 160) is the slowest tier", () => {
+    for (const w of ["mg", "smg", "dmr", "shotgun", "sniper"] as const) {
+      expect(reloadDuration(WEAPONS.lmg)).toBeGreaterThan(reloadDuration(WEAPONS[w]));
+    }
+    expect(reloadDuration(WEAPONS.laser)).toBe(reloadDuration(WEAPONS.lmg));
+  });
+
+  it("a small shotgun tube (mag 6) reloads slow-ish — at least as slow as an smg", () => {
+    expect(reloadDuration(WEAPONS.shotgun)).toBeGreaterThanOrEqual(reloadDuration(WEAPONS.smg));
+  });
+
+  it("an explicit reloadTime override is returned verbatim", () => {
+    expect(reloadDuration({ ...WEAPONS.mg, reloadTime: 0.7 })).toBe(0.7);
+    expect(reloadDuration({ ...WEAPONS.lmg, reloadTime: 5 })).toBe(5);
+  });
+
+  it("every spec — even a non-reloading tool — yields a positive finite duration (never 0/NaN)", () => {
+    for (const w of Object.keys(WEAPONS) as (keyof typeof WEAPONS)[]) {
+      const d = reloadDuration(WEAPONS[w]);
+      expect(Number.isFinite(d)).toBe(true);
+      expect(d).toBeGreaterThan(0);
     }
   });
 });

@@ -46,7 +46,7 @@ import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
-import { WEAPONS, tryFire, reloadMag, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, type Weapon, type Ammo } from "./net/weapons";
+import { WEAPONS, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, KEY_SPAN, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -168,6 +168,7 @@ export class Game {
   private readonly msFinMat = new THREE.MeshStandardMaterial({ color: 0x2e3236, roughness: 0.7, metalness: 0.4 });
   private readonly msGlowMat = new THREE.MeshBasicMaterial({ color: 0x7cffd0 }); // exhaust glow
   private weaponReadyAt = 0;      // shared per-shot cooldown gate
+  private reloadingUntil = 0;     // firing is locked out until this time (a reload is in progress)
   private bloom = 0;              // accumulated auto-fire spread (radians); grows per shot, decays between shots
   private lastBloomT = 0;         // when bloom was last decayed (lazy decay at the next shot)
   private firing = false;         // LMB held → auto-fire (machine gun) each frame at the weapon's rate
@@ -834,6 +835,7 @@ export class Game {
     this.lockId = -1; this.lockT = 0; this.hud.setLock(false, null);
     this.firing = false; this.ads = false;
     this.bloom = 0; this.lastBloomT = 0;
+    this.reloadingUntil = 0; // no reload lock carries into a fresh match
   }
 
   /** Missile lock-on: while the soldier holds the seeking-missile launcher, the drone kept inside the centre
@@ -1102,13 +1104,15 @@ export class Game {
    *  Otherwise (mag full, or nothing to load) it falls through to the frontal scanner. */
   private reloadOrScan(): void {
     if (this.mode === "free") { this.doScan(); return; }
+    if (this.time < this.reloadingUntil) return; // busy reloading → R does nothing (no re-reload, no scan)
     const spec = WEAPONS[this.weapon], cur = this.ammo[this.weapon];
     if (cur.mag < spec.magSize && cur.reserve > 0) {
       const r = reloadMag(cur, spec.magSize);
       this.ammo[this.weapon] = r.ammo;
+      this.reloadingUntil = this.time + reloadDuration(spec); // the swap takes TIME — firing locked meanwhile
       this.audio.place(); // mechanical mag-swap clunk (reuse the deploy sound)
       this.hud.setWeapon(this.role, this.weapon, r.ammo, classLoadout(this.role, this.myClass));
-      this.hud.flash(r.lost > 0 ? `🔄 Tolva cambiada · ${r.lost} balas perdidas` : "🔄 Recargado");
+      this.hud.flash(r.lost > 0 ? `🔄 Recargando · ${r.lost} balas perdidas` : "🔄 Recargando…");
       return;
     }
     this.doScan(); // nothing to reload → the scanner instead
@@ -1279,6 +1283,7 @@ export class Game {
     this.hp = this.myMaxHp(); // per-class max (heavy tank … scout fragile)
     this.weapon = classLoadout(this.role, this.myClass)[0]; // start on the class primary
     this.bloom = 0; // fresh weapon → no inherited spread bloom
+    this.reloadingUntil = 0; // class swap never inherits a reload lock
     this.viewmodel.setWeapon(this.weapon, this.role, this.myClass); // hold the class primary (soldiers only; drone → nothing)
     const mv = classMove(this.role, this.myClass);
     this.player.setClassMods(mv.speedMul, mv.jumpMul); // scout runs, heavy lumbers, interceptor screams
@@ -2413,10 +2418,19 @@ export class Game {
   private fireWeapon(origin: THREE.Vector3, dir: THREE.Vector3): void {
     const spec = WEAPONS[this.weapon];
     if (this.time < this.weaponReadyAt) return;
+    if (this.time < this.reloadingUntil) return; // reloading → locked out
     if (spec.fire === "turret" && this.turrets.length >= Game.MAX_TURRETS) { // cap active sentries BEFORE spending ammo
       this.hud.flash(`🗼 Máx. ${Game.MAX_TURRETS} torretas activas`); this.audio.emptyClick(); return;
     }
-    const res = tryFire(this.ammo[this.weapon], spec.magSize);
+    const cur = this.ammo[this.weapon];
+    if (cur.mag <= 0 && cur.reserve > 0) { // dry with reserve → START a timed reload instead of firing this frame
+      this.ammo[this.weapon] = reloadMag(cur, spec.magSize).ammo;
+      this.reloadingUntil = this.time + reloadDuration(spec);
+      this.audio.place(); this.hud.flash("🔄 Recargando…");
+      this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon], classLoadout(this.role, this.myClass));
+      return;
+    }
+    const res = tryFire(this.ammo[this.weapon], spec.magSize); // mag>0 draws a round; fully empty → not fired
     if (!res.fired) { this.hud.flash("Sin munición — recarga en tu base"); this.audio.emptyClick(); return; }
     this.ammo[this.weapon] = res.ammo;
     this.weaponReadyAt = this.time + spec.cooldown;
@@ -2504,6 +2518,7 @@ export class Game {
   private selectWeapon(w: Weapon): void {
     this.weapon = w;
     this.bloom = 0;     // spread bloom never carries over to the next weapon
+    this.reloadingUntil = 0; // switching weapons CANCELS the reload lock
     this.zoomLevel = 0; // a fresh weapon starts at its base zoom stop
     this.viewmodel.setWeapon(w, this.role, this.myClass); // swap the held model
     this.audio.weaponSwitch();
@@ -2590,6 +2605,7 @@ export class Game {
   /** Refill all weapons + battery (on respawn, and whenever standing in the base). */
   private resupply(): void {
     this.resupplyAmmo();
+    this.reloadingUntil = 0; // fresh mags everywhere → any in-progress reload is moot
     this.battery = BATTERY_MAX;
     this.bandages = BANDAGE_MAX; // bandages restock at the base + on respawn
   }
