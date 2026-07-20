@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WEAPONS, roleLoadout, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, hitZone, HEADSHOT_MULT, bulletFalloff, aiHitDamage, aiShotDamage, botHitRange, TRACER_LIFE, spreadAngle, addBloom, decayBloom, coneSpread } from "../src/net/weapons";
+import { WEAPONS, roleLoadout, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, hitZone, HEADSHOT_MULT, bulletFalloff, aiHitDamage, aiShotDamage, botHitRange, TRACER_LIFE, spreadAngle, addBloom, decayBloom, coneSpread, botHpFrac } from "../src/net/weapons";
 import { roleMaxHp } from "../src/net/roles";
 
 describe("bullet range falloff + TTK intent", () => {
@@ -376,5 +376,16 @@ describe("drone battery — drains with movement, fatal at 0", () => {
     expect(boostLife).toBeLessThan(idleLife);
     expect(boostLife).toBeGreaterThan(20);   // boosting non-stop still gives ~30 s of flight
     expect(idleLife).toBeGreaterThan(120);   // hovering lasts minutes
+  });
+});
+
+describe("botHpFrac — enemy health bar data", () => {
+  it("clamps hp/maxHp to 0..1 and treats bad maxHp as full", () => {
+    expect(botHpFrac(100, 100)).toBe(1);
+    expect(botHpFrac(50, 100)).toBe(0.5);
+    expect(botHpFrac(0, 100)).toBe(0);
+    expect(botHpFrac(150, 100)).toBe(1);
+    expect(botHpFrac(-5, 100)).toBe(0);
+    expect(botHpFrac(10, 0)).toBe(1);
   });
 });

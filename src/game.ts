@@ -46,7 +46,7 @@ import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, difficultyMul, type Difficulty, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, spawnProtected, wallBlocks, smokeOccludes, playerSpawn, safestSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
-import { WEAPONS, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, hitZone, HEADSHOT_MULT, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, type Weapon, type Ammo } from "./net/weapons";
+import { WEAPONS, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, hitZone, HEADSHOT_MULT, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, botHpFrac, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "./net/objectives";
 import { MATERIAL_ORDER, MATERIALS, type MaterialId } from "./world/materials";
 import { packKey, unpackKey, KEY_SPAN, VoxelGrid, type RayHit } from "./world/voxelGrid";
@@ -242,7 +242,7 @@ export class Game {
   private swarm: AiSwarm | null = null; // host-only enemy AI simulation
   private aiBcast = 0;                  // seconds until the next bot-transform broadcast
   private aiWaveGap = 0;                // countdown to the next wave once the swarm is cleared
-  private readonly aiBots = new Map<number, { x: number; y: number; z: number }>(); // last-known bot positions (for shooting them)
+  private readonly aiBots = new Map<number, { x: number; y: number; z: number; frac: number }>(); // last-known bot positions (for shooting them)
   private sessionKills = 0;     // co-op: drones the TEAM has killed this session (host-authoritative → HUD score)
   private coopHardcore = false; // co-op: permadeath (no respawns) vs respawn-while-a-teammate-lives
   private aiPrevX = 0; private aiPrevZ = 0; // host player XZ last frame → velocity estimate feeding the AI aim lead
@@ -638,13 +638,13 @@ export class Game {
       for (const g of booms) this.aiDetonate(g);                // kamikazes reach the target and self-destruct
       for (const g of breaks) this.aiBreakGlass(g);             // drones shatter a window to get inside
       this.aiBots.clear();
-      for (const b of s.list) this.aiBots.set(b.id, { x: b.x, y: b.y, z: b.z });
+      for (const b of s.list) this.aiBots.set(b.id, { x: b.x, y: b.y, z: b.z, frac: botHpFrac(b.hp, b.maxHp) });
       this.hud.setCoopScore(this.sessionKills, s.wave);
       this.checkTeamWipe(); // all players down → end the session
       this.aiBcast -= dt;
       if (this.aiBcast <= 0 && this.net.connected) {
         this.aiBcast = 0.07;
-        this.net.send({ t: "ai", b: s.list.map((b) => [b.id, +b.x.toFixed(2), +b.y.toFixed(2), +b.z.toFixed(2)]), k: this.sessionKills, w: s.wave });
+        this.net.send({ t: "ai", b: s.list.map((b) => [b.id, +b.x.toFixed(2), +b.y.toFixed(2), +b.z.toFixed(2), +botHpFrac(b.hp, b.maxHp).toFixed(3)]), k: this.sessionKills, w: s.wave });
       }
     }
     this.renderBots();
@@ -652,7 +652,7 @@ export class Game {
 
   /** Draws every known bot as a remote drone avatar under a synthetic NEGATIVE id (never collides with peers). */
   private renderBots(): void {
-    for (const [id, p] of this.aiBots) this.remotes.upsert(-id, p.x, p.y, p.z, 0, 0, 0, 1, 100, "drone", 100, 0, 0, 0);
+    for (const [id, p] of this.aiBots) this.remotes.upsert(-id, p.x, p.y, p.z, 0, 0, 0, 1, 100 * p.frac, "drone", 100, 0, 0, 0);
   }
 
   /** Host-only: end the co-op session the moment EVERY soldier (host + human peers) is down (team wipe). */
@@ -1204,7 +1204,7 @@ export class Game {
     } else if (m.t === "ai") {
       if (this.mode === "coop" && !this.hosting) { // peers render the host's swarm from its broadcast
         this.aiBots.clear();
-        for (const row of m.b as number[][]) this.aiBots.set(row[0], { x: row[1], y: row[2], z: row[3] });
+        for (const row of m.b as number[][]) this.aiBots.set(row[0], { x: row[1], y: row[2], z: row[3], frac: row[4] ?? 1 });
         this.sessionKills = (m.k as number) ?? this.sessionKills; // host-authoritative team score + wave
         this.hud.setCoopScore(this.sessionKills, (m.w as number) ?? 0);
       }

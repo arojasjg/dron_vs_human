@@ -241,3 +241,9 @@ const BATTERY_PER_MS = 0.08; // extra %/s per m/s of speed → the faster/more i
 export function batteryDrain(speed: number, dt: number): number {
   return (BATTERY_IDLE + Math.max(0, speed) * BATTERY_PER_MS) * dt;
 }
+
+export function botHpFrac(hp: number, maxHp: number): number {
+  if (!(maxHp > 0)) return 1;
+  const f = hp / maxHp;
+  return f < 0 ? 0 : f > 1 ? 1 : f;
+}
