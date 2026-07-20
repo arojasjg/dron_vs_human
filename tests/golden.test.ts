@@ -97,7 +97,7 @@ function carveGolden(): number {
 // then again for CBT-H7 (in-pocket orbit made EVASIVE — evadeStrafe modulates the tangent, a pure sin of seed+t;
 // ONLY positions move, no rng draw → aim/spawn streams byte-identical).
 // Cook/carve are pure optimizations → never moved.
-const GOLD_AI = 186377577;
+const GOLD_AI = 423831102;
 const GOLD_COOK = 3326779269;
 const GOLD_CARVE = 683759392;
 

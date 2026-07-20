@@ -69,6 +69,7 @@ const HEAL_AMT = 1;       // hp restored per heal pulse
 const HEAL_CD = 1.2;      // seconds between a support's heal pulses (reuses the grenade timer slot)
 const SEP_RADIUS = 5;     // anti-clumping: bots within this push apart (wide enough to break the ball-on-top pile-up)
 const AIM_COS = 0.965;    // how tightly the target's aim must point at a bot to trigger a dodge
+const ALT_JUKE = 2;       // meters of vertical bob so a flying bot isn't a fixed-height target
 
 // Spatial-hash cell + key, hoisted to module scope so tick() allocates no per-frame closures. The key
 // function and cell size are FROZEN: the swarm's separation sum (an order-dependent FP accumulation) is
@@ -143,6 +144,11 @@ export function jink(seed: number, t: number): number { return Math.sin(t * 2.3 
 /** Signed strafe factor (~[-1.5,1.5]) whose sign FLIPS and magnitude BURSTS over time → an evasive, direction-reversing juke instead of a constant circle. Seeded per bot, pure (no rng). */
 export function evadeStrafe(seed: number, t: number): number {
   return Math.sin(t * 1.7 + seed * 6.283) * (1 + 0.5 * Math.sin(t * 4.3 + seed * 3.14));
+}
+
+/** Vertical bob factor in [-1,1] (seeded per bot) so a flying bot rises/falls instead of holding a fixed height. Pure. */
+export function altitudeJuke(seed: number, t: number): number {
+  return Math.sin(t * 1.3 + seed * 6.283);
 }
 
 /** Aim direction that LEADS a moving target (predicts where it'll be when a `projSpeed` round arrives). Pure. */
@@ -596,7 +602,7 @@ export class AiSwarm {
       else if (wantEntry) wantY = ENTRY_Y;                // DROP to the door/window band to go IN — never onto the roof
       else {
         const highMul = b.kind === "diver" ? Math.max(0.15, Math.min(1, gDist / 25)) : 1; // dive by BELIEF range
-        wantY = eyeY + a.high * highMul;
+        wantY = eyeY + a.high * highMul + altitudeJuke(b.seed, this.t) * ALT_JUKE;
         if (!canSee && perceived && gDist > 28) wantY += 5; // rise to peek ONLY over a DISTANT wall — never one you're inside
       }
       if (seekingOpening) wantY = entryY;                 // drop to the door/window band to fly IN, not climb over

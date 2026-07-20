@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  seekDir, shouldFire, waveSize, spawnRingPos, pickTarget, orbitDir, jink, evadeStrafe, leadAim, spread,
+  seekDir, shouldFire, waveSize, spawnRingPos, pickTarget, orbitDir, jink, evadeStrafe, altitudeJuke, leadAim, spread,
   speedScale, fireCdScale, hpBonus, pickKind, ARCHETYPES, AiSwarm, shouldDrop, homingStep, type AiDrop, type AiKind,
   acquireDelay, type AiFire, type AiTarget,
   dmgScale, archDamage, difficultyMul,
@@ -107,6 +107,14 @@ describe("enemy AI — pure decision helpers", () => {
     expect(min).toBeLessThan(0); expect(max).toBeGreaterThan(0);     // swings through both signs → the strafe reverses
     expect(evadeStrafe(0.2, 1.3)).not.toBe(evadeStrafe(0.8, 1.3));   // distinct seeds → bots don't juke in sync
     expect(evadeStrafe(0.4, 2.5)).toBe(evadeStrafe(0.4, 2.5));       // pure → same (seed,t) repeats exactly
+  });
+
+  it("altitudeJuke rises AND falls (crosses zero), stays in [-1,1], is seed-distinct and deterministic", () => {
+    let min = Infinity, max = -Infinity;
+    for (let t = 0; t <= 8; t += 0.1) { const v = altitudeJuke(0.4, t); min = Math.min(min, v); max = Math.max(max, v); expect(Math.abs(v)).toBeLessThanOrEqual(1); }
+    expect(min).toBeLessThan(0); expect(max).toBeGreaterThan(0);     // both signs → the bot rises AND falls
+    expect(altitudeJuke(0.2, 1.3)).not.toBe(altitudeJuke(0.8, 1.3)); // distinct seeds → bots bob out of phase
+    expect(altitudeJuke(0.4, 2.5)).toBe(altitudeJuke(0.4, 2.5));     // pure → same (seed,t) repeats exactly
   });
 
   it("leadAim aims AHEAD of a moving target (and straight at a still one)", () => {
