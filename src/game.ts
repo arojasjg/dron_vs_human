@@ -2871,7 +2871,7 @@ export class Game {
       if (idx >= 0 && idx < lo.length) { this.selectWeapon(lo[idx]); return; }
       if (code === "keyv") { this.meleeAttack(); return; } // melee (humans)
       if (code === "keyr") { this.reloadOrScan(); return; } // R: reload the mag (tactical → wastes the partial) if useful, else 📡 scan
-      if (code === "keyh") { this.hud.toggleHelp(); return; }
+      if (code === "keyh") { this.hud.toggleHelp(true); return; }
       return;
     }
     switch (code) {
@@ -2894,7 +2894,7 @@ export class Game {
       case "keyj": this.throwCrate(); return; // (F is now the flashlight)
       case "keyp": this.save(); return;
       case "keyl": this.load(); return;
-      case "keyh": this.hud.toggleHelp(); return;
+      case "keyh": this.hud.toggleHelp(false); return;
       case "bracketleft": this.onWheel(1); return;
       case "bracketright": this.onWheel(-1); return;
     }

@@ -59,7 +59,7 @@ const TOOL_NAMES: Record<Tool, string> = {
   erase: "Borrar",
 };
 
-const HELP = `
+export const HELP = `
 <b>PARTICLES — FPS de destrucción</b>
 <hr>
 <b>Clic</b> en la pantalla para capturar el ratón · <b>Esc</b> suelta
@@ -70,6 +70,18 @@ const HELP = `
 <b>Q/E</b> material (incluye 🛢 tambo de gas — explota en cadena)
 <b>N</b> edificio &nbsp; <b>G</b> casa &nbsp; <b>U</b> muro &nbsp; <b>T</b> torre &nbsp; <b>V</b> auto &nbsp; <b>R</b> escena &nbsp; <b>X</b> vaciar
 <b>B</b> 💣 MEGA BOMBA (apuntá y explotá) &nbsp; <b>P</b> guardar &nbsp; <b>L</b> cargar &nbsp; <b>J</b> caja &nbsp; <b>K</b> calidad &nbsp; <b>O</b> ⚙ ajustes &nbsp; <b>M</b> silencio &nbsp; <b>H</b> ayuda
+`;
+
+export const HELP_COMBAT = `
+<b>PARTICLES — Combate</b>
+<hr>
+<b>Clic</b> en la pantalla para capturar el ratón · <b>Esc</b> suelta
+<b>WASD</b> moverse · <b>Espacio</b> subir/saltar · <b>C</b> agacharse/bajar · <b>Z</b> cuerpo a tierra · <b>Shift</b> esprint · <b>F</b> linterna
+<hr>
+<b>Clic izq</b> disparar &nbsp; <b>Clic der</b> apuntar (mira — armas con óptica)
+<b>1-6</b> tus armas &nbsp; <b>V</b> cuerpo a cuerpo &nbsp; <b>R</b> recargar / 📡 escanear
+<hr>
+<b>Tab</b> zoom minimapa &nbsp; <b>O</b> ⚙ ajustes &nbsp; <b>K</b> calidad &nbsp; <b>M</b> silencio &nbsp; <b>H</b> ayuda
 `;
 
 export class Hud {
@@ -624,8 +636,10 @@ export class Hud {
     this.stats.textContent = `${fps.toFixed(0)} fps · escombros ${debris} · viento ${wind.toFixed(1)}${perf}${gpu}`;
   }
 
-  toggleHelp(): void {
-    this.help.style.display = this.help.style.display === "none" ? "block" : "none";
+  toggleHelp(combat = false): void {
+    const showing = this.help.style.display === "none";
+    if (showing) this.help.innerHTML = combat ? HELP_COMBAT : HELP; // recompute each open so a mode change is reflected
+    this.help.style.display = showing ? "block" : "none";
   }
 
   flash(msg: string): void {
