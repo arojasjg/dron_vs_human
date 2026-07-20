@@ -15,6 +15,10 @@ export interface RadarShot { x: number; z: number; dx: number; dz: number; life:
  *  Pure so it unit-tests. Pass `location.search`. */
 export function devOverlaysEnabled(search: string): boolean { return new URLSearchParams(search).has("perf"); }
 
+/** A full-screen modal (menu / lobby / game-over) is up iff any of the given CSS display values is not
+ *  "none". The floating settings gear hides while one is up so it doesn't overlap the card. Pure. */
+export function anyModalOpen(...displays: string[]): boolean { return displays.some((d) => d !== "none" && d !== ""); }
+
 export type Tool = "shoot" | "grenade" | "cannon" | "missile" | "build" | "erase";
 // Selectable modes: "coop" (soldiers vs an AI drone swarm) and "dvh" (PvP, drone vs human). "vs"/"free" remain
 // as dormant internal values (no menu entry) so the sandbox/deathmatch code compiles without a risky rip-out.
@@ -306,6 +310,7 @@ export class Hud {
     (document.getElementById("hud-win-restart") as HTMLButtonElement).onclick = () => this.gameOverCb?.restart();
     (document.getElementById("hud-win-menu") as HTMLButtonElement).onclick = () => this.gameOverCb?.menu();
     this.win.style.display = "flex";
+    this.refreshGear(); // game-over card up → hide the gear (covers showWin + showGameOver)
   }
 
   /** Match-over overlay for Drones vs Humans. */
@@ -315,7 +320,7 @@ export class Hud {
     this.renderGameOver(`${head}<br><span class="wsub">Ganaron ${team}</span>`);
   }
 
-  hideWin(): void { this.win.style.display = "none"; }
+  hideWin(): void { this.win.style.display = "none"; this.refreshGear(); }
 
   /** Co-op survival readout (reuses the score panel): drones killed this session + current wave. Called every
    *  frame → idempotent: only touches the DOM when the numbers actually change. */
@@ -481,6 +486,7 @@ export class Hud {
       const code = input.value.trim().toUpperCase().slice(0, 8);
       if (code) { menu.style.display = "none"; cb.join(code); }
     };
+    this.refreshGear(); // mode menu up → hide the gear
   }
 
   /** Pre-match lobby: shows the shareable code, the roster, a role picker (PvP only), and — for the host —
@@ -513,6 +519,7 @@ export class Hud {
     (el("lobby-start") as HTMLButtonElement).onclick = () => cb.start();
     (el("lobby-leave") as HTMLButtonElement).onclick = () => cb.leave();
     el("hud-lobby").style.display = "flex";
+    this.refreshGear(); // lobby up → hide the gear
   }
 
   updateLobby(rows: LobbyRow[], myId: number, hostId: number, myRole: Role | null, myTeam = 0, myClass = "", myMap = "large", mode = ""): void {
@@ -584,6 +591,14 @@ export class Hud {
   hideLobby(): void {
     this.preview?.dispose(); this.preview = null; // free the preview's WebGL context before the match renders
     (document.getElementById("hud-lobby") as HTMLElement).style.display = "none";
+    this.refreshGear(); // lobby closed → restore the gear (match about to start)
+  }
+
+  /** Hide the floating gear while any full-screen modal is up (it overlaps the card); restore it in-game. */
+  private refreshGear(): void {
+    const disp = (id: string) => (document.getElementById(id) as HTMLElement | null)?.style.display ?? "none";
+    const gear = document.getElementById("hud-gear") as HTMLElement | null;
+    if (gear) gear.style.display = anyModalOpen(disp("hud-menu"), disp("hud-lobby"), disp("hud-win")) ? "none" : "";
   }
 
   /** Wires the always-visible gear button (opens the settings panel). Called once by the game. */
