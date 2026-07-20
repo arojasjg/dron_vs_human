@@ -20,6 +20,7 @@ export interface AiBot {
   okx: number; okz: number; oky: number; okT: number; // LATCHED building opening (world XZ + entry height + time); okT < 0 = none
   stun: number;                             // seconds of EMP stun remaining — while >0 the bot is disabled (no move/fire)
   sacq: number;                             // seconds of CONTINUOUS sight on the target — gates the first shot after (re)acquiring LOS
+  hitT: number;                             // sim-time of last damage taken — drives the brief evasive break-off after being shot
 }
 export interface AiTarget {
   id: number; x: number; y: number; z: number; vx?: number; vz?: number;
@@ -70,6 +71,8 @@ const HEAL_CD = 1.2;      // seconds between a support's heal pulses (reuses the
 const SEP_RADIUS = 5;     // anti-clumping: bots within this push apart (wide enough to break the ball-on-top pile-up)
 const AIM_COS = 0.965;    // how tightly the target's aim must point at a bot to trigger a dodge
 const ALT_JUKE = 2;       // meters of vertical bob so a flying bot isn't a fixed-height target
+const BREAKOFF_DUR = 0.6;
+const BREAKOFF = 1.5;
 
 // Spatial-hash cell + key, hoisted to module scope so tick() allocates no per-frame closures. The key
 // function and cell size are FROZEN: the swarm's separation sum (an order-dependent FP accumulation) is
@@ -428,7 +431,7 @@ export class AiSwarm {
       this.bots.set(this.nextId, {
         id: this.nextId, x: p.x, y: y + st.high * 0.5, z: p.z,
         hp, maxHp: hp, cd, gcd, kind, seed, orbit,
-        lsx: cx, lsz: cz, lsT: -1, ba: 0, bt: -1, fx: 0, fz: 0, okx: 0, okz: 0, oky: 0, okT: -1, stun: 0, sacq: 0,
+        lsx: cx, lsz: cz, lsT: -1, ba: 0, bt: -1, fx: 0, fz: 0, okx: 0, okz: 0, oky: 0, okT: -1, stun: 0, sacq: 0, hitT: -1e9,
       });
       this.nextId++;
     }
@@ -570,6 +573,11 @@ export class AiSwarm {
 
       if (aimedAt) { mvx += ox * 1.2; mvz += oz * 1.2; }   // DODGE when the crosshair is on us
 
+      if (b.kind !== "kamikaze" && this.t - b.hitT < BREAKOFF_DUR) {
+        const j = evadeStrafe(b.seed, this.t);
+        mvx += ox * BREAKOFF * j; mvz += oz * BREAKOFF * j;
+      }
+
       const [sepx, sepz] = separation(b.x, b.z, this.collectNeighbors(b), SEP_RADIUS); // anti-clumping
       mvx += sepx * 1.4; mvz += sepz * 1.4;                // stronger push → they layer around you, not stack
 
@@ -667,6 +675,7 @@ export class AiSwarm {
       if (dot < -0.3) d = Math.max(1, dmg * 0.25);            // shielded front → 75% off (always chips ≥1)
     }
     b.hp -= d;
+    b.hitT = this.t;
     if (b.hp <= 0) { this.bots.delete(id); return true; }
     return false;
   }

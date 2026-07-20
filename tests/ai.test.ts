@@ -749,3 +749,43 @@ describe("enemy AI — difficulty tiers (single multiplier, normal = 1 = untiere
     for (let w = 0; w < 3; w++) expect(s.spawnWave(0, 0, 30, 5, () => 0.5)).toBe(waveSize(w));
   });
 });
+
+describe("enemy AI — break-off on damage (CBT-H7)", () => {
+  const mkTank = () => {
+    const s = new AiSwarm();
+    for (let i = 0; i < 4; i++) s.spawnWave(0, 0, 0, 2, () => 0.89);
+    const tankId = s.list.find((b) => b.kind === "tank")!.id;
+    for (const b of [...s.list]) if (b.id !== tankId) s.damageBot(b.id, 1e6);
+    expect(s.count).toBe(1);
+    const tank = s.list[0];
+    tank.x = 10; tank.z = 0; tank.y = 5;
+    return { s, tankId };
+  };
+  const tgt = [{ id: 7, x: 0, y: 0, z: 0 }];
+  const run = (s: AiSwarm, id: number, dmgTick: number) => {
+    for (let i = 0; i < 20; i++) {
+      if (i === dmgTick) s.damageBot(id, 1);
+      s.tick(0.05, tgt, () => true, () => 0.5);
+    }
+    return s.list[0];
+  };
+
+  it("a damaged tank BREAKS OFF: its trajectory diverges from an undamaged twin, bounded, above the lowHp gate", () => {
+    const a = mkTank(), b = mkTank();
+    const hit = run(a.s, a.tankId, 5);
+    const calm = run(b.s, b.tankId, -1);
+    expect(hit.hp).toBe(9);
+    expect(hit.hp).toBeGreaterThan(Math.max(1, ARCHETYPES.tank.hp * 0.34));
+    expect(hit.x !== calm.x || hit.z !== calm.z).toBe(true);
+    expect(Number.isFinite(hit.x) && Number.isFinite(hit.y) && Number.isFinite(hit.z)).toBe(true);
+    expect(Math.hypot(hit.x, hit.z)).toBeLessThan(60);
+    expect(hit.y).toBeGreaterThanOrEqual(2);
+  });
+
+  it("break-off is deterministic: two identically-damaged twins end at the SAME position (no rng)", () => {
+    const a = mkTank(), b = mkTank();
+    const h1 = run(a.s, a.tankId, 5);
+    const h2 = run(b.s, b.tankId, 5);
+    expect([h1.x, h1.y, h1.z]).toEqual([h2.x, h2.y, h2.z]);
+  });
+});
