@@ -445,6 +445,7 @@ export class Game {
     this.roomCode = code;
     this.pendingMode = mode ?? "coop";                     // provisional until a peer's roster tells us
     this.myRole = mode === "coop" ? "human" : null;        // co-op: everyone's a soldier; PvP: pick in the lobby
+    this.teamChosen = false;                               // fresh room: drop any stale team pick so dvh starts role-based
     this.lobby = emptyLobby();
     this.phase = "lobby";
     this.netStatus = "connecting"; this.hud.setNetStatus("connecting"); // networked session begins → show the indicator
@@ -543,9 +544,9 @@ export class Game {
     this.resetTransientCombatState();
     this.bandages = BANDAGE_MAX;              // fresh match → full bandages
     this.hud.setMode(this.mode, this.roomCode);
-    // team: co-op is one team vs the AI; dvh derives it from the role (the side IS the role, so FF/spawn/
-    // radar/scoring all share one axis); free vs honours the Rojo/Azul pick, else auto-balances
-    this.myTeam = this.mode === "coop" ? 0 : this.mode === "dvh" ? teamForRole(this.myRole ?? "human") : (this.teamChosen ? this.pendingTeam : this.autoTeam());
+    // team: co-op is one team vs the AI; dvh defaults to the role-derived side but an explicit Rojo/Azul
+    // pick wins (so two same-unit players can be enemies); free vs honours the pick, else auto-balances
+    this.myTeam = this.mode === "coop" ? 0 : this.mode === "dvh" ? (this.teamChosen ? this.pendingTeam : teamForRole(this.myRole ?? "human")) : (this.teamChosen ? this.pendingTeam : this.autoTeam());
     this.myClass = this.pendingClass;
     this.applyChosenRole(this.mode === "coop" ? "human" : (this.myRole ?? "human"), this.pendingClass);
     this.spawnPlayerInBuilding();
@@ -1303,7 +1304,7 @@ export class Game {
     // Headless/non-lobby path: co-op → everyone's a soldier; PvP → auto-balance by id. The LOBBY path calls
     // applyChosenRole directly with the role the player picked.
     const r: Role = this.mode === "coop" ? "human" : assignRole([], this.net.id);
-    this.myTeam = this.mode === "coop" ? 0 : this.mode === "dvh" ? teamForRole(r) : this.autoTeam();
+    this.myTeam = this.mode === "coop" ? 0 : this.mode === "dvh" ? (this.teamChosen ? this.pendingTeam : teamForRole(r)) : this.autoTeam();
     this.applyChosenRole(r);
   }
 
