@@ -67,7 +67,7 @@ IDs por cluster: **NET** (red/PvP), **CBT** (combate), **RND** (render/perf/mode
 - [ ] CBT-H5 · Sin niveles de dificultad; solo rampa "BRUTAL" — `src/net/ai.ts:75-84`. Multiplicador de dificultad → wave size, fire-rate, precisión, daño, cadencia.
 - [ ] CBT-H6 · Peers nunca disparan evasión IA (no se envía aim de peers) — `src/game.ts:581` vs `remoteDrones.ts:216-226`. Difundir aim dir de cada soldado.
 - [ ] CBT-H7 · Movimiento orbit-strafe predecible + evasión débil — `src/net/ai.ts:448-450,479`. Burst-strafes/jukes de altitud, break-off, cover-seeking.
-- [ ] CBT-M1 · Sin hitzones/headshots → TTK plano — `src/net/weapons.ts:72-82`. Sub-esfera de cabeza con multiplicador + hit-marker distinto.
+- [x] CBT-M1 · Sin hitzones/headshots → TTK plano. **HECHO (dfb9b14):** `hitZone()` pura añade sub-esfera de cabeza aditiva (sin regresión de body-gate) + `HEADSHOT_MULT=1.8`; resuelto donde aterriza el daño (PvP víctima / bots host), sin doble-mult. _(Follow-up CBT-M1b: apretar radio cabeza 0.4→~0.28 tras playtest; marker/HUD dedicado de headshot en vez de reusar "kill"; cue de headshot en pellets de escopeta.)_
 - [ ] CBT-M2 · Arquetipos de bot invisibles; bots dañados sin vida — `src/game.ts:627`. Difundir hp/maxHp + tag de arquetipo; tinte/escala + barra al dañarse.
 - [ ] CBT-M4 · Modelo dual de bala (hitscan instantáneo + tracer físico) → travel-time falso — `projectile.ts:147-169` + `game.ts:2350`. Elegir un modelo.
 - [ ] CBT-M3 · Kamikaze IA power `1.4` vs jugador `1400` (gap 1000×) — `src/game.ts:682`. Verificar carve power.
@@ -140,3 +140,4 @@ _(cada ciclo añade una línea: `Ciclo N | fecha | ítem | commit | gate | notas
 - Ciclo 8 | 2026-07-19 | CBT-H4 (recargas con tiempo) | dcd1aa0 | tsc0·vitest479·review-adversarial(1 fix guard)·smoke-OK | reloadDuration pura; review pescó guard muerto en reloadOrScan (movido al tope). +CBT-H4b (HUD reload bar). Fable5.
 - Ciclo 9 | 2026-07-19 | CBT-H3 (daño IA por arquetipo) | 1f207fc | tsc0·vitest482·review-adversarial-OK·smoke-OK | dmg en ARCHETYPES + dmgScale/archDamage puras; review verificó determinismo+host/peer+kamikaze-inalcanzable. Fable5.
 - Ciclo 10 | 2026-07-20 | CBT-M5 (delay de adquisición IA) | 5279d7e | tsc0·vitest484·review-adversarial(prueba empírica golden)·smoke-OK | sacq+acquireDelay puras; GOLD_AI re-baselineado — review PROBÓ empíricamente posiciones byte-idénticas (solo cambia disparo). RULE: golden re-baseline en cambio deliberado exige separar hash movimiento/disparo. Fable5.
+- Ciclo 11 | 2026-07-20 | CBT-M1 (headshots) | dfb9b14 | tsc0·vitest489·review-adversarial-OK·smoke-OK | hitZone pura aditiva (sin regresión body-gate); review verificó paridad+sin-doble-mult+object-truthiness-trap evitada. +CBT-M1b tuning. Fable5.
