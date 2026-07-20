@@ -138,3 +138,12 @@ export function classList(role: Role): { id: UnitClass; label: string }[] {
   const t = (role === "drone" ? DRONE_CLASSES : SOLDIER_CLASSES) as Record<string, ClassStats>;
   return Object.keys(t).map((id) => ({ id: id as UnitClass, label: t[id].label }));
 }
+
+// ---- Scoreboard (TAB overlay) --------------------------------------------------------------------
+export interface ScoreRow { id: number; team: number; isHuman: boolean; kills: number; assists: number; deaths: number; you: boolean; }
+
+/** Builds the scoreboard: every participant (peers + self) grouped by team then sorted kills-desc (deaths-asc
+ *  tiebreak, then id) so the leaderboard is stable. Pure. */
+export function buildScoreboard(rows: ScoreRow[]): ScoreRow[] {
+  return [...rows].sort((a, b) => a.team - b.team || b.kills - a.kills || a.deaths - b.deaths || a.id - b.id);
+}

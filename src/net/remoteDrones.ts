@@ -43,6 +43,7 @@ interface Remote {
   hp: number;                  // raw hp/maxHp — for the teammates panel
   maxHp: number;
   aimX?: number; aimZ?: number; // this peer's OWN aim dir (XZ, from its state broadcast) — undefined until it sends one, so a legacy peer stays "not aiming" for the swarm's dodge gate
+  kills: number; assists: number; deaths: number; // this peer's own K/A/D (from its state broadcast) — for the scoreboard; 0 for a legacy peer that doesn't send them
   lastSeen: number;
   model: ModelInstance | null;   // rigged soldier glTF (null until loaded / if it failed → procedural rig)
   modelReq: boolean;             // load kicked off (only for humans, once)
@@ -217,10 +218,11 @@ export class RemoteDrones {
     return out;
   }
 
-  /** Snapshot of every known peer (id, hp, role, team) — the HUD filters to teammates by team. */
-  peers(): { id: number; hp: number; maxHp: number; isHuman: boolean; team: number }[] {
-    const out: { id: number; hp: number; maxHp: number; isHuman: boolean; team: number }[] = [];
-    for (const [id, d] of this.drones) out.push({ id, hp: d.hp, maxHp: d.maxHp, isHuman: d.isHuman, team: d.team });
+  /** Snapshot of every known peer (id, hp, role, team, K/A/D) — the HUD filters to teammates by team
+   *  and builds the full scoreboard. */
+  peers(): { id: number; hp: number; maxHp: number; isHuman: boolean; team: number; kills: number; assists: number; deaths: number }[] {
+    const out: { id: number; hp: number; maxHp: number; isHuman: boolean; team: number; kills: number; assists: number; deaths: number }[] = [];
+    for (const [id, d] of this.drones) out.push({ id, hp: d.hp, maxHp: d.maxHp, isHuman: d.isHuman, team: d.team, kills: d.kills, assists: d.assists, deaths: d.deaths });
     return out;
   }
 
@@ -239,7 +241,7 @@ export class RemoteDrones {
     }
   }
 
-  upsert(id: number, x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number, hp: number, role: Role = "drone", maxHp = MAX_HP, yaw = 0, pitch = 0, stance: Stance = 0, team = 0, cls = "", aimX?: number, aimZ?: number): void {
+  upsert(id: number, x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number, hp: number, role: Role = "drone", maxHp = MAX_HP, yaw = 0, pitch = 0, stance: Stance = 0, team = 0, cls = "", aimX?: number, aimZ?: number, kills = 0, assists = 0, deaths = 0): void {
     let d = this.drones.get(id);
     const isNew = !d;
     if (!d) d = this.create(id);
@@ -247,6 +249,7 @@ export class RemoteDrones {
     d.targetQuat.set(qx, qy, qz, qw);
     d.targetYaw = yaw; d.targetPitch = pitch; d.stance = stance;
     d.aimX = aimX; d.aimZ = aimZ;          // undefined when the peer never sent aim (legacy client)
+    d.kills = kills; d.assists = assists; d.deaths = deaths; // 0 for a legacy peer that doesn't broadcast K/A/D
     d.isHuman = role === "human";
     d.team = team; d.cls = cls;
     // accent: class colour on the body, team colour as an emissive glow → drone-vs-drone stays readable
@@ -460,7 +463,7 @@ export class RemoteDrones {
       drone, rotors, human, rig, upper, rifle, legL, legR, barBg, barFg,
       targetPos: new THREE.Vector3(), targetQuat: new THREE.Quaternion(),
       targetYaw: 0, targetPitch: 0, stance: 0, walkPhase: 0, prevX: 0, prevZ: 0, meleeTimer: 0,
-      isHuman: false, team: 0, cls: "", tintMat, frac: 1, hp: MAX_HP, maxHp: MAX_HP, lastSeen: performance.now(),
+      isHuman: false, team: 0, cls: "", tintMat, frac: 1, hp: MAX_HP, maxHp: MAX_HP, kills: 0, assists: 0, deaths: 0, lastSeen: performance.now(),
       model: null, modelReq: false, curClip: "none", body,
     };
     this.drones.set(id, d);

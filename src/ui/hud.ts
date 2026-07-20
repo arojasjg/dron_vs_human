@@ -1,5 +1,5 @@
 import { MATERIALS, type MaterialId } from "../world/materials";
-import { classList, classStats, classLoadout, TEAM_LABEL, type Role } from "../net/roles";
+import { classList, classStats, classLoadout, TEAM_LABEL, type Role, type ScoreRow } from "../net/roles";
 import { WEAPONS, roleLoadout, type Weapon, type Ammo } from "../net/weapons";
 import { MAP_SIZES } from "../build/prefabs";
 import { ClassPreview } from "./classPreview";
@@ -119,6 +119,7 @@ export class Hud {
   private readonly batteryFill: HTMLElement;
   private readonly kda: HTMLElement;
   private readonly team: HTMLElement;
+  private readonly scoreboard: HTMLElement;
   private readonly dmg: HTMLElement;
   private readonly hit: HTMLElement;
   private readonly death: HTMLElement;
@@ -151,6 +152,7 @@ export class Hud {
     this.batteryFill = document.getElementById("hud-battery-fill")!;
     this.kda = document.getElementById("hud-kda")!;
     this.team = document.getElementById("hud-team")!;
+    this.scoreboard = document.getElementById("hud-scoreboard")!;
     this.dmg = document.getElementById("hud-dmg")!;
     this.hit = document.getElementById("hud-hit")!;
     this.death = document.getElementById("hud-death")!;
@@ -393,6 +395,28 @@ export class Hud {
       return `<div class="trow">${icon} P${p.id}<div class="tbar"><div style="width:${f * 100}%;background:${col}"></div></div></div>`;
     }).join("");
     this.team.style.display = "block";
+  }
+
+  /** Full scoreboard overlay (TAB): every participant grouped by team, each team's header + score, then a
+   *  K/A/M row per player (the local one marked "tú"). `rows` come pre-sorted (buildScoreboard). */
+  setScoreboard(rows: ScoreRow[], teamScores: { label: string; score: number }[], visible: boolean): void {
+    if (!visible) { this.scoreboard.style.display = "none"; return; }
+    let html = "";
+    let lastTeam: number | null = null;
+    for (const r of rows) {
+      if (r.team !== lastTeam) {
+        const ts = teamScores[r.team];
+        const head = ts ? `${ts.label} · <b>${ts.score}</b>` : `Equipo ${r.team}`;
+        html += `<div class="sb-head">${head}</div>`;
+        lastTeam = r.team;
+      }
+      const icon = r.isHuman ? "🧍" : "🤖";
+      const you = r.you ? " (tú)" : "";
+      html += `<div class="sb-row${r.you ? " me" : ""}">${icon} Jugador ${r.id}${you} · ` +
+        `<span class="sb-tag">K</span> ${r.kills} / <span class="sb-tag">A</span> ${r.assists} / <span class="sb-tag">M</span> ${r.deaths}</div>`;
+    }
+    this.scoreboard.innerHTML = `<div class="sb-title">Marcador</div>${html}`;
+    this.scoreboard.style.display = "block";
   }
 
   /** Combat HUD: the current class + team badge next to the weapon bar (PvP). Empty label hides it. */
@@ -810,6 +834,18 @@ function inject(): void {
     #hud-team .trow { display: flex; align-items: center; gap: 7px; font-size: 11px; margin-top: 4px; }
     #hud-team .tbar { flex: 1; height: 6px; background: rgba(107,255,158,.12); overflow: hidden; }
     #hud-team .tbar div { height: 100%; }
+    #hud-scoreboard { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); display: none;
+      min-width: 340px; max-height: 80vh; overflow-y: auto; padding: 18px 22px; font-variant-numeric: tabular-nums;
+      background: linear-gradient(180deg, rgba(10,20,15,.94), rgba(5,11,8,.94)); border: 1px solid var(--edge);
+      box-shadow: 0 20px 60px rgba(0,0,0,.6), inset 0 0 60px rgba(0,0,0,.4); }
+    #hud-scoreboard .sb-title { font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: var(--phos);
+      text-align: center; margin-bottom: 12px; }
+    #hud-scoreboard .sb-head { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--phos-dim);
+      border-bottom: 1px solid var(--edge2); margin: 12px 0 5px; padding-bottom: 3px; }
+    #hud-scoreboard .sb-head b { color: var(--phos); }
+    #hud-scoreboard .sb-row { font-size: 12px; padding: 3px 0; color: var(--ink); white-space: nowrap; }
+    #hud-scoreboard .sb-row.me { color: var(--phos); }
+    #hud-scoreboard .sb-tag { color: var(--phos-dim); font-size: 9px; letter-spacing: .1em; }
     #hud-menu { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
       pointer-events: auto; backdrop-filter: blur(3px);
       background:
@@ -1037,6 +1073,7 @@ function inject(): void {
     <div id="hud-battery" class="panel"><span class="cap">🔋 Batería</span><div id="hud-battery-bar"><div id="hud-battery-fill"></div></div></div>
     <div id="hud-kda" class="panel"></div>
     <div id="hud-team" class="panel"></div>
+    <div id="hud-scoreboard" class="panel"></div>
     <div id="hud-toast" class="panel"></div>
     <div id="crosshair"></div>
     <div id="hud-scope"></div>

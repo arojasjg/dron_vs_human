@@ -42,7 +42,7 @@ import { BaseModels } from "./fx/baseModels";
 import { Viewmodel } from "./engine/viewmodel";
 import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
-import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, TEAM_LABEL, type Role, type Team, type UnitClass } from "./net/roles";
+import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, buildScoreboard, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, difficultyMul, type Difficulty, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
@@ -256,6 +256,7 @@ export class Game {
   private readonly aiAimTmp = new THREE.Vector3();                                 // reused: host camera forward (bots dodge our aim)
   private readonly stateAimTmp = new THREE.Vector3();                              // reused: our camera forward for the state broadcast (peers' bots dodge OUR aim on the host)
   private minimapBig = false;                   // TAB toggles the enlarged minimap
+  private scoreboardOpen = false;               // TAB also toggles the full scoreboard overlay (both are "overview")
   private readonly recentShots: RadarShot[] = []; // fading shot rays on the minimap (from peers + AI fire)
   private readonly _blips: RadarBlip[] = [];      // reused per frame by minimapFrame (objects reused in place)
   private readonly _scanMarks: { angle: number; behindWall: boolean }[] = []; // reused per frame (scan markers)
@@ -850,6 +851,7 @@ export class Game {
     this.firing = false; this.ads = false;
     this.bloom = 0; this.lastBloomT = 0;
     this.reloadingUntil = 0; // no reload lock carries into a fresh match
+    this.scoreboardOpen = false; this.minimapBig = false; this.hud.setScoreboard([], [], false); // reset BOTH TAB overlays together so they don't invert next match
   }
 
   /** Missile lock-on: while the soldier holds the seeking-missile launcher, the drone kept inside the centre
@@ -1239,7 +1241,8 @@ export class Game {
         m.qx as number, m.qy as number, m.qz as number, m.qw as number, m.hp as number, (m.role as Role) ?? "drone", (m.mhp as number) || MAX_HP,
         (m.ry as number) || 0, (m.rp as number) || 0, ((m.st as number) || 0) as 0 | 1 | 2,
         (m.tm as number) || 0, (m.cls as string) || "",
-        m.ax as number | undefined, m.az as number | undefined); // absent on legacy peers → undefined → stays "not aiming"
+        m.ax as number | undefined, m.az as number | undefined, // absent on legacy peers → undefined → stays "not aiming"
+        (m.pk as number) || 0, (m.pa as number) || 0, (m.pd as number) || 0); // K/A/D for the scoreboard → 0 on a legacy peer
       if (this.mode === "dvh" && typeof m.dk === "number") {
         const merged = reconcileKills({ drone: this.droneKills, human: this.humanKills }, { drone: m.dk as number, human: m.hk as number });
         this.droneKills = merged.drone; this.humanKills = merged.human;
@@ -1458,6 +1461,7 @@ export class Game {
       hp: this.hp, mhp: this.myMaxHp(), role: this.role, // role → avatar; mhp → correct health bar
       tm: this.myTeam, cls: this.myClass, // team → friend/enemy + FF; class → avatar tint/label
       dk: this.droneKills, hk: this.humanKills, // scoreboard → max-merged by peers (self-healing)
+      pk: this.myKills, pa: this.myAssists, pd: this.myDeaths, // this player's own K/A/D → the TAB scoreboard (additive; absent on a legacy peer → 0)
     };
     this.net.send(this.lastState);
   }
@@ -2734,7 +2738,26 @@ export class Game {
       this.hud.setWeapon(this.role, this.weapon, this.ammo[this.weapon], classLoadout(this.role, this.myClass));
       this.hud.setKDA(this.myKills, this.myAssists, this.myDeaths);
       this.hud.setTeam(this.remotes.peers(), this.myTeam);
+      if (this.scoreboardOpen) { // only paint the board in a live match; leaving to lobby/menu auto-hides + resets both flags
+        if (this.phase === "playing") this.refreshScoreboard();
+        else { this.scoreboardOpen = false; this.minimapBig = false; this.hud.setScoreboard([], [], false); }
+      }
     }
+  }
+
+  /** Builds the TAB scoreboard from every peer PLUS the local player, sorts it (buildScoreboard) and paints
+   *  it with each team's kill total. */
+  private refreshScoreboard(): void {
+    const rows: ScoreRow[] = this.remotes.peers().map((p) => ({
+      id: p.id, team: p.team, isHuman: p.isHuman, kills: p.kills, assists: p.assists, deaths: p.deaths, you: false,
+    }));
+    rows.push({ id: this.net.id, team: this.myTeam, isHuman: this.role === "human", kills: this.myKills, assists: this.myAssists, deaths: this.myDeaths, you: true });
+    const teamScores = this.mode === "coop"
+      ? [{ label: "🤖 Drones eliminados", score: this.sessionKills }] // co-op: one shared team total
+      : this.mode === "dvh"
+      ? [{ label: "🤖 Drones", score: this.droneKills }, { label: "🧍 Humanos", score: this.humanKills }]
+      : [{ label: TEAM_LABEL[0], score: 0 }, { label: TEAM_LABEL[1], score: 0 }]; // vs: Rojo/Azul (droneKills/humanKills son dvh-only → no aplican)
+    this.hud.setScoreboard(buildScoreboard(rows), teamScores, true);
   }
 
   /** Our own bullet reached a voxel: broadcast the hit so every client applies the same grid change,
@@ -2881,7 +2904,7 @@ export class Game {
   }
 
   private onKey(code: string): void {
-    if (code === "tab") { this.minimapBig = !this.minimapBig; return; } // enlarge/shrink the minimap
+    if (code === "tab") { this.minimapBig = !this.minimapBig; this.scoreboardOpen = !this.scoreboardOpen; if (!this.scoreboardOpen) this.hud.setScoreboard([], [], false); return; } // TAB = overview: enlarge the minimap AND show the scoreboard
     if (code === "keyo") { this.openSettings(); return; } // visual settings panel (all modes)
     if (code === "keyk") { this.cycleQuality(); return; } // graphics quality (all modes)
     if (code === "keym") { this.hud.flash(this.audio.toggleMute() ? "🔇 Silencio" : "🔊 Sonido"); return; } // mute toggle
