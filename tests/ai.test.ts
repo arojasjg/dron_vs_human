@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   seekDir, shouldFire, waveSize, pickTarget, orbitDir, jink, leadAim, spread,
   speedScale, fireCdScale, hpBonus, pickKind, ARCHETYPES, AiSwarm, shouldDrop, homingStep, type AiDrop, type AiKind,
-  acquireDelay, type AiFire,
+  acquireDelay, type AiFire, type AiTarget,
   dmgScale, archDamage, difficultyMul,
   pickThreatTarget, beingAimedAt, separation, shouldBoom, applyHeal, type AiBoom,
   beliefAccuracy, beliefGoal, pickAudible, holdMult, shouldSuppress, searchPoint, openingSeek, type AiNoise, type AiBreak,
@@ -290,6 +290,14 @@ describe("enemy AI — BRUTAL upgrade (threat / memory / coordination / archetyp
   it("beingAimedAt: true when the target's aim points at the bot, false when it's off to the side", () => {
     expect(beingAimedAt(0, 0, 10, 0, -1, 0)).toBe(true);  // target at +x aiming −x = straight at the origin bot
     expect(beingAimedAt(0, 0, 10, 0, 0, 1)).toBe(false);  // aiming +z = perpendicular → not on us
+  });
+
+  it("peer targets: a peer WITH broadcast aim on the bot passes the swarm's dodge gate; one with no aim (undefined) never does", () => {
+    // mirrors the sim's gate exactly: `t.aimX !== undefined && beingAimedAt(bx, bz, t.x, t.z, t.aimX, t.aimZ ?? 0)`
+    const aiming: AiTarget = { id: 2, x: 10, y: 1, z: 0, hp: 100, maxHp: 100, aimX: -1, aimZ: 0 };
+    expect(aiming.aimX !== undefined && beingAimedAt(0, 0, aiming.x, aiming.z, aiming.aimX, aiming.aimZ ?? 0)).toBe(true);
+    const legacy: AiTarget = { id: 3, x: 10, y: 1, z: 0, hp: 100, maxHp: 100 }; // never sent ax/az
+    expect(legacy.aimX !== undefined && beingAimedAt(0, 0, legacy.x, legacy.z, legacy.aimX ?? 0, legacy.aimZ ?? 0)).toBe(false);
   });
 
   it("separation pushes away from a close neighbour and ignores far ones", () => {

@@ -38,6 +38,7 @@ interface Remote {
   frac: number;                // hp fraction for the health bar
   hp: number;                  // raw hp/maxHp — for the teammates panel
   maxHp: number;
+  aimX?: number; aimZ?: number; // this peer's OWN aim dir (XZ, from its state broadcast) — undefined until it sends one, so a legacy peer stays "not aiming" for the swarm's dodge gate
   lastSeen: number;
   model: ModelInstance | null;   // rigged soldier glTF (null until loaded / if it failed → procedural rig)
   modelReq: boolean;             // load kicked off (only for humans, once)
@@ -56,7 +57,7 @@ const HUMAN_RUN = 7.5;         // matches Walker RUN — scales the leg swing am
 // per-frame scratch: consumed synchronously by the caller / Rapier before the next use
 const KIN_POS = { x: 0, y: 0, z: 0 };
 const NEAREST = { dist: 0, x: 0, z: 0 };
-const TARGET_POOL: { id: number; x: number; y: number; z: number; hp: number; maxHp: number }[] = [];
+const TARGET_POOL: { id: number; x: number; y: number; z: number; hp: number; maxHp: number; aimX?: number; aimZ?: number }[] = [];
 
 // --- Drone: detailed military quadcopter (~0.95 m span) ---
 const D_CORE = new THREE.BoxGeometry(0.34, 0.12, 0.52);          // fuselage
@@ -219,7 +220,7 @@ export class RemoteDrones {
 
   /** Living HUMAN peers as AI targets (id + eye position), written into `out` (reused, no alloc). Co-op:
    *  the enemy swarm chases every living soldier, not only the host. Skips avatars at hp ≤ 0. */
-  humanTargets(out: { id: number; x: number; y: number; z: number; hp: number; maxHp: number }[]): void {
+  humanTargets(out: { id: number; x: number; y: number; z: number; hp: number; maxHp: number; aimX?: number; aimZ?: number }[]): void {
     out.length = 0;
     for (const [id, d] of this.drones) {
       if (!d.isHuman || d.hp <= 0) continue;
@@ -227,17 +228,19 @@ export class RemoteDrones {
       let t = TARGET_POOL[out.length];
       if (!t) { t = { id: 0, x: 0, y: 0, z: 0, hp: 0, maxHp: 0 }; TARGET_POOL[out.length] = t; }
       t.id = id; t.x = p.x; t.y = p.y; t.z = p.z; t.hp = d.hp; t.maxHp = d.maxHp;
+      t.aimX = d.aimX; t.aimZ = d.aimZ; // possibly undefined → the AI's "being aimed at" gate stays off
       out.push(t);
     }
   }
 
-  upsert(id: number, x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number, hp: number, role: Role = "drone", maxHp = MAX_HP, yaw = 0, pitch = 0, stance: Stance = 0, team = 0, cls = ""): void {
+  upsert(id: number, x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number, hp: number, role: Role = "drone", maxHp = MAX_HP, yaw = 0, pitch = 0, stance: Stance = 0, team = 0, cls = "", aimX?: number, aimZ?: number): void {
     let d = this.drones.get(id);
     const isNew = !d;
     if (!d) d = this.create(id);
     d.targetPos.set(x, y, z);              // store the target; the avatar EASES toward it in update()
     d.targetQuat.set(qx, qy, qz, qw);
     d.targetYaw = yaw; d.targetPitch = pitch; d.stance = stance;
+    d.aimX = aimX; d.aimZ = aimZ;          // undefined when the peer never sent aim (legacy client)
     d.isHuman = role === "human";
     d.team = team; d.cls = cls;
     // accent: class colour on the body, team colour as an emissive glow → drone-vs-drone stays readable

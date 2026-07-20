@@ -1,7 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as THREE from "three";
 import { RemoteDrones } from "../src/net/remoteDrones";
 import type { Physics } from "../src/engine/physics";
+
+// a HUMAN upsert kicks off the soldier glTF load; node has no asset server → stub the loader (null = "load
+// failed", the production fallback path) so the aim tests run clean without touching the network/loader.
+vi.mock("../src/engine/modelLoader", () => ({
+  instanceModel: () => Promise.resolve(null),
+  pickAction: () => null,
+}));
 
 // The avatar collider needs a physics world; interpolation doesn't — a tiny stub keeps this test Rapier-free.
 const fakePhysics = () => ({
@@ -47,5 +54,41 @@ describe("remote peer interpolation (smooth multiplayer)", () => {
     r.upsert(3, 0, 0, 0, 0, 0, 0, 1, 100);     // lastSeen ≈ t0
     r.prune(t0 + 5000); expect(r.count).toBe(1); // 5 s gap → still shown (the heartbeat window)
     r.prune(t0 + 9000); expect(r.count).toBe(0); // 9 s silent → pruned (genuine disconnect)
+  });
+});
+
+describe("peer aim → AI targets (co-op dodge parity, CBT-H6)", () => {
+  type Tgt = { id: number; x: number; y: number; z: number; hp: number; maxHp: number; aimX?: number; aimZ?: number };
+
+  it("carries a human peer's broadcast aim through humanTargets", () => {
+    const r = makeRemotes();
+    r.upsert(7, 1, 2, 3, 0, 0, 0, 1, 100, "human", 100, 0, 0, 0, 0, "", -0.8, 0.6);
+    const out: Tgt[] = [];
+    r.humanTargets(out);
+    expect(out).toHaveLength(1);
+    expect(out[0].aimX).toBe(-0.8);
+    expect(out[0].aimZ).toBe(0.6);
+  });
+
+  it("keeps a peer that never sent aim as NOT aiming (aimX undefined, not 0) so the dodge gate stays off", () => {
+    const r = makeRemotes();
+    r.upsert(8, 0, 0, 0, 0, 0, 0, 1, 100, "human"); // legacy packet: no ax/az
+    const out: Tgt[] = [];
+    r.humanTargets(out);
+    expect(out).toHaveLength(1);
+    expect(out[0].aimX).toBeUndefined();
+    expect(out[0].aimZ).toBeUndefined();
+  });
+
+  it("clears stale aim when a later packet omits it (pooled target objects must not leak old aim)", () => {
+    const r = makeRemotes();
+    r.upsert(9, 0, 0, 0, 0, 0, 0, 1, 100, "human", 100, 0, 0, 0, 0, "", 1, 0);
+    const out: Tgt[] = [];
+    r.humanTargets(out);
+    expect(out[0].aimX).toBe(1);
+    r.upsert(9, 0, 0, 0, 0, 0, 0, 1, 100, "human"); // older peer / omitted aim → back to undefined
+    r.humanTargets(out);
+    expect(out[0].aimX).toBeUndefined();
+    expect(out[0].aimZ).toBeUndefined();
   });
 });

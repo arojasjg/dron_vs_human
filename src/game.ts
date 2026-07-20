@@ -246,7 +246,7 @@ export class Game {
   private coopHardcore = false; // co-op: permadeath (no respawns) vs respawn-while-a-teammate-lives
   private aiPrevX = 0; private aiPrevZ = 0; // host player XZ last frame → velocity estimate feeding the AI aim lead
   private readonly aiTargetBuf: AiTarget[] = [];                                   // reused each frame (no alloc)
-  private readonly aiPeerBuf: { id: number; x: number; y: number; z: number; hp: number; maxHp: number }[] = []; // living human peers as AI targets (+hp for threat scoring)
+  private readonly aiPeerBuf: { id: number; x: number; y: number; z: number; hp: number; maxHp: number; aimX?: number; aimZ?: number }[] = []; // living human peers as AI targets (+hp for threat scoring, +aim so bots dodge a peer's crosshair too)
   private readonly aiDropBuf: AiDrop[] = [];                                       // grenade drops emitted this tick
   private readonly aiBoomBuf: AiBoom[] = [];                                       // kamikaze contact detonations this tick
   private readonly aiBreakBuf: AiBreak[] = [];                                     // glass-break requests emitted this tick
@@ -254,6 +254,7 @@ export class Game {
   private readonly aiNoiseBuf: AiNoise[] = [];                                     // what the swarm hears this tick (footsteps/gunfire/blasts)
   private readonly recentBlasts: { x: number; z: number; t: number; loud: number }[] = []; // player explosions the swarm can still hear
   private readonly aiAimTmp = new THREE.Vector3();                                 // reused: host camera forward (bots dodge our aim)
+  private readonly stateAimTmp = new THREE.Vector3();                              // reused: our camera forward for the state broadcast (peers' bots dodge OUR aim on the host)
   private minimapBig = false;                   // TAB toggles the enlarged minimap
   private readonly recentShots: RadarShot[] = []; // fading shot rays on the minimap (from peers + AI fire)
   private readonly _blips: RadarBlip[] = [];      // reused per frame by minimapFrame (objects reused in place)
@@ -1235,7 +1236,8 @@ export class Game {
       this.remotes.upsert(m.id as number, m.x as number, m.y as number, m.z as number,
         m.qx as number, m.qy as number, m.qz as number, m.qw as number, m.hp as number, (m.role as Role) ?? "drone", (m.mhp as number) || MAX_HP,
         (m.ry as number) || 0, (m.rp as number) || 0, ((m.st as number) || 0) as 0 | 1 | 2,
-        (m.tm as number) || 0, (m.cls as string) || "");
+        (m.tm as number) || 0, (m.cls as string) || "",
+        m.ax as number | undefined, m.az as number | undefined); // absent on legacy peers → undefined → stays "not aiming"
       if (this.mode === "dvh" && typeof m.dk === "number") {
         const merged = reconcileKills({ drone: this.droneKills, human: this.humanKills }, { drone: m.dk as number, human: m.hk as number });
         this.droneKills = merged.drone; this.humanKills = merged.human;
@@ -1444,10 +1446,12 @@ export class Game {
     this.netT = 0.05; // ~20 Hz
     this.netSent++;
     const p = this.player.camera.position, q = this.player.camera.quaternion;
+    this.player.camera.getWorldDirection(this.stateAimTmp); // same representation as the host's own aiAimTmp → the host AI's dodge cone works identically for peers
     this.lastState = {
       t: "state",
       x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2),
       qx: +q.x.toFixed(3), qy: +q.y.toFixed(3), qz: +q.z.toFixed(3), qw: +q.w.toFixed(3),
+      ax: +this.stateAimTmp.x.toFixed(3), az: +this.stateAimTmp.z.toFixed(3), // our aim (XZ) → the host's swarm dodges when we aim at a bot
       ry: +this.player.lookYaw.toFixed(3), rp: +this.player.lookPitch.toFixed(3), st: this.player.stanceVal,
       hp: this.hp, mhp: this.myMaxHp(), role: this.role, // role → avatar; mhp → correct health bar
       tm: this.myTeam, cls: this.myClass, // team → friend/enemy + FF; class → avatar tint/label
