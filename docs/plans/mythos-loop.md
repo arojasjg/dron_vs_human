@@ -73,7 +73,7 @@ IDs por cluster: **NET** (red/PvP), **CBT** (combate), **RND** (render/perf/mode
 - [ ] CBT-M4 · Modelo dual de bala (hitscan instantáneo + tracer físico) → travel-time falso — `projectile.ts:147-169` + `game.ts:2350`. Elegir un modelo.
 - [ ] CBT-M3 · Kamikaze IA power `1.4` vs jugador `1400` (gap 1000×) — `src/game.ts:682`. Verificar carve power.
 - [x] CBT-M5 · Bots disparaban sin telegrafía al primer peek. **HECHO (5279d7e):** campo `sacq` (vista continua) + `acquireDelay(wave)` pura; el gate de disparo exige ventana de adquisición (0.4s→0.12s por wave); host-only, determinista. GOLD_AI re-baselineado (review probó empíricamente posiciones byte-idénticas). _(Nota: sacq congela —no resetea— durante EMP stun; defendible.)_
-- [ ] CBT-M6 · Grenade/kamikaze IA daño magic `30` sin falloff — `src/game.ts:686-687`. Escala por distancia.
+- [~] CBT-M6 · **VERIFICADO NO-BUG (ciclo 18):** `explodeAt` (game.ts:2182) YA aplica falloff `(1-dist/dr)*55` al jugador; la granada IA daña vía explodeAt (con falloff); el flat-30 del kamikaze es bonus de CONTACTO (`distXZ<=2.4`, siempre cerca) → no es "granada a 3 m pega 30". Cerrado sin cambio.
 - [ ] CBT-M7 · Spawn en anillo determinista — `src/net/ai.ts:339`. Jitter con rng sembrado.
 - [ ] CBT-tune1 · _(nuevo, ciclo 3)_ Balance de alcance vs bots: smg (identidad close-range) y laser ahora plinkean a 180/600 m con `botDmg` plano — considerar falloff de botDmg o cap por arma. `src/net/weapons.ts:botHitRange`.
 - [ ] CBT-tune2 · _(nuevo, ciclo 3)_ `TRACER_LIFE=1.5` duplica el literal en `projectile.ts:168`; unificar (projectile importa la const) para que tuning del tracer no diverja del alcance de daño.
@@ -119,7 +119,7 @@ IDs por cluster: **NET** (red/PvP), **CBT** (combate), **RND** (render/perf/mode
 - [ ] UX-M1 · Acciones del jugador indescubribles (sprint/crouch/prone/melee/reload/ADS) — `walker.ts:224-238`. Ayuda por modo + toasts de primer match.
 - [ ] UX-M2 · Sin emotes/pings/chat en multi — none. Ping wheel/emote sobre `net`.
 - [ ] UX-M6 · Sin ajustes de audio salvo mute global — `game.ts:2774`. Sliders volumen/música/SFX.
-- [ ] UX-M7 · Panel settings no accesible limpio; engranaje flota sobre todo — `hud.ts:824-828`. Plegar en pausa/menú.
+- [x] UX-M7 · Engranaje de ajustes flotaba sobre todas las pantallas. **HECHO (8c7780a):** `refreshGear()` (llamado en cada show/hide de menu/lobby/game-over) oculta el engranaje mientras hay un modal y lo restaura en gameplay; `anyModalOpen()` pura+testeada.
 - [ ] UX-M10 · Respawn fijo 3 s sin protección de spawn — `game.ts:1427,1905-1910`. Protección breve + spawn más seguro.
 - [ ] UX-M12 · Sin brújula/markers de objetivo en pantalla — `game.ts:1046-1076`, `hud.ts:143-191`. Franja de brújula con markers.
 - [ ] UX-varios · L1 config de balance externalizable · M4 sandbox/vs modos muertos · M8 killfeed setTimeout sin limpiar · M9 innerHTML por frame · L7 input no gateado con modal abierto.
@@ -148,3 +148,4 @@ _(cada ciclo añade una línea: `Ciclo N | fecha | ítem | commit | gate | notas
 - Ciclo 15 | 2026-07-20 | RND-A2 (facing de drones) | 2e81e35 | tsc0·vitest502·golden+ai-intactos·smoke-OK·auto-review | render-only aditivo, facingYawFromVelocity pura + speed-gate; distinguir bot IA (quat identidad) de drone-jugador por |w|>0.9999. Visual lo verifica el usuario. Fable5.
 - Ciclo 16 | 2026-07-20 | UX-C3 (ayuda por modo) | 5ee6056 | tsc0·vitest505·smoke-OK·auto-review | HELP_COMBAT verificado contra la fuente (onKey/walker/input), cada keybind cruzado; test bloquea combate vs sandbox. RULE: UI de controles se construye desde bindings REALES leídos, no adivinados. Fable5.
 - Ciclo 17 | 2026-07-20 | UX-H7 (ocultar dev-artifacts) | c62728c | tsc0·vitest510·smoke-OK·auto-review | devOverlaysEnabled pura; display:none por defecto (sin flash) + reveal con ?perf; test incluye que el param del smoke no los active. Fable5.
+- Ciclo 18 | 2026-07-20 | UX-M7 (engranaje sobre modales) + verif CBT-M6 | 8c7780a | tsc0·vitest515·smoke-OK·auto-review·UI-only | refreshGear + anyModalOpen pura. RULE: verificar-primero un supuesto bug del recon antes de "arreglar" — CBT-M6 resultó no-bug (explodeAt ya tiene falloff); el loop cierra no-bugs sin cambio. Fable5.
