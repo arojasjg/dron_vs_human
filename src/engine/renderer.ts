@@ -153,6 +153,14 @@ export class Renderer {
     this.syncComposerSize();
   }
 
+  /** Warms shader programs for everything currently in the scene, in the BACKGROUND (compileAsync), so a
+   *  newly-added model's program is ready BEFORE its first render instead of stalling the main thread on it.
+   *  compiles against the REAL scene → the program matches the real render (lights/shadows). No-op if already
+   *  compiled; falls back to sync compile on drivers without parallel-compile (no worse than today). */
+  warmScene(camera: THREE.Camera): void {
+    void this.renderer.compileAsync(this.scene, camera).catch(() => { /* prewarm best-effort */ });
+  }
+
   /** Requests one shadow-map re-render on the next render() (autoUpdate is off). Call together with
    *  followSun so the sun frustum and the shadow map move as one — a stale map stays world-anchored. */
   refreshShadows(): void {

@@ -61,10 +61,15 @@ export class Viewmodel {
   private readonly shieldRimMat = new THREE.MeshStandardMaterial({ color: 0x22282c, roughness: 0.6, metalness: 0.6 });
   private readonly shieldSlitMat = new THREE.MeshStandardMaterial({ color: 0x9fd8ff, roughness: 0.15, metalness: 0.2, transparent: true, opacity: 0.4 }); // window slit
 
+  private warm?: () => void; // background shader prewarm, fired after each weapon model mounts
+
   constructor(private readonly scene: THREE.Scene) {
     this.rig.visible = false;
     this.scene.add(this.rig);
   }
+
+  /** Hook called after each glb weapon mounts, so the game can prewarm its shaders off the first render. */
+  setWarm(fn: () => void): void { this.warm = fn; }
 
   /** Show the model for `weapon` (soldiers only). `role !== "human"` or hidden → nothing is drawn.
    *  `cls === "heavy"` also straps the riot shield to the view. */
@@ -84,6 +89,7 @@ export class Viewmodel {
       m.scene.traverse((o) => { const me = o as THREE.Mesh; if (me.isMesh) me.castShadow = false; }); // a viewmodel shouldn't cast world shadows
       this.rig.add(m.scene);
       this.mi = m;
+      this.warm?.(); // background-compile its shaders before its first render
     });
   }
 

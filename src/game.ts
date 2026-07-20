@@ -368,6 +368,11 @@ export class Game {
     this.medkits = new AmmoCrates(this.renderer.scene, 0x8a2a2a, 0x5a1414, "models/props/medkit.glb", 0.4); // CC0 first-aid kit (bandage restock)
     this.viewmodel = new Viewmodel(this.renderer.scene); // first-person weapon model (shown for the soldier)
     this.baseModels = new BaseModels(this.renderer.scene); // decorative team HQ over each base
+    // Background shader prewarm on the REAL scene after each async glTF mounts, so its first render doesn't
+    // stall on a main-thread compile. Camera read lazily — it swaps between Walker/drone.
+    const warm = () => this.renderer.warmScene(this.player.camera);
+    this.viewmodel.setWarm(warm);
+    this.baseModels.setWarm(warm);
     this.initFlashes();
     buildDefaultScene(this.grid);
     this.mesher.setRingBounds(CITY_VOX.x1, CITY_VOX.z1); this.mesher.rebuild(this.grid); this.seedMeshChunks();
@@ -394,6 +399,7 @@ export class Game {
     this.input.onKey = (c) => this.onKey(c);
 
     this.remotes = new RemoteDrones(this.renderer.scene, this.physics);
+    this.remotes.setWarm(warm); // avatar models too — same background shader prewarm
     this.net.onMessage = (m) => this.onNet(m);
     this.setupModeMenu();
   }

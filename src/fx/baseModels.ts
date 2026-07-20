@@ -15,8 +15,12 @@ const HQ_HEIGHT = 5; // metres — the model is normalized to this so the barrac
 export class BaseModels {
   private readonly group = new THREE.Group();
   private token = 0;
+  private warm?: () => void; // background shader prewarm, fired after each HQ model mounts
 
   constructor(private readonly scene: THREE.Scene) { this.scene.add(this.group); }
+
+  /** Hook called after each HQ glTF mounts, so the game can prewarm its shaders off the first render. */
+  setWarm(fn: () => void): void { this.warm = fn; }
 
   /** (Re)place an HQ over every objective site. Called on each dvh world build. Empty/non-dvh → clears them. */
   build(sites: readonly ObjSite[]): void {
@@ -37,6 +41,7 @@ export class BaseModels {
         for (const mat of m.materials) { mat.emissive.setHex(tint); mat.emissiveIntensity = 0.4; } // team accent glow
         model.traverse((o) => { const me = o as THREE.Mesh; if (me.isMesh) { me.castShadow = true; me.receiveShadow = true; } });
         this.group.add(model);
+        this.warm?.(); // background-compile its shaders before its first render
       });
     }
   }

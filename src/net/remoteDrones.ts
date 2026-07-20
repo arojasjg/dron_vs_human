@@ -120,7 +120,12 @@ export class RemoteDrones {
   private readonly visorMat = new THREE.MeshStandardMaterial({ color: 0x121a22, roughness: 0.15, metalness: 0.3, emissive: 0x08222a });
   private readonly bootMat = new THREE.MeshStandardMaterial({ color: 0x1c1a17, roughness: 0.9 });
 
+  private warm?: () => void; // background shader prewarm, fired after each avatar model mounts
+
   constructor(private readonly scene: THREE.Scene, private readonly physics: Physics) {}
+
+  /** Hook called after each glTF avatar mounts, so the game can prewarm its shaders off the first render. */
+  setWarm(fn: () => void): void { this.warm = fn; }
 
   get count(): number { return this.drones.size; }
 
@@ -179,6 +184,7 @@ export class RemoteDrones {
       d.curClip = "Idle";
       d.model = m;                                  // set LAST so update() only drives a fully-ready model
       this.tintModel(d);                            // apply the current team accent to the freshly-loaded materials
+      this.warm?.();                                // background-compile its shaders before its first render
     });
   }
 
