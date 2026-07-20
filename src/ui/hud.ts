@@ -28,6 +28,8 @@ export type Mode = "coop" | "dvh" | "vs" | "free";
 export interface MenuCallbacks {
   create: (mode: Mode) => void;
   join: (code: string) => void;
+  settings: () => void; // open the settings panel over the menu
+  help: () => void; // open the combat-controls help over the menu
 }
 /** Lobby callbacks: pick your role/team/class (PvP), the host starts the match, or leave back to the menu. */
 export interface LobbyCallbacks {
@@ -524,6 +526,9 @@ export class Hud {
       const code = input.value.trim().toUpperCase().slice(0, 8);
       if (code) { menu.style.display = "none"; cb.join(code); }
     };
+    // settings/help overlay ON TOP of the menu — keep the menu open so it's there after closing
+    document.getElementById("hud-btn-settings")!.onclick = () => cb.settings();
+    document.getElementById("hud-btn-help")!.onclick = () => cb.help();
     this.refreshGear(); // mode menu up → hide the gear
   }
 
@@ -763,7 +768,7 @@ function inject(): void {
         linear-gradient(var(--tick),var(--tick)) right bottom/8px 1.5px no-repeat,
         linear-gradient(var(--tick),var(--tick)) right bottom/1.5px 8px no-repeat,
         var(--bg); }
-    #hud-help { top: 14px; left: 14px; max-width: 366px; }
+    #hud-help { top: 14px; left: 14px; max-width: 366px; z-index: 50; } /* above the full-screen menu so "Cómo jugar" isn't a dead button */
     #hud-help hr { border: none; border-top: 1px solid var(--edge2); margin: 7px 0; }
     #hud-help b { color: var(--phos); font-weight: 700; }
     #hud-stats { display: none; top: 14px; right: 14px; font-variant-numeric: tabular-nums; color: var(--muted); letter-spacing: .06em; }
@@ -858,7 +863,7 @@ function inject(): void {
     #hud-scoreboard .sb-row, #hud-win .sb-row { font-size: 12px; padding: 3px 0; color: var(--ink); white-space: nowrap; }
     #hud-scoreboard .sb-row.me, #hud-win .sb-row.me { color: var(--phos); }
     #hud-scoreboard .sb-tag, #hud-win .sb-tag { color: var(--phos-dim); font-size: 9px; letter-spacing: .1em; }
-    #hud-menu { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    #hud-menu { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; z-index: 40;
       pointer-events: auto; backdrop-filter: blur(3px);
       background:
         radial-gradient(60% 55% at 50% 42%, rgba(16,46,34,.5), transparent 70%),
@@ -922,6 +927,9 @@ function inject(): void {
     @keyframes kf { 0%{opacity:0; transform:translateX(8px)} 8%{opacity:1; transform:none} 82%{opacity:1} 100%{opacity:0} }
     #hud-menu .room { display: flex; gap: 10px; align-items: center; justify-content: center; font-size: 11px;
       color: var(--phos-dim); letter-spacing: .16em; text-transform: uppercase; }
+    #hud-menu .mrow2 { display: flex; gap: 10px; justify-content: center; margin-top: 14px; } /* secondary row: Ajustes / Cómo jugar */
+    #hud-menu .mrow2 button { flex: 0 0 auto; text-align: center; padding: 8px 14px; font-size: 11px; text-transform: uppercase;
+      letter-spacing: .12em; color: var(--phos-dim); clip-path: none; }
     #hud-room { pointer-events: auto; background: rgba(0,0,0,.4); border: 1px solid var(--edge);
       color: var(--ink); padding: 8px 10px; font-size: 13px; width: 140px; font-family: var(--mono);
       letter-spacing: .3em; text-align: center; }
@@ -933,7 +941,7 @@ function inject(): void {
       font-size: 16px; line-height: 1; backdrop-filter: blur(3px);
       clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%); }
     #hud-gear:hover { background: rgba(107,255,158,.14); border-color: var(--phos); box-shadow: 0 0 12px rgba(107,255,158,.3); }
-    #hud-settings { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    #hud-settings { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; z-index: 50;
       pointer-events: auto; backdrop-filter: blur(3px);
       background:
         repeating-linear-gradient(90deg, rgba(107,255,158,.05) 0 1px, transparent 1px 46px),
@@ -1108,6 +1116,7 @@ function inject(): void {
           <button id="hud-btn-dvh"><b>⚔ Jugador vs Jugador</b><small>Dron vs Soldado — elige tu bando</small></button>
         </div>
         <div class="room">Unirse: <input id="hud-room" maxlength="8" placeholder="CÓDIGO" /> <button id="hud-btn-join">Entrar</button></div>
+        <div class="mrow2"><button id="hud-btn-settings">⚙ Ajustes</button><button id="hud-btn-help">❓ Cómo jugar</button></div>
       </div>
     </div>
     <div id="hud-lobby">

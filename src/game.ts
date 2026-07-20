@@ -427,7 +427,7 @@ export class Game {
       this.hud.setHealth(this.hp, this.myMaxHp(), true);
       return;
     }
-    this.hud.showModeMenu({ create: (mode) => this.createRoom(mode), join: (code) => this.joinRoom(code) });
+    this.hud.showModeMenu({ create: (mode) => this.createRoom(mode), join: (code) => this.joinRoom(code), settings: () => this.openSettings(), help: () => this.hud.toggleHelp(true) });
   }
 
   // --- lobby --------------------------------------------------------------
