@@ -265,12 +265,12 @@ export class Hud {
     el.style.opacity = "0";
   }
 
-  /** A crosshair hit marker: a quick white X on a confirmed hit, red + bigger on a kill. */
-  hitMarker(kind: "hit" | "kill" = "hit"): void {
-    this.hit.className = kind === "kill" ? "kill" : "";
+  /** A crosshair hit marker: a quick white X on a confirmed hit, red + bigger on a kill, gold on a headshot. */
+  hitMarker(kind: "hit" | "kill" | "head" = "hit"): void {
+    this.hit.className = kind === "hit" ? "" : kind;
     this.hit.style.transition = "none";
     this.hit.style.opacity = "1";
-    this.hit.style.transform = kind === "kill" ? "scale(1.6)" : "scale(1)";
+    this.hit.style.transform = kind === "kill" ? "scale(1.6)" : kind === "head" ? "scale(1.3)" : "scale(1)"; // headshot reads distinct from both plain hit and kill
     void this.hit.offsetWidth;
     this.hit.style.transition = "opacity .2s ease-out, transform .2s ease-out";
     this.hit.style.opacity = "0";
@@ -770,6 +770,7 @@ function inject(): void {
       margin: -3.5px 0 0 -1px; background: var(--phos); box-shadow: 0 0 3px rgba(0,0,0,.8); }
     #hud-hit::before { transform: rotate(45deg); } #hud-hit::after { transform: rotate(-45deg); }
     #hud-hit.kill::before, #hud-hit.kill::after { background: var(--red); height: 9px; margin-top: -4.5px; }
+    #hud-hit.head::before, #hud-hit.head::after { background: #ffcf3f; height: 9px; margin-top: -4.5px; box-shadow: 0 0 4px rgba(255,207,63,.9); }
     #hud-mode { top: 14px; left: 50%; transform: translateX(-50%); display: none; font-size: 11px;
       letter-spacing: .16em; text-transform: uppercase; color: var(--phos-dim); }
     #hud-health { bottom: 70px; left: 50%; transform: translateX(-50%); display: none; width: 260px;

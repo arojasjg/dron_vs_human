@@ -198,13 +198,23 @@ describe("bullet-vs-player hit test (rayHitsSphere)", () => {
 });
 
 describe("hitZone — two-zone body/head test (body gate unchanged, head flags the multiplier)", () => {
-  const BODY_R = 1.0, HEAD_DY = 0.15, HEAD_R = 0.4; // the PvP tuning game.ts wires
+  const BODY_R = 1.0, HEAD_DY = 0.15, HEAD_R = 0.28; // the tightened PvP tuning game.ts wires (headR 0.4→0.28)
   it("a ray straight at the head center is a headshot", () => {
     // shooter at origin firing +z; target center 5 m down-range; aim at center + headDy
     expect(hitZone(0, HEAD_DY, 0, 0, 0, 1, 0, 0, 5, 20, BODY_R, HEAD_DY, HEAD_R)).toEqual({ hit: true, head: true });
   });
+  it("center-mass aim 0.35 below the head is now a BODY hit, not a headshot (would have procd head at 0.4)", () => {
+    // ray at y=-0.20 → 0.35 below the head point (0.15): outside the 0.28 head sphere, inside the 1.0 body
+    expect(hitZone(0, -0.20, 0, 0, 0, 1, 0, 0, 5, 20, BODY_R, HEAD_DY, HEAD_R)).toEqual({ hit: true, head: false });
+    // the same ray WAS a headshot under the old generous 0.4 head radius — this is the fidelity we tightened
+    expect(hitZone(0, -0.20, 0, 0, 0, 1, 0, 0, 5, 20, BODY_R, HEAD_DY, 0.4)).toEqual({ hit: true, head: true });
+  });
+  it("a ray 0.3 off the head laterally at close range is a body hit, not a headshot", () => {
+    // fired parallel +z at x=0.3, head height: 0.3 lateral > 0.28 head R (miss head) but < 1.0 body R (hit body)
+    expect(hitZone(0.3, HEAD_DY, 0, 0, 0, 1, 0, 0, 5, 20, BODY_R, HEAD_DY, HEAD_R)).toEqual({ hit: true, head: false });
+  });
   it("a body hit BELOW the head is a normal hit (no multiplier)", () => {
-    // ray passes bodyR*0.6 below center → inside the body, outside the 0.4 head sphere at +0.15
+    // ray passes bodyR*0.6 below center → inside the body, outside the 0.28 head sphere at +0.15
     expect(hitZone(0, -BODY_R * 0.6, 0, 0, 0, 1, 0, 0, 5, 20, BODY_R, HEAD_DY, HEAD_R)).toEqual({ hit: true, head: false });
   });
   it("a wide miss is {hit:false, head:false}", () => {

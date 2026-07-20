@@ -1035,8 +1035,8 @@ export class Game {
     if (wall && wallBlocks(hitT, wall.distance)) return 0;
     const bp = this.aiBots.get(hitId)!;
     if (this.smokeBlocks(ox, oy, oz, bp.x, bp.y, bp.z)) return 0; // …and you can't shoot a bot THROUGH smoke either
-    // Head sub-zone: the drone's core IS its head (dy 0) — a tight 0.5 sphere inside the forgiving 1.4 gate
-    const head = rayHitsSphere(ox, oy, oz, dx, dy, dz, bp.x, bp.y + 0.0, bp.z, hitT + 0.5, 0.5);
+    // Head sub-zone: the drone's core IS its head (dy 0) — a tight 0.4 sphere inside the forgiving 1.4 gate
+    const head = rayHitsSphere(ox, oy, oz, dx, dy, dz, bp.x, bp.y + 0.0, bp.z, hitT + 0.5, 0.4); // tighter core → headshot rewards a precise hit, not the whole 1.4 body gate
     const dealt = head ? Math.max(1, Math.round(botDmg * HEADSHOT_MULT)) : botDmg;
     if (this.hosting && this.swarm) { if (this.swarm.damageBot(hitId, dealt, dx, dz)) this.onBotDead(hitId); } // pass the shot dir → tanks shield their front
     else if (this.net.connected) this.net.send({ t: "aihitbot", bot: hitId, dmg: dealt });
@@ -1048,7 +1048,7 @@ export class Game {
     const spec = WEAPONS[this.weapon];
     const range = botHitRange(spec, this.scopedNow, this.zoomLevel); // non-scoped reaches the tracer's travel; scoped hip-fire stays short
     const z = this.hitBotAlongRay(ox, oy, oz, dx, dy, dz, range, spec.botDmg ?? 1);
-    if (z) { this.hud.hitMarker(z === 2 ? "kill" : "hit"); this.audio.hitMarker(z === 2); } // headshot → louder cue
+    if (z) { this.hud.hitMarker(z === 2 ? "head" : "hit"); this.audio.hitMarker(z === 2); } // headshot → distinct marker + louder cue (not necessarily a kill)
   }
 
   /** A bot died (host authority): mini explosion + falling wreckage, drop its avatar, credit the shooter. */
@@ -1397,9 +1397,9 @@ export class Game {
     const wall = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 220);
     const maxD = wall ? wall.distance : 220;
     for (const p of this.enemyBuf) {
-      const z = hitZone(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, maxD, 1.0, 0.15, 0.4);
-      if (z.hit) { // headshot → louder cue; the victim stays authoritative on the damage
-        this.hud.hitMarker(z.head ? "kill" : "hit"); this.audio.hitMarker(z.head); return;
+      const z = hitZone(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, maxD, 1.0, 0.15, 0.28);
+      if (z.hit) { // headshot → distinct marker + louder cue (not a kill); the victim stays authoritative on the damage
+        this.hud.hitMarker(z.head ? "head" : "hit"); this.audio.hitMarker(z.head); return;
       }
     }
   }
@@ -1410,7 +1410,7 @@ export class Game {
     const hit = this.grid.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 220);
     const wall = hit ? hit.distance : 220;
     const p = this.player.camera.position;
-    return hitZone(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, wall, 1.0, 0.15, 0.4);
+    return hitZone(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y, p.z, wall, 1.0, 0.15, 0.28);
   }
 
   /** Connects with an explicit mode/room (used by the automated multiplayer test). */
