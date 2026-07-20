@@ -241,7 +241,7 @@ export class RemoteDrones {
     }
   }
 
-  upsert(id: number, x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number, hp: number, role: Role = "drone", maxHp = MAX_HP, yaw = 0, pitch = 0, stance: Stance = 0, team = 0, cls = "", aimX?: number, aimZ?: number, kills = 0, assists = 0, deaths = 0): void {
+  upsert(id: number, x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number, hp: number, role: Role = "drone", maxHp = MAX_HP, yaw = 0, pitch = 0, stance: Stance = 0, team = 0, cls = "", aimX?: number, aimZ?: number, kills = 0, assists = 0, deaths = 0, tintOverride?: number): void {
     let d = this.drones.get(id);
     const isNew = !d;
     if (!d) d = this.create(id);
@@ -254,7 +254,7 @@ export class RemoteDrones {
     d.team = team; d.cls = cls;
     // accent: class colour on the body, team colour as an emissive glow → drone-vs-drone stays readable
     const st = classStats(d.isHuman ? "human" : "drone", cls);
-    d.tintMat.color.setHex(st.tint);
+    d.tintMat.color.setHex(tintOverride ?? st.tint); // AI drones override with a per-archetype hue; human/default path unchanged
     d.tintMat.emissive.setHex(TEAM_COLOR[team === 1 ? 1 : 0]);
     d.tintMat.emissiveIntensity = 0.55;
     this.tintModel(d); // if a glTF model is loaded, give ITS materials the same team accent (per-instance)

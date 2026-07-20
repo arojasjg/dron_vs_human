@@ -6,6 +6,7 @@ import {
   dmgScale, archDamage, difficultyMul,
   pickThreatTarget, beingAimedAt, separation, shouldBoom, applyHeal, type AiBoom,
   beliefAccuracy, beliefGoal, pickAudible, holdMult, shouldSuppress, searchPoint, openingSeek, type AiNoise, type AiBreak,
+  AI_KINDS, kindIdx, kindFromIdx, archTint,
 } from "../src/net/ai";
 
 describe("enemy AI — pure decision helpers", () => {
@@ -26,6 +27,26 @@ describe("enemy AI — pure decision helpers", () => {
     const ts = [{ id: 1, x: 100, y: 0, z: 0 }, { id: 2, x: 5, y: 0, z: 0 }, { id: 3, x: -50, y: 0, z: 0 }];
     expect(pickTarget(0, 0, ts)).toBe(1); // index of id 2 (closest)
     expect(pickTarget(0, 0, [])).toBe(-1);
+  });
+
+  it("AI_KINDS lists all six archetypes with no duplicates", () => {
+    expect(AI_KINDS).toHaveLength(6);
+    expect(new Set(AI_KINDS).size).toBe(6);
+    for (const k of ["chaser", "gunner", "diver", "tank", "kamikaze", "support"] as const) expect(AI_KINDS).toContain(k);
+  });
+
+  it("kindIdx/kindFromIdx round-trip, and out-of-range/NaN → a valid default", () => {
+    for (const k of AI_KINDS) expect(kindFromIdx(kindIdx(k))).toBe(k);
+    expect(kindFromIdx(-1)).toBe("chaser");   // legacy/underflow
+    expect(kindFromIdx(99)).toBe("chaser");   // overflow
+    expect(kindFromIdx(NaN)).toBe("chaser");  // garbage index
+    expect(AI_KINDS).toContain(kindFromIdx(-1));
+  });
+
+  it("archTint gives every kind a DISTINCT in-range hex", () => {
+    const tints = AI_KINDS.map(archTint);
+    expect(new Set(tints).size).toBe(6);      // all six distinct
+    for (const c of tints) { expect(typeof c).toBe("number"); expect(c).toBeGreaterThanOrEqual(0x000000); expect(c).toBeLessThanOrEqual(0xffffff); }
   });
 
   it("waveSize grows ~×1.6 early, then PLATEAUS at the cap (survivable late waves)", () => {

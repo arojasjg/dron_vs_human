@@ -48,6 +48,22 @@ export const ARCHETYPES: Record<AiKind, { speed: number; hp: number; hold: numbe
   support:  { speed: 7.0,  hp: 4,  hold: 30, fireCd: 2.2, high: 12, dmg: 2 },   // hangs back, heals + hastens the swarm — barely fights
 };
 
+// Wire-order of the archetypes so a bot's kind rides the net as ONE small int (its index) — FROZEN: peers map
+// the index back with kindFromIdx, so re-ordering would recolour every drone on a mixed-version match.
+export const AI_KINDS: AiKind[] = ["chaser", "gunner", "diver", "tank", "kamikaze", "support"];
+export function kindIdx(k: AiKind): number { return AI_KINDS.indexOf(k); }
+export function kindFromIdx(i: number): AiKind { return AI_KINDS[i] ?? "chaser"; } // out-of-range/legacy → default
+/** Per-archetype avatar tint (distinct hues so the swarm READS: tank ≠ chaser ≠ kamikaze). Placeholders. */
+export const ARCH_TINT: Record<AiKind, number> = {
+  chaser:   0x00d0ff, // fast/fragile — bright cyan
+  gunner:   0xffd23f, // ranged workhorse — yellow
+  diver:    0xff8a3d, // high-diver — orange
+  tank:     0xff3b30, // armored threat — red
+  kamikaze: 0xff2fd0, // rammer — hot magenta (danger)
+  support:  0x35dd6a, // healer — green
+};
+export function archTint(k: AiKind): number { return ARCH_TINT[k]; }
+
 const HEAL_RADIUS = 14;   // a support tops up allies within this radius
 const HEAL_AMT = 1;       // hp restored per heal pulse
 const HEAL_CD = 1.2;      // seconds between a support's heal pulses (reuses the grenade timer slot)
