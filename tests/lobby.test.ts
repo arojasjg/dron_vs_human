@@ -28,6 +28,11 @@ describe("lobby — roster reducers (pure, deterministic)", () => {
     expect(hostOf(s)).toBe(5);
     expect(hostOf(emptyLobby())).toBeNull();
   });
+  it("hostOf IGNORES the id-0 sentinel (a phantom from a pre-hello lobby action) → the real host is found", () => {
+    const s = applyJoin(applyJoin(applyJoin(emptyLobby(), 0), 23), 24); // id 0 = pre-relay-id phantom
+    expect(hostOf(s)).toBe(23);                 // NOT 0 → the real host (23) can pass its net.id===hostOf start check
+    expect(hostOf(applyJoin(emptyLobby(), 0))).toBeNull(); // phantom-only lobby → null (caller falls back to net.id)
+  });
   it("pick sets a player's role (free choice, switchable), joining an unseen id", () => {
     let s = applyJoin(emptyLobby(), 7);
     expect(s.players[0].role).toBeNull();

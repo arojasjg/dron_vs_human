@@ -36,9 +36,14 @@ export function applyPick(s: LobbyState, id: number, role: Role): LobbyState {
   return { players: s.players.map((p) => (p.id === id ? { ...p, role } : p)) };
 }
 
-/** The host is the LOWEST player id (the first to create/join the room). null on an empty lobby. */
+/** The host is the LOWEST REAL player id (the first to create/join the room). Ignores the id-0 sentinel —
+ *  a lobby action taken before the relay assigns an id can leave a phantom id-0 in the roster; counting it
+ *  as host would make the true host fail its `net.id === hostOf` check and be unable to start. null on an
+ *  empty (or phantom-only) lobby. */
 export function hostOf(s: LobbyState): number | null {
-  return s.players.length ? s.players.reduce((m, p) => Math.min(m, p.id), Infinity) : null;
+  let m = Infinity;
+  for (const p of s.players) if (p.id > 0 && p.id < m) m = p.id;
+  return m === Infinity ? null : m;
 }
 
 /** The host may start once at least one player is present. Roles are free-choice, so there is no balance gate. */

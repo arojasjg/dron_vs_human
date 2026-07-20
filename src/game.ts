@@ -470,7 +470,7 @@ export class Game {
 
   /** Re-announce our presence (id, chosen role, mode) so the roster converges on every client. */
   private broadcastLobby(): void {
-    this.lobby = applyJoin(this.lobby, this.net.id, this.myRole);
+    if (this.net.id > 0) this.lobby = applyJoin(this.lobby, this.net.id, this.myRole); // never seed the roster with the id-0 sentinel (pre-hello) → no phantom host
     if (!this.teamChosen) this.pendingTeam = this.autoTeam(); // show the auto-balanced team until they pick
     if (this.net.connected) this.net.send({ t: "lobby", role: this.myRole, mode: this.pendingMode, map: this.pendingMapSize });
     this.refreshLobby();
@@ -479,7 +479,7 @@ export class Game {
   private lobbyPick(role: Role): void {
     this.myRole = role;
     this.pendingClass = defaultClass(role); // switching type resets to that side's balanced default class
-    this.lobby = applyPick(this.lobby, this.net.id, role);
+    if (this.net.id > 0) this.lobby = applyPick(this.lobby, this.net.id, role); // don't stamp a pick under the id-0 sentinel
     this.broadcastLobby();
   }
 
