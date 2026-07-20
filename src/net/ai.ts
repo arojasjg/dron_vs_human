@@ -305,6 +305,36 @@ export function openingSeek(
   return null;
 }
 
+/** Lateral unit dir [dx,dz] from a roof-stranded bot to the nearest clear-column point past the roof edge
+ *  (goal-biased angular fan, then the remaining compass directions so an edge is found even when the goal side
+ *  is fully roofed); null if the column straight below is already clear (not on a roof) or no edge within
+ *  `reach`. Pure over `solid`. Bounded: 8 dirs × ~reach/step radial steps × ~drop column samples per call. */
+const ROOF_FAN: readonly number[] = [0, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, (3 * Math.PI) / 4, -(3 * Math.PI) / 4, Math.PI];
+export function roofEdgeDir(
+  bx: number, by: number, bz: number, gdx: number, gdz: number,
+  solid: (x: number, y: number, z: number) => boolean,
+  reach = 8, step = 0.6, drop = 4,
+): [number, number] | null {
+  const clearBelow = (x: number, z: number): boolean => {
+    for (let dy = 0.5; dy <= drop; dy += 1) if (solid(x, by - dy, z)) return false;
+    return true;
+  };
+  if (clearBelow(bx, bz)) return null;
+  const gl = Math.hypot(gdx, gdz) || 1e-3;
+  const fx = gdx / gl, fz = gdz / gl;
+  for (let d = step; d <= reach; d += step) {
+    for (const a of ROOF_FAN) {
+      const c = Math.cos(a), s = Math.sin(a);
+      const sx = bx + (fx * c - fz * s) * d, sz = bz + (fx * s + fz * c) * d;
+      if (clearBelow(sx, sz)) {
+        const L = Math.hypot(sx - bx, sz - bz) || 1e-3;
+        return [(sx - bx) / L, (sz - bz) / L];
+      }
+    }
+  }
+  return null;
+}
+
 /** Index of the best AUDIBLE noise from (bx,bz): largest positive margin (loud − dist); -1 if none is within
  *  its loudness radius. A loud explosion beats a near-but-quiet footstep. Pure. */
 export function pickAudible(bx: number, bz: number, noises: readonly AiNoise[]): number {

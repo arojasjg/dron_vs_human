@@ -5,7 +5,7 @@ import {
   acquireDelay, type AiFire, type AiTarget,
   dmgScale, archDamage, difficultyMul,
   pickThreatTarget, beingAimedAt, separation, shouldBoom, applyHeal, type AiBoom,
-  beliefAccuracy, beliefGoal, pickAudible, holdMult, shouldSuppress, searchPoint, openingSeek, type AiNoise, type AiBreak,
+  beliefAccuracy, beliefGoal, pickAudible, holdMult, shouldSuppress, searchPoint, openingSeek, roofEdgeDir, type AiNoise, type AiBreak,
   AI_KINDS, kindIdx, kindFromIdx, archTint,
 } from "../src/net/ai";
 
@@ -542,6 +542,43 @@ describe("openingSeek — steer a blocked bot toward a door/window (pure)", () =
     const a = openingSeek(3.5, 0, 1, 0, twoDoors, 0.1); // low seed → +z first
     const b = openingSeek(3.5, 0, 1, 0, twoDoors, 0.9); // high seed → −z first
     expect(Math.sign(a![1])).not.toBe(Math.sign(b![1]));
+  });
+});
+
+describe("roofEdgeDir — lateral direction off a roof toward the nearest edge (pure)", () => {
+  const solid = (x: number, y: number, z: number) => x >= 0 && x <= 10 && z >= 0 && z <= 10 && y >= 0 && y <= 15;
+  it("on the roof center with goal +x → points roughly +x (nearest clear column past x=10)", () => {
+    const d = roofEdgeDir(5, 17, 5, 1, 0, solid);
+    expect(d).not.toBeNull();
+    expect(d![0]).toBeGreaterThan(0);
+    expect(Math.abs(d![1])).toBeLessThan(0.5);
+  });
+  it("on the roof with goal -z → points roughly [0,-1] (the edge on the goal side)", () => {
+    const d = roofEdgeDir(5, 17, 5, 0, -1, solid);
+    expect(d).not.toBeNull();
+    expect(d![1]).toBeLessThan(0);
+    expect(Math.abs(d![0])).toBeLessThan(0.5);
+  });
+  it("goal pointing INTO the roof interior → fallback compass scan still finds the near opposite edge", () => {
+    const d = roofEdgeDir(2, 17, 5, 1, 0, solid);
+    expect(d).not.toBeNull();
+    const clearBelow = (x: number, z: number) => {
+      for (let dy = 0.5; dy <= 4; dy += 1) if (solid(x, 17 - dy, z)) return false;
+      return true;
+    };
+    let leads = false;
+    for (let r = 0.6; r <= 8; r += 0.6) if (clearBelow(2 + d![0] * r, 5 + d![1] * r)) leads = true;
+    expect(leads).toBe(true);
+  });
+  it("in open air above the building (column below already clear) → null, not on a roof", () => {
+    expect(roofEdgeDir(5, 30, 5, 1, 0, solid)).toBeNull();
+  });
+  it("returned vector is unit-length and finite", () => {
+    for (const d of [roofEdgeDir(5, 17, 5, 1, 0, solid), roofEdgeDir(5, 17, 5, 0, -1, solid), roofEdgeDir(2, 17, 5, 1, 0, solid)]) {
+      expect(d).not.toBeNull();
+      expect(Number.isFinite(d![0]) && Number.isFinite(d![1])).toBe(true);
+      expect(Math.hypot(d![0], d![1])).toBeCloseTo(1, 5);
+    }
   });
 });
 
