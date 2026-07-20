@@ -19,6 +19,7 @@ export interface AiBot {
   fx: number; fz: number;                   // facing (unit XZ toward the current belief) — drives the tank's shield
   okx: number; okz: number; oky: number; okT: number; // LATCHED building opening (world XZ + entry height + time); okT < 0 = none
   stun: number;                             // seconds of EMP stun remaining — while >0 the bot is disabled (no move/fire)
+  sacq: number;                             // seconds of CONTINUOUS sight on the target — gates the first shot after (re)acquiring LOS
 }
 export interface AiTarget {
   id: number; x: number; y: number; z: number; vx?: number; vz?: number;
@@ -82,6 +83,9 @@ export function fireCdScale(wave: number): number { return 1 / (1 + Math.min(2.2
 export function hpBonus(wave: number): number { return Math.floor(Math.max(0, wave) / 2); }
 /** Aim spread (radians of jitter added to the fire dir) — TIGHTENS with the wave, so late drones are deadly. */
 export function spread(wave: number): number { return Math.max(0.008, 0.2 - Math.max(0, wave) * 0.025); }
+/** Continuous-sight seconds a bot must hold LOS before its FIRST shot — a fair reaction window that
+ *  TIGHTENS with the wave (late drones snap on faster). Pure. */
+export function acquireDelay(wave: number): number { return Math.max(0.12, 0.4 - Math.max(0, wave) * 0.03); }
 /** Gentle per-wave damage ramp for AI shots — bounded so late waves sting without one-shotting. Pure. */
 export function dmgScale(wave: number): number { return 1 + Math.min(0.8, Math.max(0, wave) * 0.06); }
 /** Per-archetype AI shot damage at a given wave: the archetype's base × the wave ramp. Pure. */
@@ -347,7 +351,7 @@ export class AiSwarm {
       this.bots.set(this.nextId, {
         id: this.nextId, x: cx + Math.cos(a) * radius, y: y + st.high * 0.5, z: cz + Math.sin(a) * radius,
         hp, maxHp: hp, cd: rng() * st.fireCd, gcd: rng() * this.GREN_CD, kind, seed: rng(), orbit: rng() < 0.5 ? 1 : -1,
-        lsx: cx, lsz: cz, lsT: -1, ba: 0, bt: -1, fx: 0, fz: 0, okx: 0, okz: 0, oky: 0, okT: -1, stun: 0,
+        lsx: cx, lsz: cz, lsT: -1, ba: 0, bt: -1, fx: 0, fz: 0, okx: 0, okz: 0, oky: 0, okT: -1, stun: 0, sacq: 0,
       });
       this.nextId++;
     }
@@ -409,6 +413,7 @@ export class AiSwarm {
       const canSee = los(b.x, b.y, b.z, t.x, aimY, t.z);
       const distXZ = Math.hypot(t.x - b.x, t.z - b.z) || 1e-3;  // true distance (fire/boom/drop gates)
       if (canSee) { b.lsx = t.x; b.lsz = t.z; b.lsT = this.t; b.ba = 1; b.bt = t.id; } // saw → exact fix, bind the target
+      if (canSee) b.sacq = Math.min(b.sacq + dt, 2); else b.sacq = 0; // grow while continuously sighted; reset on any LOS break
       const perceived = b.lsT >= 0;
       if (canSee || ni >= 0) { this.lastContact.x = b.lsx; this.lastContact.z = b.lsz; this.lastContact.t = this.t; } // share it
       else if (!perceived && this.lastContact.t >= 0) { b.lsx = this.lastContact.x; b.lsz = this.lastContact.z; } // never perceived → head to the swarm's last contact
@@ -529,7 +534,7 @@ export class AiSwarm {
       // marked `blind` so the game side deals damage only if it can actually see (no wallhack), just pressure.
       b.cd -= dt;
       const heardBelief = b.ba < 1 && perceived && age < 1.5; // a recent noise fix we haven't confirmed by sight
-      if (b.kind !== "kamikaze" && canSee && shouldFire(distXZ, b.cd, this.RANGE)) {
+      if (b.kind !== "kamikaze" && canSee && b.sacq >= acquireDelay(this.wave) && shouldFire(distXZ, b.cd, this.RANGE)) {
         b.cd = a.fireCd * fcd;
         const aim = leadAim(b.x, b.y, b.z, t.x, aimY, t.z, t.vx ?? 0, t.vz ?? 0, this.PROJ);
         const fdx = aim[0] + (aimRng() - 0.5) * 2 * sprd;

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   seekDir, shouldFire, waveSize, pickTarget, orbitDir, jink, leadAim, spread,
   speedScale, fireCdScale, hpBonus, pickKind, ARCHETYPES, AiSwarm, shouldDrop, homingStep, type AiDrop, type AiKind,
+  acquireDelay, type AiFire,
   dmgScale, archDamage,
   pickThreatTarget, beingAimedAt, separation, shouldBoom, applyHeal, type AiBoom,
   beliefAccuracy, beliefGoal, pickAudible, holdMult, shouldSuppress, searchPoint, openingSeek, type AiNoise, type AiBreak,
@@ -77,6 +78,13 @@ describe("enemy AI — pure decision helpers", () => {
   it("every archetype declares a non-negative dmg base", () => {
     const kinds: AiKind[] = ["chaser", "gunner", "diver", "tank", "kamikaze", "support"];
     for (const k of kinds) expect(ARCHETYPES[k].dmg).toBeGreaterThanOrEqual(0);
+  });
+
+  it("acquireDelay: a fair first-shot reaction window that TIGHTENS with the wave, floored, negative-safe", () => {
+    expect(acquireDelay(0)).toBeCloseTo(0.4);
+    for (let w = 0; w < 9; w++) expect(acquireDelay(w + 1)).toBeLessThan(acquireDelay(w)); // strictly tightens until the floor
+    expect(acquireDelay(100)).toBe(0.12);                // floored — late waves still telegraph a little
+    expect(acquireDelay(-5)).toBe(0.4);                  // guards a negative wave
   });
 
   it("spread TIGHTENS with the wave (deadlier late) and floors", () => {
@@ -201,14 +209,30 @@ describe("enemy AI — host swarm simulation", () => {
     expect(Math.abs(s.list[0].x - x0)).toBeLessThan(20); // stayed near spawn (~60), didn't rush the origin
   });
 
-  it("tick: fires a LED shot only when it can see the target, is in range and off cooldown", () => {
+  it("tick: fires a LED shot only when it can see the target, is in range, off cooldown AND past acquisition", () => {
     const s = new AiSwarm();
     s.spawnWave(20, 0, 0, 5, () => 0); // gunners in range (20 < RANGE 44), cd 0
-    const fires = s.tick(0.1, [{ id: 7, x: 0, y: 1, z: 0, vx: 0, vz: 4 }], () => true, () => 0.5); // aimRng 0.5 → no jitter
+    let fires: AiFire[] = [];
+    for (let i = 0; i < 6 && fires.length === 0; i++) // a few sighted ticks so sacq clears the acquisition window
+      fires = s.tick(0.1, [{ id: 7, x: 0, y: 1, z: 0, vx: 0, vz: 4 }], () => true, () => 0.5); // aimRng 0.5 → no jitter
     expect(fires.length).toBeGreaterThan(0);
     const f = fires[0];
     expect(Math.hypot(f.dx, f.dy, f.dz)).toBeCloseTo(1, 3); // a unit fire direction
     expect(f.targetId).toBe(7);
+  });
+
+  it("tick: a freshly-SIGHTED bot holds fire until it has held LOS for acquireDelay; a LOS break resets the timer", () => {
+    const s = new AiSwarm();
+    s.spawnWave(20, 0, 0, 5, () => 0); // gunners in range, cd 0 → only acquisition gates the first shot
+    const tgt = [{ id: 7, x: 0, y: 1, z: 0 }];
+    const delay = acquireDelay(s.wave);
+    let t = 0;
+    const fired: number[] = [];
+    for (let i = 0; i < 6; i++) { t += 0.1; if (s.tick(0.1, tgt, () => true, () => 0.5).length > 0) fired.push(t); }
+    expect(fired.length).toBeGreaterThan(0);             // sustained sight → it DOES engage
+    expect(fired[0]).toBeGreaterThanOrEqual(delay);      // …but never before the acquisition window elapsed
+    s.tick(0.1, tgt, () => false, () => 0.5);            // one blind tick → LOS break
+    expect(s.list.every((b) => b.sacq === 0)).toBe(true); // the timer resets → the next peek is delayed again
   });
 
   it("FALSIFY: 500 ticks with flickering LOS + a moving target stay finite and above ground", () => {
