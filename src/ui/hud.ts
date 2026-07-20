@@ -1,6 +1,7 @@
 import { MATERIALS, type MaterialId } from "../world/materials";
 import { classList, classStats, classLoadout, buildScoreboard, TEAM_LABEL, type Role, type ScoreRow } from "../net/roles";
 import { WEAPONS, roleLoadout, type Weapon, type Ammo } from "../net/weapons";
+import { netStatusLabel, type NetStatus } from "../net/net";
 import { MAP_SIZES } from "../build/prefabs";
 import { ClassPreview } from "./classPreview";
 import type { Quality } from "../engine/quality";
@@ -104,6 +105,7 @@ export class Hud {
   private readonly help: HTMLElement;
   private readonly toast: HTMLElement;
   private readonly modeEl: HTMLElement;
+  private readonly netEl: HTMLElement;
   private readonly health: HTMLElement;
   private readonly healthFill: HTMLElement;
   private readonly healthText: HTMLElement;
@@ -138,6 +140,7 @@ export class Hud {
     this.help = document.getElementById("hud-help")!;
     this.toast = document.getElementById("hud-toast")!;
     this.modeEl = document.getElementById("hud-mode")!;
+    this.netEl = document.getElementById("hud-net")!;
     this.health = document.getElementById("hud-health")!;
     this.healthFill = document.getElementById("hud-health-fill")!;
     this.healthText = document.getElementById("hud-health-text")!;
@@ -298,6 +301,16 @@ export class Hud {
       : mode === "vs" ? "⚔ VS" : "🛠 Libre";
     this.modeEl.textContent = `${label} · sala ${room}`;
     this.modeEl.style.display = "block";
+  }
+
+  /** Connection-status indicator (a coloured dot + label). Shows for connecting/connected/lost; hides when
+   *  "offline" (single-player/sandbox has no net → no indicator). */
+  setNetStatus(s: NetStatus): void {
+    if (s === "offline") { this.netEl.style.display = "none"; return; }
+    const { label, cls } = netStatusLabel(s);
+    this.netEl.className = `panel net-${cls}`;
+    this.netEl.textContent = label;
+    this.netEl.style.display = "block";
   }
 
   /** Wires the end-of-match overlay's buttons (Replay / Menu). Called once by the game so the buttons stay
@@ -814,6 +827,12 @@ function inject(): void {
     #hud-hit.head::before, #hud-hit.head::after { background: #ffcf3f; height: 9px; margin-top: -4.5px; box-shadow: 0 0 4px rgba(255,207,63,.9); }
     #hud-mode { top: 14px; left: 50%; transform: translateX(-50%); display: none; font-size: 11px;
       letter-spacing: .16em; text-transform: uppercase; color: var(--phos-dim); }
+    /* Connection-status indicator: small, top-left corner, unobtrusive. Colour tracks the state class. */
+    #hud-net { top: 42px; left: 14px; display: none; font-size: 10px; padding: 5px 9px;
+      letter-spacing: .1em; text-transform: uppercase; color: var(--ink); }
+    #hud-net.net-connecting { color: var(--amber); }
+    #hud-net.net-connected { color: var(--phos); }
+    #hud-net.net-lost { color: var(--red); }
     #hud-health { bottom: 70px; left: 50%; transform: translateX(-50%); display: none; width: 260px;
       text-align: center; padding: 8px 12px; }
     #hud-health-bar { position: relative; height: 12px; background: rgba(0,0,0,.45); border: 1px solid var(--edge2); overflow: hidden; }
@@ -1080,6 +1099,7 @@ function inject(): void {
     <div id="hud-help" class="panel"></div>
     <div id="hud-stats" class="panel"></div>
     <div id="hud-mode" class="panel"></div>
+    <div id="hud-net" class="panel"></div>
     <div id="hud-score" class="panel"></div>
     <div id="hud-bottom" class="panel">
       <span><span class="tag">Herramienta</span> <b id="hud-tool"></b></span>

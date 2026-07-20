@@ -40,7 +40,7 @@ import { Scenery } from "./fx/scenery";
 import { AmmoCrates } from "./fx/ammoCrates";
 import { BaseModels } from "./fx/baseModels";
 import { Viewmodel } from "./engine/viewmodel";
-import { Net, type NetMsg } from "./net/net";
+import { Net, type NetMsg, type NetStatus } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, buildScoreboard, mvp, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
@@ -233,6 +233,7 @@ export class Game {
   private phase: "menu" | "lobby" | "playing" = "menu"; // menu → lobby (joined, picking) → playing (match live)
   private lobby: LobbyState = emptyLobby();
   private roomCode = "";
+  private netStatus: NetStatus = "offline"; // drives the HUD connection indicator; "offline" = no net → hidden
   private myRole: Role | null = null;   // chosen in the lobby; applied on begin
   private pendingMode: Mode = "coop";   // the mode we'll start (host sets it; joiners learn it from the roster)
   private mapSize: MapSize = "large";        // active map size (large = the historical full map)
@@ -407,6 +408,8 @@ export class Game {
     this.remotes = new RemoteDrones(this.renderer.scene, this.physics);
     this.remotes.setWarm(warm); // avatar models too — same background shader prewarm
     this.net.onMessage = (m) => this.onNet(m);
+    // Surface the socket state to the HUD (net.onState was previously unassigned): open → connected, close → lost.
+    this.net.onState = (open) => { this.netStatus = open ? "connected" : "lost"; this.hud.setNetStatus(this.netStatus); };
     this.setupModeMenu();
   }
 
@@ -427,6 +430,7 @@ export class Game {
       this.hud.setHealth(this.hp, this.myMaxHp(), true);
       return;
     }
+    this.netStatus = "offline"; this.hud.setNetStatus("offline"); // at the menu there's no net → hide any stale indicator
     this.hud.showModeMenu({ create: (mode) => this.createRoom(mode), join: (code) => this.joinRoom(code), settings: () => this.openSettings(), help: () => this.hud.toggleHelp(true) });
   }
 
@@ -443,6 +447,7 @@ export class Game {
     this.myRole = mode === "coop" ? "human" : null;        // co-op: everyone's a soldier; PvP: pick in the lobby
     this.lobby = emptyLobby();
     this.phase = "lobby";
+    this.netStatus = "connecting"; this.hud.setNetStatus("connecting"); // networked session begins → show the indicator
     this.net.connect(code);
     this.showLobbyUi();
     this.audio.ui();

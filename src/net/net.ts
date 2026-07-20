@@ -1,6 +1,19 @@
 /** Thin client for the relay server. Sends/receives JSON messages tagged with a per-player id. */
 export type NetMsg = Record<string, unknown> & { t: string; id?: number };
 
+/** Connection-status states for the HUD indicator. "offline" = no net (single-player/sandbox → no indicator). */
+export type NetStatus = "offline" | "connecting" | "connected" | "lost";
+
+/** Label + a CSS state class for the connection indicator. Pure (three.js-free) so it unit-tests. */
+export function netStatusLabel(s: NetStatus): { label: string; cls: string } {
+  switch (s) {
+    case "connecting": return { label: "🟡 Conectando…", cls: "connecting" };
+    case "connected":  return { label: "🟢 Conectado", cls: "connected" };
+    case "lost":       return { label: "🔴 Conexión perdida", cls: "lost" };
+    default:           return { label: "", cls: "offline" };
+  }
+}
+
 export class Net {
   id = 0;
   connected = false;
