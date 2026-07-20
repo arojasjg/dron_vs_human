@@ -71,7 +71,7 @@ IDs por cluster: **NET** (red/PvP), **CBT** (combate), **RND** (render/perf/mode
 - [ ] CBT-M2 · Arquetipos de bot invisibles; bots dañados sin vida — `src/game.ts:627`. Difundir hp/maxHp + tag de arquetipo; tinte/escala + barra al dañarse.
 - [ ] CBT-M4 · Modelo dual de bala (hitscan instantáneo + tracer físico) → travel-time falso — `projectile.ts:147-169` + `game.ts:2350`. Elegir un modelo.
 - [ ] CBT-M3 · Kamikaze IA power `1.4` vs jugador `1400` (gap 1000×) — `src/game.ts:682`. Verificar carve power.
-- [ ] CBT-M5 · Bots pueden disparar sin telegrafía al primer peek — `src/net/ai.ts:345,528`. Delay de adquisición.
+- [x] CBT-M5 · Bots disparaban sin telegrafía al primer peek. **HECHO (5279d7e):** campo `sacq` (vista continua) + `acquireDelay(wave)` pura; el gate de disparo exige ventana de adquisición (0.4s→0.12s por wave); host-only, determinista. GOLD_AI re-baselineado (review probó empíricamente posiciones byte-idénticas). _(Nota: sacq congela —no resetea— durante EMP stun; defendible.)_
 - [ ] CBT-M6 · Grenade/kamikaze IA daño magic `30` sin falloff — `src/game.ts:686-687`. Escala por distancia.
 - [ ] CBT-M7 · Spawn en anillo determinista — `src/net/ai.ts:339`. Jitter con rng sembrado.
 - [ ] CBT-tune1 · _(nuevo, ciclo 3)_ Balance de alcance vs bots: smg (identidad close-range) y laser ahora plinkean a 180/600 m con `botDmg` plano — considerar falloff de botDmg o cap por arma. `src/net/weapons.ts:botHitRange`.
@@ -139,3 +139,4 @@ _(cada ciclo añade una línea: `Ciclo N | fecha | ítem | commit | gate | notas
 - Ciclo 7 | 2026-07-19 | CBT-C3 (dispersión/bloom armas) | c242f6b | tsc0·vitest474·review-adversarial-OK·smoke-OK | **inicia P1 gameplay feel.** coneSpread+bloom puras; review verificó math del cono (unit+cono+sin NaN) y determinismo. +CBT-C3b (recoil visual intensidad). Fable5.
 - Ciclo 8 | 2026-07-19 | CBT-H4 (recargas con tiempo) | dcd1aa0 | tsc0·vitest479·review-adversarial(1 fix guard)·smoke-OK | reloadDuration pura; review pescó guard muerto en reloadOrScan (movido al tope). +CBT-H4b (HUD reload bar). Fable5.
 - Ciclo 9 | 2026-07-19 | CBT-H3 (daño IA por arquetipo) | 1f207fc | tsc0·vitest482·review-adversarial-OK·smoke-OK | dmg en ARCHETYPES + dmgScale/archDamage puras; review verificó determinismo+host/peer+kamikaze-inalcanzable. Fable5.
+- Ciclo 10 | 2026-07-20 | CBT-M5 (delay de adquisición IA) | 5279d7e | tsc0·vitest484·review-adversarial(prueba empírica golden)·smoke-OK | sacq+acquireDelay puras; GOLD_AI re-baselineado — review PROBÓ empíricamente posiciones byte-idénticas (solo cambia disparo). RULE: golden re-baseline en cambio deliberado exige separar hash movimiento/disparo. Fable5.
