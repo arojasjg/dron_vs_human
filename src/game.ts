@@ -42,7 +42,7 @@ import { BaseModels } from "./fx/baseModels";
 import { Viewmodel } from "./engine/viewmodel";
 import { Net, type NetMsg, type NetStatus } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
-import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, buildScoreboard, mvp, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
+import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, buildScoreboard, mvp, playerRoster, TEAM_LABEL, type Role, type Team, type UnitClass, type ScoreRow } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
 import { AiSwarm, pickTarget, homingStep, difficultyMul, type Difficulty, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, spawnProtected, wallBlocks, smokeOccludes, playerSpawn, safestSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
@@ -2779,7 +2779,7 @@ export class Game {
       id: p.id, team: p.team, isHuman: p.isHuman, kills: p.kills, assists: p.assists, deaths: p.deaths, you: false,
     }));
     rows.push({ id: this.net.id, team: this.myTeam, isHuman: this.role === "human", kills: this.myKills, assists: this.myAssists, deaths: this.myDeaths, you: true });
-    return rows;
+    return playerRoster(rows);
   }
 
   /** Per-team totals for the current mode — shared by the live TAB board and the results screen. */

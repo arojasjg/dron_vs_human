@@ -148,6 +148,10 @@ export function buildScoreboard(rows: ScoreRow[]): ScoreRow[] {
   return [...rows].sort((a, b) => a.team - b.team || b.kills - a.kills || a.deaths - b.deaths || a.id - b.id);
 }
 
+export function playerRoster(rows: ScoreRow[]): ScoreRow[] {
+  return rows.filter((r) => r.id >= 0); // AI-bot avatars use synthetic NEGATIVE ids — never real players
+}
+
 /** The match MVP = the participant with the most kills (tiebreak: more assists, fewer deaths, lower id).
  *  Returns null for an empty roster. Pure. */
 export function mvp(rows: ScoreRow[]): ScoreRow | null {

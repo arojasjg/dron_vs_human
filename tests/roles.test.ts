@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assignRole, roleMaxHp, roleWeapon, teamCounts, teamForRole, enemyTeam, type Role } from "../src/net/roles";
+import { assignRole, roleMaxHp, roleWeapon, teamCounts, teamForRole, enemyTeam, playerRoster, type Role, type ScoreRow } from "../src/net/roles";
 import { applyDeath, type MatchState } from "../src/net/objectives";
 
 describe("assignRole — balanced drone/human teams", () => {
@@ -62,5 +62,27 @@ describe("teamForRole — dvh side derives from the role", () => {
     // the crediting side IS the killer's derived team — no independent Rojo/Azul pick can disagree
     expect(teamForRole("drone")).toBe(0);
     expect(teamForRole("drone")).not.toBe(teamForRole("human"));
+  });
+});
+
+describe("playerRoster — drops AI-bot avatars (negative ids)", () => {
+  const row = (id: number): ScoreRow => ({ id, team: 0, isHuman: true, kills: 0, assists: 0, deaths: 0, you: false });
+
+  it("removes negative-id rows and keeps the survivors in order", () => {
+    const out = playerRoster([-3, -1, 0, 2, 5].map(row));
+    expect(out.map((r) => r.id)).toEqual([0, 2, 5]);
+  });
+
+  it("keeps an all-positive roster unchanged", () => {
+    const rows = [1, 2, 3].map(row);
+    expect(playerRoster(rows)).toEqual(rows);
+  });
+
+  it("keeps id 0 — the offline local player (net.id is 0 before the relay hello)", () => {
+    expect(playerRoster([row(0)]).map((r) => r.id)).toEqual([0]);
+  });
+
+  it("returns [] for an all-negative input", () => {
+    expect(playerRoster([-1, -2, -60].map(row))).toEqual([]);
   });
 });
