@@ -8,6 +8,10 @@ import { instanceModel, pickAction, type ModelInstance } from "../engine/modelLo
 
 export const MAX_HP = 100;
 
+/** Yaw (radians) that makes a +Z-facing model point along the XZ velocity (dx,dz). atan2(dx,dz) maps the
+ *  model's forward (+Z) onto the movement direction. Pure. */
+export function facingYawFromVelocity(dx: number, dz: number): number { return Math.atan2(dx, dz); }
+
 // Rigged + animated glTF avatars (soldier = "Soldier.glb" by kupvom CC-BY 4.0; drone near-LOD/preview =
 // RobotExpressive.glb) — replace the procedural rig/quadcopter when loaded; fall back to procedural on any
 // load failure. Scale/offset/facing/clip names live in MODEL_CONFIGS (avatarModels.ts).
@@ -58,6 +62,8 @@ const HUMAN_RUN = 7.5;         // matches Walker RUN — scales the leg swing am
 const KIN_POS = { x: 0, y: 0, z: 0 };
 const NEAREST = { dist: 0, x: 0, z: 0 };
 const TARGET_POOL: { id: number; x: number; y: number; z: number; hp: number; maxHp: number; aimX?: number; aimZ?: number }[] = [];
+const UP = new THREE.Vector3(0, 1, 0);
+const FACE_Q = new THREE.Quaternion(); // yaw-only scratch: face an identity-quat bot along its velocity (no per-drone/frame alloc)
 
 // --- Drone: detailed military quadcopter (~0.95 m span) ---
 const D_CORE = new THREE.BoxGeometry(0.34, 0.12, 0.52);          // fuselage
@@ -270,8 +276,14 @@ export class RemoteDrones {
     for (const d of this.drones.values()) {
       // a normal step between 20 Hz samples is < ~1 m; a jump this big is a respawn/teleport → snap it.
       const f = d.drone.position.distanceToSquared(d.targetPos) > SNAP_DIST * SNAP_DIST ? 1 : k;
-      // DRONE: full orientation (it banks/rolls) straight from the camera quaternion.
-      d.drone.position.lerp(d.targetPos, f); d.drone.quaternion.slerp(d.targetQuat, f);
+      // DRONE: PvP drones broadcast a real quaternion (bank/roll) → use it; AI bots send identity (no
+      // orientation) → face their travel direction so the swarm doesn't all point +Z and slide sideways.
+      const vdx = d.targetPos.x - d.drone.position.x, vdz = d.targetPos.z - d.drone.position.z; // pre-lerp heading
+      const moving = vdx * vdx + vdz * vdz > 1e-4; // speed gate: a hovering bot holds its last facing (no jitter spin)
+      d.drone.position.lerp(d.targetPos, f);
+      if (Math.abs(d.targetQuat.w) > 0.9999) { // w≈±1 ⇒ identity quat ⇒ no real orientation given
+        if (moving) { FACE_Q.setFromAxisAngle(UP, facingYawFromVelocity(vdx, vdz)); d.drone.quaternion.slerp(FACE_Q, f); } // smooth turn toward velocity
+      } else d.drone.quaternion.slerp(d.targetQuat, f); // PvP drone: use its broadcast orientation (unchanged)
       if (!d.isHuman) for (const r of d.rotors) r.rotation.y += dt * 45; // spinning props → a live copter
       // HUMAN: the body turns by YAW only (stays upright); the head+arms+rifle pitch; legs walk.
       const h = d.human, st = stanceInfo(d.stance);

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import * as THREE from "three";
-import { RemoteDrones } from "../src/net/remoteDrones";
+import { RemoteDrones, facingYawFromVelocity } from "../src/net/remoteDrones";
 import type { Physics } from "../src/engine/physics";
 
 // a HUMAN upsert kicks off the soldier glTF load; node has no asset server → stub the loader (null = "load
@@ -55,6 +55,15 @@ describe("remote peer interpolation (smooth multiplayer)", () => {
     r.prune(t0 + 5000); expect(r.count).toBe(1); // 5 s gap → still shown (the heartbeat window)
     r.prune(t0 + 9000); expect(r.count).toBe(0); // 9 s silent → pruned (genuine disconnect)
   });
+});
+
+describe("facingYawFromVelocity (RND-A2: AI bots face where they fly)", () => {
+  const P = Math.PI;
+  it("faces +Z for forward (0,1) → yaw 0", () => { expect(facingYawFromVelocity(0, 1)).toBeCloseTo(0, 6); });
+  it("faces +X for right (1,0) → yaw π/2", () => { expect(facingYawFromVelocity(1, 0)).toBeCloseTo(P / 2, 6); });
+  it("faces −Z for back (0,-1) → yaw ±π", () => { expect(Math.abs(facingYawFromVelocity(0, -1))).toBeCloseTo(P, 6); });
+  it("faces −X for left (-1,0) → yaw −π/2", () => { expect(facingYawFromVelocity(-1, 0)).toBeCloseTo(-P / 2, 6); });
+  it("is finite (no NaN) at zero velocity (atan2(0,0)=0)", () => { expect(facingYawFromVelocity(0, 0)).toBe(0); });
 });
 
 describe("peer aim → AI targets (co-op dodge parity, CBT-H6)", () => {
