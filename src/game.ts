@@ -44,7 +44,7 @@ import { Net, type NetMsg } from "./net/net";
 import { RemoteDrones, MAX_HP } from "./net/remoteDrones";
 import { assignRole, roleWeapon, classMaxHp, classLoadout, classMove, classStats, defaultClass, teamForRole, TEAM_LABEL, type Role, type Team, type UnitClass } from "./net/roles";
 import { makeRoomCode, emptyLobby, applyJoin, applyLeave, applyPick, hostOf, type LobbyState } from "./net/lobby";
-import { AiSwarm, pickTarget, homingStep, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
+import { AiSwarm, pickTarget, homingStep, difficultyMul, type Difficulty, type AiTarget, type AiDrop, type AiBoom, type AiNoise, type AiBreak } from "./net/ai";
 import { respawnDelay, wallBlocks, smokeOccludes, playerSpawn, cardinalPoint, farthestCardinal, WAVE_DIRS, bandageStep, canBeginMatch, beginAddressedToMe, BANDAGE_HEAL, BANDAGE_MAX, BANDAGE_DUR, type Cardinal, type SmokeCloud } from "./net/coop";
 import { WEAPONS, tryFire, reloadMag, reloadDuration, fullAmmo, batteryDrain, BATTERY_MAX, rayHitsSphere, hitZone, HEADSHOT_MULT, meleeHit, bulletFalloff, aiShotDamage, botHitRange, spreadAngle, addBloom, decayBloom, coneSpread, type Weapon, type Ammo } from "./net/weapons";
 import { checkWin, reconcileKills, baseAlert, deathScores, killLimitOnlyState, type MatchState } from "./net/objectives";
@@ -542,7 +542,12 @@ export class Game {
       this.clearTurrets();     // no sentries carried over from a prior run
       this.graceTick = -1;
       // host owns the enemy AI; hold the first wave for a grace window so everyone can get set (pick class, orient)
-      if (this.hosting) { this.swarm = new AiSwarm(); this.aiWaveGap = Game.MATCH_GRACE; }
+      if (this.hosting) {
+        this.swarm = new AiSwarm();
+        // ?diff=easy|normal|hard → swarm difficulty; anything else (or absent) falls through to normal (=1).
+        this.swarm.difficulty = difficultyMul((new URLSearchParams(location.search).get("diff") as Difficulty) || "normal");
+        this.aiWaveGap = Game.MATCH_GRACE;
+      }
     }
     this.audio.ui();
   }

@@ -3,7 +3,7 @@ import {
   seekDir, shouldFire, waveSize, pickTarget, orbitDir, jink, leadAim, spread,
   speedScale, fireCdScale, hpBonus, pickKind, ARCHETYPES, AiSwarm, shouldDrop, homingStep, type AiDrop, type AiKind,
   acquireDelay, type AiFire,
-  dmgScale, archDamage,
+  dmgScale, archDamage, difficultyMul,
   pickThreatTarget, beingAimedAt, separation, shouldBoom, applyHeal, type AiBoom,
   beliefAccuracy, beliefGoal, pickAudible, holdMult, shouldSuppress, searchPoint, openingSeek, type AiNoise, type AiBreak,
 } from "../src/net/ai";
@@ -575,5 +575,46 @@ describe("enemy AI — grid collision (bots don't fly through walls)", () => {
     const x0 = s.list[0].x;
     for (let i = 0; i < 40; i++) s.tick(0.05, [{ id: 1, x: 0, y: 0, z: 0 }], () => true, () => 0.5);
     expect(s.list[0].x).toBeLessThan(x0);        // approached the target, no collision no-op regression
+  });
+});
+
+describe("enemy AI — difficulty tiers (single multiplier, normal = 1 = untiered)", () => {
+  it("difficultyMul: easy < 1 < hard, normal is exactly 1, and an unknown value falls to normal", () => {
+    expect(difficultyMul("easy")).toBeLessThan(1);
+    expect(difficultyMul("hard")).toBeGreaterThan(1);
+    expect(difficultyMul("normal")).toBe(1);
+    expect(difficultyMul("bogus" as any)).toBe(1); // invalid ?diff= must map to normal
+  });
+
+  it("spawnWave: hard spawns more bots than easy (both ≥ 1) for identical args", () => {
+    const hardS = new AiSwarm(), easyS = new AiSwarm();
+    hardS.difficulty = difficultyMul("hard");
+    easyS.difficulty = difficultyMul("easy");
+    for (let w = 0; w < 3; w++) {
+      const nh = hardS.spawnWave(0, 0, 30, 5, () => 0.5);
+      const ne = easyS.spawnWave(0, 0, 30, 5, () => 0.5);
+      expect(ne).toBeGreaterThanOrEqual(1);
+      expect(nh).toBeGreaterThan(ne);
+    }
+  });
+
+  it("fires at hard difficulty carry more damage than at easy (same sighted setup)", () => {
+    const fireAt = (d: number): number => {
+      const s = new AiSwarm();
+      s.difficulty = d;
+      s.spawnWave(20, 0, 0, 5, () => 0); // gunners in range, cd 0 — only acquisition gates the first shot
+      let fires: AiFire[] = [];
+      for (let i = 0; i < 8 && fires.length === 0; i++)
+        fires = s.tick(0.1, [{ id: 7, x: 0, y: 1, z: 0 }], () => true, () => 0.5);
+      expect(fires.length).toBeGreaterThan(0);
+      return fires[0].dmg;
+    };
+    expect(fireAt(difficultyMul("hard"))).toBeGreaterThan(fireAt(difficultyMul("easy")));
+  });
+
+  it("DEFAULT IDENTITY: a swarm left at difficulty 1 spawns exactly waveSize(w) bots (normal is a no-op)", () => {
+    const s = new AiSwarm();
+    expect(s.difficulty).toBe(1);
+    for (let w = 0; w < 3; w++) expect(s.spawnWave(0, 0, 30, 5, () => 0.5)).toBe(waveSize(w));
   });
 });

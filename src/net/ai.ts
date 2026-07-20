@@ -77,6 +77,11 @@ export function waveSize(wave: number, base = 5, cap = 60): number {
   return Math.min(cap, Math.ceil(base * Math.pow(1.6, Math.max(0, wave))));
 }
 
+export type Difficulty = "easy" | "normal" | "hard";
+/** Swarm difficulty as a single multiplier (>1 harder): scales wave size, speed, fire rate, accuracy, damage.
+ *  normal = 1 → byte-identical to the untiered swarm. Pure. */
+export function difficultyMul(d: Difficulty): number { return d === "easy" ? 0.7 : d === "hard" ? 1.35 : 1; }
+
 /** Per-wave difficulty ramps (pure, bounded — BRUTAL: higher caps so late waves are punishing). */
 export function speedScale(wave: number): number { return 1 + Math.min(1.6, Math.max(0, wave) * 0.08); }
 export function fireCdScale(wave: number): number { return 1 / (1 + Math.min(2.2, Math.max(0, wave) * 0.1)); }
@@ -302,6 +307,8 @@ export class AiSwarm {
   private nextId = 1;
   private t = 0;
   wave = 0;
+  /** Difficulty multiplier (see difficultyMul): >1 harder. 1 = normal = byte-identical to the untiered swarm. */
+  difficulty = 1;
   /** Swarm blackboard: where ANY bot last saw or heard a target. Never-perceived bots advance to it (so the wave
    *  converges on the last contact instead of idling), and it's the low-confidence belief fallback. t < 0 = none. */
   private lastContact = { x: 0, z: 0, t: -1 };
@@ -341,7 +348,7 @@ export class AiSwarm {
    *  (hpBonus) and introduce the harder archetypes. Returns the number spawned. */
   spawnWave(cx: number, cz: number, radius: number, y: number, rng: () => number = Math.random): number {
     const w = this.wave++;
-    const n = waveSize(w);
+    const n = Math.max(1, Math.round(waveSize(w) * this.difficulty));
     const bonus = hpBonus(w);
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 + w;
@@ -386,7 +393,7 @@ export class AiSwarm {
     this.t += dt;
     const fires: AiFire[] = [];
     if (targets.length === 0) return fires;
-    const sp = speedScale(this.wave), fcd = fireCdScale(this.wave), sprd = spread(this.wave);
+    const sp = speedScale(this.wave), fcd = fireCdScale(this.wave), sprd = spread(this.wave) / this.difficulty;
     const lerpK = Math.min(1, dt * 2.2); // height-lerp factor — loop-invariant, hoisted out of the per-bot loop
 
     // Spatial hash of bot positions (rebuilt each tick into POOLED arrays → zero per-tick Map/array allocation).
@@ -491,7 +498,7 @@ export class AiSwarm {
       mvx += sepx * 1.4; mvz += sepz * 1.4;                // stronger push → they layer around you, not stack
 
       const ml = Math.hypot(mvx, mvz) || 1;
-      const speed = a.speed * sp;
+      const speed = a.speed * sp * this.difficulty;
       // COLLISION: don't fly through walls/trees. March the move in sub-voxel steps (so a fast late-wave bot
       // can't tunnel a thin wall), sliding along whichever axis stays clear; a fully-blocked step stops the
       // horizontal advance and flags `blocked` so the bot climbs OVER the obstacle below.
@@ -535,20 +542,20 @@ export class AiSwarm {
       b.cd -= dt;
       const heardBelief = b.ba < 1 && perceived && age < 1.5; // a recent noise fix we haven't confirmed by sight
       if (b.kind !== "kamikaze" && canSee && b.sacq >= acquireDelay(this.wave) && shouldFire(distXZ, b.cd, this.RANGE)) {
-        b.cd = a.fireCd * fcd;
+        b.cd = a.fireCd * fcd / this.difficulty;
         const aim = leadAim(b.x, b.y, b.z, t.x, aimY, t.z, t.vx ?? 0, t.vz ?? 0, this.PROJ);
         const fdx = aim[0] + (aimRng() - 0.5) * 2 * sprd;
         const fdy = aim[1] + (aimRng() - 0.5) * 2 * sprd;
         const fdz = aim[2] + (aimRng() - 0.5) * 2 * sprd;
         const fl = Math.hypot(fdx, fdy, fdz) || 1;
-        fires.push({ id: b.id, x: b.x, y: b.y, z: b.z, dx: fdx / fl, dy: fdy / fl, dz: fdz / fl, targetId: t.id, dmg: archDamage(b.kind, this.wave) });
+        fires.push({ id: b.id, x: b.x, y: b.y, z: b.z, dx: fdx / fl, dy: fdy / fl, dz: fdz / fl, targetId: t.id, dmg: archDamage(b.kind, this.wave) * this.difficulty });
       } else if (!canSee && shouldSuppress(b.kind, heardBelief, b.cd) && aimRng() < 0.15) {
-        b.cd = a.fireCd * fcd;
+        b.cd = a.fireCd * fcd / this.difficulty;
         const aim = seekDir(b.x, b.y, b.z, gx, aimY, gz);   // toward the HEARD point, no velocity lead
         const w = sprd * 3;                                 // sprays a rough area, doesn't track
         const fdx = aim[0] + (aimRng() - 0.5) * 2 * w, fdy = aim[1] + (aimRng() - 0.5) * 2 * w, fdz = aim[2] + (aimRng() - 0.5) * 2 * w;
         const fl = Math.hypot(fdx, fdy, fdz) || 1;
-        fires.push({ id: b.id, x: b.x, y: b.y, z: b.z, dx: fdx / fl, dy: fdy / fl, dz: fdz / fl, targetId: b.bt >= 0 ? b.bt : t.id, dmg: archDamage(b.kind, this.wave), blind: true });
+        fires.push({ id: b.id, x: b.x, y: b.y, z: b.z, dx: fdx / fl, dy: fdy / fl, dz: fdz / fl, targetId: b.bt >= 0 ? b.bt : t.id, dmg: archDamage(b.kind, this.wave) * this.difficulty, blind: true });
       }
 
       b.gcd -= dt;
