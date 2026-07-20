@@ -60,7 +60,7 @@ IDs por cluster: **NET** (red/PvP), **CBT** (combate), **RND** (render/perf/mode
 
 ### P1 — Gameplay feel (IA drones · armas · PvP)
 
-- [ ] CBT-C3 · Armas hitscan sin recoil/spread/bloom/falloff → láser a 220 m — `src/game.ts:2349-2356`, `src/net/weapons.ts:98`. Recoil por arma + bloom acumulado aplicado a la dirección real + falloff MG/LMG.
+- [x] CBT-C3 · Armas hitscan sin dispersión → láser pinpoint a 220 m. **HECHO (c242f6b):** bloom acumulado por arma perturba la dirección real (tracer+hitscan+broadcast), crece al disparar y decae; ADS lo aprieta. coneSpread/spreadAngle/addBloom/decayBloom puras+testeadas; sniper pinpoint; determinista. _(Recoil VISUAL de cámara ya existía vía kick/trauma; queda pendiente subir su intensidad si se desea — CBT-C3b.)_
 - [ ] CBT-H2 · Sin pathfinding real; "trepar" deja bots varados en techos/muros — `src/net/ai.ts:490-517`. Navgrid/flow-field grueso alrededor de footprints para rutear lateral.
 - [ ] CBT-H3 · Daño IA es magic `4` plano sin arquetipo/distancia/wave — `src/game.ts:664,666`. Daño en `ARCHETYPES` + escala por wave + falloff.
 - [ ] CBT-H4 · Recargas instantáneas sin tiempo/lockout → sin tensión — `src/net/weapons.ts:114-129`, `src/game.ts:1081-1092`. Duración de recarga que bloquea disparo + anim/sonido.
@@ -136,3 +136,4 @@ _(cada ciclo añade una línea: `Ciclo N | fecha | ítem | commit | gate | notas
 - Ciclo 4 | 2026-07-19 | NET-M1+M2 (scoring/win dvh) | 4689c7a | tsc0·vitest463·review-adversarial(1 fix UI)·smoke-OK | deathScores + killLimitOnlyState puras; review adversarial pescó base-💥 falsa en HUD (obj 1→2). Fable5.
 - Ciclo 5 | 2026-07-19 | UX-M3 (reset transitorio) | c104a37 | tsc0·vitest463·auto-review-cross-model·smoke-OK | resetTransientCombatState en beginMatch; sin test unitario (limpieza imperativa Game, fuera de alcance suite). Fable5.
 - Ciclo 6 | 2026-07-19 | NET-C2 (late-join) | 875df24 | tsc0·vitest466·review-adversarial(1 fix hostOf)·smoke-OK | begin dirigido host→joiner + beginAddressedToMe pura; review pescó restart-hijack por hostOf (joiner siembra al host). +1 item NET-C2b. **P0 correctness = COMPLETO.** Fable5.
+- Ciclo 7 | 2026-07-19 | CBT-C3 (dispersión/bloom armas) | c242f6b | tsc0·vitest474·review-adversarial-OK·smoke-OK | **inicia P1 gameplay feel.** coneSpread+bloom puras; review verificó math del cono (unit+cono+sin NaN) y determinismo. +CBT-C3b (recoil visual intensidad). Fable5.
