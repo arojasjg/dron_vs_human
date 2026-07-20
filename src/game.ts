@@ -6,7 +6,7 @@ import { Walker } from "./engine/walker";
 import { Input } from "./engine/input";
 import { PerfGovernor } from "./engine/perfGovernor";
 import { qualityConfig, QUALITY_ORDER, lowerQuality, LOW_FPS, type Quality } from "./engine/quality";
-import { loadSettings, saveSettings, autoSettings, clampViewDist, clampResScale, clampSensitivity, lookSens, type VisualSettings } from "./engine/settings";
+import { loadSettings, saveSettings, autoSettings, clampViewDist, clampResScale, clampSensitivity, clampVolume, lookSens, type VisualSettings } from "./engine/settings";
 import { nextResScaleGpu, nextResScaleFps, RES_MIN } from "./engine/dynamicRes";
 import { shouldRefreshShadows, SHADOW_MOVE_SQ } from "./engine/shadowPolicy";
 import { nextPerfLever } from "./engine/perfLever";
@@ -352,6 +352,7 @@ export class Game {
     this.renderDist = this.settings.viewDist;
     this.resScale = this.settings.resAuto ? 1 : this.settings.resScale;
     lookSens.value = this.settings.sensitivity; // apply saved mouse sensitivity to the live look
+    this.audio.setVolume(this.settings.volume);  // apply saved master volume
     saveSettings(this.settings);
     this.applyQualityPreset();
     this.renderer.setViewDistance(this.renderDist);
@@ -1583,6 +1584,14 @@ export class Game {
     saveSettings(this.settings);
   }
 
+  /** Sets the master audio volume [0..1] (settings menu) and persists it. Client-only. */
+  private setVolume(v: number): void {
+    const vol = clampVolume(v);
+    this.settings.volume = vol;
+    this.audio.setVolume(vol);
+    saveSettings(this.settings);
+  }
+
   /** Auto resolution ON → the dynamic-res controller + quality ladder manage performance (hold 60 fps). OFF →
    *  the player fixes resolution + quality; neither auto-system touches them. Freezes res at the current scale. */
   private setResAuto(on: boolean): void {
@@ -1608,6 +1617,7 @@ export class Game {
     this.renderDist = this.settings.viewDist;
     this.resScale = 1;
     lookSens.value = this.settings.sensitivity; // auto resets sensitivity to default (1)
+    this.audio.setVolume(this.settings.volume);  // auto resets volume to default (1)
     saveSettings(this.settings);
     this.applyQualityPreset();
     this.interiorLights?.build(placedBuildings(), this.interiorLightBudget());
@@ -1626,6 +1636,7 @@ export class Game {
       setResScale: (s) => this.setResScale(s),
       setViewDist: (d) => this.setViewDist(d),
       setSensitivity: (v) => this.setSensitivity(v),
+      setVolume: (v) => this.setVolume(v),
       auto: () => this.autoDetect(),
     });
   }

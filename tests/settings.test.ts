@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
-  loadSettings, saveSettings, autoSettings, clampViewDist, clampResScale, clampSensitivity,
+  loadSettings, saveSettings, autoSettings, clampViewDist, clampResScale, clampSensitivity, clampVolume,
   DEFAULT_SETTINGS, VIEW_MIN, VIEW_MAX, RES_MIN_MANUAL, SENS_MIN, SENS_MAX, type VisualSettings,
 } from "../src/engine/settings";
 
@@ -29,7 +29,7 @@ describe("visual settings — pure, validated model", () => {
   });
 
   it("round-trips a valid settings object through save → load", () => {
-    const s: VisualSettings = { quality: "alto", resAuto: false, resScale: 0.75, viewDist: 120, sensitivity: 2.5 };
+    const s: VisualSettings = { quality: "alto", resAuto: false, resScale: 0.75, viewDist: 120, sensitivity: 2.5, volume: 0.5 };
     saveSettings(s);
     expect(loadSettings()).toEqual(s);
   });
@@ -54,12 +54,12 @@ describe("visual settings — pure, validated model", () => {
   });
 
   it("saveSettings keeps the legacy 'quality' key in sync (renderer reads it at boot)", () => {
-    saveSettings({ quality: "bajo", resAuto: true, resScale: 1, viewDist: 100, sensitivity: 1 });
+    saveSettings({ quality: "bajo", resAuto: true, resScale: 1, viewDist: 100, sensitivity: 1, volume: 1 });
     expect(localStorage.getItem("quality")).toBe("bajo");
   });
 
   it("autoSettings detects the preset from the GPU string and hands resolution to Auto", () => {
-    expect(autoSettings("Google SwiftShader")).toEqual({ quality: "bajo", resAuto: true, resScale: 1, viewDist: DEFAULT_SETTINGS.viewDist, sensitivity: 1 });
+    expect(autoSettings("Google SwiftShader")).toEqual({ quality: "bajo", resAuto: true, resScale: 1, viewDist: DEFAULT_SETTINGS.viewDist, sensitivity: 1, volume: 1 });
     expect(autoSettings("NVIDIA GeForce RTX 4090").quality).toBe("medio");
     expect(autoSettings("anything").resAuto).toBe(true);
   });
@@ -77,8 +77,30 @@ describe("visual settings — pure, validated model", () => {
     expect(autoSettings("anything").sensitivity).toBe(1);
   });
 
+  it("clamps volume to [0,1], rejects NaN → 1, and rounds to 2 decimals", () => {
+    expect(clampVolume(2)).toBe(1);       // above max → 1
+    expect(clampVolume(-0.5)).toBe(0);    // below min → 0
+    expect(clampVolume(NaN)).toBe(1);     // garbage → 1 (the invariant default)
+    expect(clampVolume(0.333)).toBe(0.33); // rounded to 2 decimals
+    expect(clampVolume(1)).toBe(1);       // 1 stays 1 → loudness byte-identical
+  });
+
+  it("INVARIANT: default volume is 1 so loudness is unchanged for a player who never touches it", () => {
+    expect(DEFAULT_SETTINGS.volume).toBe(1);
+    expect(autoSettings("anything").volume).toBe(1);
+  });
+
+  it("round-trips volume through save → load, and defaults to 1 when absent / garbage", () => {
+    saveSettings({ quality: "medio", resAuto: true, resScale: 1, viewDist: 100, sensitivity: 1, volume: 0.35 });
+    expect(loadSettings().volume).toBe(0.35);
+    localStorage.setItem("visualSettings", JSON.stringify({ quality: "medio" })); // no volume field
+    expect(loadSettings().volume).toBe(1);
+    localStorage.setItem("visualSettings", JSON.stringify({ volume: "loud" })); // garbage → 1
+    expect(loadSettings().volume).toBe(1);
+  });
+
   it("round-trips sensitivity through save → load, and defaults to 1 when absent / garbage", () => {
-    saveSettings({ quality: "medio", resAuto: true, resScale: 1, viewDist: 100, sensitivity: 3.2 });
+    saveSettings({ quality: "medio", resAuto: true, resScale: 1, viewDist: 100, sensitivity: 3.2, volume: 1 });
     expect(loadSettings().sensitivity).toBe(3.2);
     localStorage.setItem("visualSettings", JSON.stringify({ quality: "medio" })); // no sensitivity field
     expect(loadSettings().sensitivity).toBe(1);

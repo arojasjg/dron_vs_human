@@ -19,11 +19,17 @@ const SHOT_SAMPLE: Record<string, string> = {
 
 const DIST_CURVES = new Map<number, Float32Array<ArrayBuffer>>(); // memoized WaveShaper curves per shape amount
 
+const MASTER_BASE = 0.62; // current master level → volume 1 maps here (byte-identical to the old hardcoded gain)
+
+/** Perceptual volume curve: v² gives the ear finer control at the quiet end. Pure, clamped, monotonic. */
+export function volumeCurve(v: number): number { return v <= 0 ? 0 : v >= 1 ? 1 : v * v; }
+
 export class GameAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private noiseBuf: AudioBuffer | null = null;
   private muted = false;
+  private vol = 1;                 // master-volume setting [0,1] (persisted); scales MASTER_BASE via volumeCurve
   private reverbSend: GainNode | null = null; // world sounds tap this for a spatial tail
   private lowAudio = false;       // "bajo" preset: bypass the reverb convolver (heaviest audio-thread cost)
   private activeVoices = 0;       // live sample voices — capped so fire spam can't stack unbounded nodes
@@ -44,7 +50,7 @@ export class GameAudio {
       if (!AC) return;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = 0.62;
+      this.master.gain.value = MASTER_BASE * volumeCurve(this.vol); // apply any volume set before lazy init (vol 1 → 0.62)
       // Master-bus compressor: glues the mix and TAMES PEAKS when many sounds stack (a loud shot/blast ducks the
       // running sum instead of clipping) — the "ducking" glue for a busy battle. Cheap, always on.
       const comp = this.ctx.createDynamicsCompressor();
@@ -107,8 +113,14 @@ export class GameAudio {
 
   toggleMute(): boolean {
     this.muted = !this.muted;
-    if (this.master) this.master.gain.value = this.muted ? 0 : 0.62;
+    if (this.master) this.master.gain.value = this.muted ? 0 : MASTER_BASE * volumeCurve(this.vol); // unmute restores the SET volume
     return this.muted;
+  }
+
+  /** Master-volume setting [0,1] (caller clamps). Scales the one master gain; null-guards the headless env. */
+  setVolume(v: number): void {
+    this.vol = v;
+    if (this.master && !this.muted) this.master.gain.value = MASTER_BASE * volumeCurve(this.vol);
   }
 
   /** Low-audio mode (weak GPU / "bajo"): drop the reverb convolver — the single heaviest audio cost. */
